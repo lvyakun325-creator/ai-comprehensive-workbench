@@ -2,8 +2,11 @@
 
 import { useState } from "react";
 import { ControlDesk } from "./components/ControlDesk";
+import { AgentDirectory } from "./components/AgentDirectory";
+import { AgentWorkspace } from "./components/AgentWorkspace";
 import { PreviewToast } from "./components/PreviewToast";
 import { WorkbenchShell } from "./components/WorkbenchShell";
+import { getAgentById } from "./lib/agent-catalog.mjs";
 import {
   createInitialState,
   navigateTo,
@@ -28,9 +31,32 @@ export default function Home() {
     window.setTimeout(() => setToast(""), 2200);
   };
 
+  const activeAgent = state.activeAgentId
+    ? getAgentById(state.activeAgentId)
+    : null;
+
   const content = (() => {
+    if (state.view === "agent" && activeAgent) {
+      return (
+        <AgentWorkspace
+          agent={activeAgent}
+          onBack={() => setState(navigateTo(state, "agents"))}
+          onPreview={showPreview}
+        />
+      );
+    }
+
     if (state.view === "control") {
-      return <ControlDesk onOpenAgent={(agentId) => setState(openAgent(state, agentId))} onPreview={showPreview} />;
+      return (
+        <>
+          <ControlDesk onOpenAgent={(agentId) => setState(openAgent(state, agentId))} onPreview={showPreview} />
+          <AgentDirectory onOpenAgent={(agentId) => setState(openAgent(state, agentId))} />
+        </>
+      );
+    }
+
+    if (state.view === "agents") {
+      return <AgentDirectory onOpenAgent={(agentId) => setState(openAgent(state, agentId))} />;
     }
 
     if (state.view === "settings") {

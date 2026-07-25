@@ -45,6 +45,10 @@ test("server-renders the AI workspace interface", async () => {
   assert.match(html, /规划本月内容/);
   assert.match(html, /拆解竞品账号/);
   assert.match(html, /复盘上周数据/);
+  assert.match(html, /9 个独立 Agent 项目/);
+  assert.match(html, /项目隔离已开启/);
+  assert.match(html, /只会操作本项目资料/);
+  assert.match(html, /进入独立项目/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
