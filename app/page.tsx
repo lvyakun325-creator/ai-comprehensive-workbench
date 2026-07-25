@@ -4,7 +4,10 @@ import { useState } from "react";
 import { ControlDesk } from "./components/ControlDesk";
 import { AgentDirectory } from "./components/AgentDirectory";
 import { AgentWorkspace } from "./components/AgentWorkspace";
+import { AssetLibrary } from "./components/AssetLibrary";
+import { DataOverview } from "./components/DataOverview";
 import { PreviewToast } from "./components/PreviewToast";
+import { TaskCenter } from "./components/TaskCenter";
 import { WorkbenchShell } from "./components/WorkbenchShell";
 import { getAgentById } from "./lib/agent-catalog.mjs";
 import {
@@ -57,6 +60,18 @@ export default function Home() {
 
     if (state.view === "agents") {
       return <AgentDirectory onOpenAgent={(agentId) => setState(openAgent(state, agentId))} />;
+    }
+
+    if (state.view === "tasks") {
+      return <TaskCenter onPreview={showPreview} />;
+    }
+
+    if (state.view === "assets") {
+      return <AssetLibrary onPreview={showPreview} />;
+    }
+
+    if (state.view === "analytics") {
+      return <DataOverview />;
     }
 
     if (state.view === "settings") {

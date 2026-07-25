@@ -235,6 +235,123 @@ button {
   box-shadow: 0 28px 90px rgba(43, 66, 110, 0.09);
 }
 
+.task-center,
+.asset-library,
+.data-overview {
+  min-height: 590px;
+  padding: clamp(32px, 5vw, 64px);
+  border: 1px solid rgba(220, 225, 234, 0.86);
+  border-radius: 30px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 28px 90px rgba(43, 66, 110, 0.09);
+}
+
+.task-capacity {
+  padding: 9px 12px;
+  border-radius: 999px;
+  background: #f0f5ff;
+  color: var(--blue-dark);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.task-filters,
+.asset-group-grid,
+.task-list,
+.control-summaries,
+.metric-grid {
+  display: grid;
+  gap: 14px;
+  margin-top: 28px;
+}
+
+.task-filters {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.task-filters button {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.task-list,
+.asset-group-grid,
+.control-summaries,
+.metric-grid {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.task-card,
+.asset-group,
+.handoff-card,
+.control-summaries article,
+.metric-grid article {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: #fff;
+  text-align: left;
+}
+
+.task-card,
+.asset-group,
+.handoff-card {
+  cursor: pointer;
+}
+
+.task-card span,
+.task-card small,
+.asset-group small,
+.handoff-card span,
+.handoff-card em,
+.control-summaries small,
+.metric-grid small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-card strong,
+.asset-group strong,
+.handoff-card b,
+.control-summaries strong,
+.metric-grid strong {
+  display: block;
+  margin: 8px 0;
+}
+
+.handoff-card {
+  width: 100%;
+  margin-top: 18px;
+}
+
+.handoff-card em {
+  color: var(--blue-dark);
+  font-style: normal;
+}
+
+.data-overview > h2 {
+  margin: 14px 0 8px;
+  font-family: "Songti SC", "STSong", serif;
+  font-size: clamp(32px, 4vw, 48px);
+  font-weight: 500;
+}
+
+.data-overview > p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.metric-grid strong {
+  color: var(--blue-dark);
+  font-size: 30px;
+}
+
 .control-hero {
   max-width: 740px;
 }

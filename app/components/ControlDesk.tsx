@@ -48,6 +48,24 @@ export function ControlDesk({ onPreview }: ControlDeskProps) {
           复盘上周数据
         </button>
       </div>
+
+      <div className="control-summaries" aria-label="任务与成果预览摘要">
+        <article>
+          <span>任务调度预览</span>
+          <strong>运行中 3 · 排队中 2</strong>
+          <small>待人工确认后才会进入执行阶段</small>
+        </article>
+        <article>
+          <span>成果交接预览</span>
+          <strong>公共资产只读</strong>
+          <small>跨 Agent 成果仅提供只读副本</small>
+        </article>
+        <article>
+          <span>经营数据预览</span>
+          <strong>内容产能 · Agent 调用量</strong>
+          <small>全部为模拟数据，不读取真实经营数据</small>
+        </article>
+      </div>
     </section>
   );
 }
