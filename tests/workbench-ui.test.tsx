@@ -92,7 +92,7 @@ test("switches primary views and keeps system settings in the mobile navigation"
   assert.ok(screen.getByRole("heading", { name: "系统设置" }));
 });
 
-test("switches Agent tabs, isolates model choices and shows design-preview feedback", async () => {
+test("keeps Agent model choices isolated while content matrix opens its intake preview", async () => {
   const user = userEvent.setup({ document });
   render(<Home />);
 
@@ -102,10 +102,7 @@ test("switches Agent tabs, isolates model choices and shows design-preview feedb
     screen.getByRole("button", { name: "Agent 对话" }).getAttribute("aria-current"),
     "page",
   );
-  assert.match(
-    screen.getByRole("status", { name: "设计预览提示" }).textContent ?? "",
-    /Agent 对话将在真实 Agent 接入后启用/,
-  );
+  assert.ok(screen.getByRole("heading", { name: "企业矩阵基建诊断表" }));
 
   await user.click(screen.getByRole("button", { name: "Agent 配置" }));
   assert.ok(
@@ -135,6 +132,61 @@ test("switches Agent tabs, isolates model choices and shows design-preview feedb
       .getByRole("button", { name: /Anthropic Claude 系列/ })
       .getAttribute("aria-pressed"),
     "false",
+  );
+});
+
+test("content matrix Agent collects intake details before marking diagnostic materials ready", async () => {
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: /内容矩阵 Agent/ }));
+  assert.ok(screen.getByText("matrix-designer 已安装"));
+  await user.click(screen.getByRole("button", { name: "开始矩阵诊断" }));
+
+  assert.equal(
+    screen.getByRole("button", { name: "Agent 对话" }).getAttribute("aria-current"),
+    "page",
+  );
+  assert.ok(screen.getByRole("heading", { name: "企业矩阵基建诊断表" }));
+  assert.match(screen.getByText(/必填完成度/).textContent ?? "", /0\s*\/\s*12/);
+
+  await user.click(screen.getByRole("button", { name: "提交诊断" }));
+  assert.match(screen.getByRole("alert").textContent ?? "", /主攻平台/);
+  assert.match(screen.getByRole("alert").textContent ?? "", /产品\/服务描述/);
+
+  await user.click(screen.getByLabelText("小红书"));
+  await user.type(screen.getByLabelText("产品/服务描述"), "全国可发货的健康生活方式内容服务");
+  await user.click(screen.getByLabelText("全国可做"));
+  await user.click(screen.getByLabelText("获取客资"));
+  await user.click(screen.getByLabelText("不分离"));
+  await user.type(screen.getByLabelText("客户核心顾虑"), "担心内容不实用");
+  await user.click(screen.getByLabelText("有人没钱"));
+  await user.click(screen.getByLabelText("无大 IP"));
+  await user.click(screen.getByLabelText("所有账号必须归属公司"));
+  await user.click(screen.getByLabelText("0到1"));
+  await user.click(screen.getByLabelText("完全不知道竞品怎么玩的"));
+  await user.click(screen.getByLabelText("常规行业"));
+
+  assert.match(screen.getByText(/必填完成度/).textContent ?? "", /12\s*\/\s*12/);
+  await user.click(screen.getByRole("button", { name: "提交诊断" }));
+  assert.match(
+    screen.getByRole("status", { name: "诊断提交状态" }).textContent ?? "",
+    /诊断资料已就绪，等待下一阶段接入模型进行战略分析/,
+  );
+});
+
+test("competitor insight Agent does not show the content matrix intake form", async () => {
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
+  await user.click(screen.getByRole("button", { name: "Agent 对话" }));
+
+  assert.equal(screen.queryByRole("heading", { name: "企业矩阵基建诊断表" }), null);
+  assert.equal(screen.queryByRole("button", { name: "开始矩阵诊断" }), null);
+  assert.match(
+    screen.getByRole("status", { name: "设计预览提示" }).textContent ?? "",
+    /Agent 对话将在真实 Agent 接入后启用/,
   );
 });
 

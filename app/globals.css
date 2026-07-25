@@ -1265,6 +1265,53 @@ button {
 .compliance-status.data-review strong,
 .compliance-status.data-review p { color: #42647f; }
 
+.matrix-overview { display: grid; grid-template-columns: minmax(220px, .75fr) minmax(0, 1.25fr); gap: 14px; }
+.matrix-skill-card,
+.matrix-flow-card,
+.matrix-diagnosis { border: 1px solid #e1e7f0; border-radius: 16px; background: #fff; }
+.matrix-skill-card,
+.matrix-flow-card { padding: 20px; }
+.matrix-output-panel { grid-column: 1 / -1; }
+.matrix-skill-card strong { display: block; color: #5c45b4; font-size: 17px; }
+.matrix-skill-card p,
+.matrix-flow-card p { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.matrix-flow-card ol { margin: 12px 0 18px; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; list-style: none; }
+.matrix-flow-card li { padding: 6px 9px; border-radius: 999px; background: #f4f6fa; color: #788699; font-size: 11px; }
+.matrix-flow-card li span { margin-right: 5px; font-weight: 800; }
+.matrix-flow-card li.current { background: #eeeaff; color: #6249bd; font-weight: 700; }
+.matrix-start-button,
+.matrix-submit-button { border: 0; border-radius: 10px; background: #6249bd; color: #fff; cursor: pointer; font-size: 13px; font-weight: 700; }
+.matrix-start-button { padding: 10px 14px; }
+.matrix-diagnosis { padding: 22px; }
+.matrix-diagnosis-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding-bottom: 18px; border-bottom: 1px solid #e7ebf2; }
+.matrix-diagnosis-heading h2 { margin: 2px 0 6px; font-size: 22px; }
+.matrix-diagnosis-heading p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.matrix-completion { flex: 0 0 auto; padding: 8px 10px; border-radius: 10px; background: #f2efff; color: #5c45b4 !important; font-weight: 700; }
+.matrix-form-grid { margin-top: 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.matrix-choice-group,
+.matrix-text-field { min-width: 0; margin: 0; padding: 13px; border: 1px solid #e1e7f0; border-radius: 12px; color: #3e4b60; font-size: 12px; font-weight: 700; }
+.matrix-choice-group legend { padding: 0 3px; }
+.matrix-choice-group > div { display: grid; gap: 8px; margin-top: 5px; }
+.matrix-choice-group label { display: flex; align-items: flex-start; gap: 7px; color: #647186; font-size: 12px; font-weight: 500; line-height: 1.45; }
+.matrix-choice-group input { margin: 2px 0 0; accent-color: #6249bd; }
+.matrix-text-field { display: grid; gap: 8px; }
+.matrix-text-field input,
+.matrix-text-field textarea { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid #dce3ed; border-radius: 8px; background: #fbfcfe; color: #354156; font: inherit; font-weight: 400; resize: vertical; }
+.matrix-text-field textarea { min-height: 74px; }
+.matrix-optional-fields,
+.matrix-private-assets { margin-top: 14px; padding: 16px; display: grid; grid-template-columns: minmax(0, .72fr) repeat(3, minmax(0, 1fr)); gap: 12px; border: 1px solid #e1e7f0; border-radius: 12px; background: #fbfcfe; }
+.matrix-optional-fields h3,
+.matrix-private-assets h3 { margin: 2px 0 6px; font-size: 14px; }
+.matrix-optional-fields p,
+.matrix-private-assets p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.matrix-private-assets { grid-template-columns: minmax(0, .72fr) minmax(0, 1.28fr); background: #faf8ff; }
+.matrix-private-assets .matrix-choice-group { background: #fff; }
+.matrix-validation,
+.matrix-ready { margin-top: 14px; padding: 11px 13px; border-radius: 10px; font-size: 12px; line-height: 1.5; }
+.matrix-validation { border: 1px solid #f0cf98; background: #fff8ec; color: #8d5817; }
+.matrix-ready { border: 1px solid #b9e4ce; background: #effaf4; color: #25714d; }
+.matrix-submit-button { margin-top: 14px; padding: 11px 16px; }
+
 @keyframes toast-in {
   from {
     transform: translate(-50%, 8px);
@@ -1424,9 +1471,15 @@ button {
   }
 
   .agent-grid,
-  .agent-project-grid {
+  .agent-project-grid,
+  .matrix-overview,
+  .matrix-form-grid,
+  .matrix-optional-fields,
+  .matrix-private-assets {
     grid-template-columns: 1fr;
   }
+
+  .matrix-diagnosis-heading { display: grid; }
 
   .agent-directory {
     grid-template-columns: 1fr;
