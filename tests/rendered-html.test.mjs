@@ -39,6 +39,12 @@ test("server-renders the AI workspace interface", async () => {
   assert.match(html, /Agent 项目/);
   assert.match(html, /任务中心/);
   assert.match(html, /成果资产库/);
+  assert.match(html, /数据概览/);
+  assert.match(html, /模型配置/);
+  assert.match(html, /快捷开始/);
+  assert.match(html, /规划本月内容/);
+  assert.match(html, /拆解竞品账号/);
+  assert.match(html, /复盘上周数据/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
@@ -49,6 +55,10 @@ test("keeps the shell focused on the total-control preview", async () => {
   );
   const shell = await readFile(
     new URL("../app/components/WorkbenchShell.tsx", import.meta.url),
+    "utf8",
+  );
+  const controlDesk = await readFile(
+    new URL("../app/components/ControlDesk.tsx", import.meta.url),
     "utf8",
   );
   const styles = await readFile(
@@ -62,6 +72,7 @@ test("keeps the shell focused on the total-control preview", async () => {
   assert.match(page, /系统设置将在接口与权限阶段启用/);
   assert.match(shell, /const NAV_ITEMS/);
   assert.match(shell, /系统设置/);
+  assert.match(controlDesk, /onClick=\{\(\) => onPreview\(/);
   assert.match(styles, /@media \(max-width: 720px\)/);
   assert.match(styles, /prefers-reduced-motion/);
 });

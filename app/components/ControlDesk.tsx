@@ -35,6 +35,19 @@ export function ControlDesk({ onPreview }: ControlDeskProps) {
           </button>
         </div>
       </div>
+
+      <div className="quick-prompts">
+        <span>快捷开始</span>
+        <button onClick={() => onPreview("已选择：规划本月内容（设计预览）")}>
+          规划本月内容
+        </button>
+        <button onClick={() => onPreview("已选择：拆解竞品账号（设计预览）")}>
+          拆解竞品账号
+        </button>
+        <button onClick={() => onPreview("已选择：复盘上周数据（设计预览）")}>
+          复盘上周数据
+        </button>
+      </div>
     </section>
   );
 }
