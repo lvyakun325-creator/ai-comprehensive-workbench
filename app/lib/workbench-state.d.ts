@@ -31,6 +31,7 @@ export function canAgentAccessProject(
   agentId: string,
   project: ProjectAccess,
 ): boolean;
+export function normalizeTaskConcurrency(concurrency?: number): number;
 export function scheduleTasks<T>(
   tasks: readonly T[],
   concurrency?: number,

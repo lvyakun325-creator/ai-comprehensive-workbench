@@ -9,7 +9,7 @@
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
-    "test": "npm run build && node --test tests/*.test.mjs",
+    "test": "npm run build && tsx --test tests/*.test.mjs tests/*.test.tsx",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
@@ -22,6 +22,8 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
     "@tailwindcss/postcss": "4.2.1",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
@@ -30,8 +32,10 @@
     "drizzle-kit": "0.31.10",
     "eslint": "9.39.4",
     "eslint-config-next": "16.2.6",
+    "jsdom": "^26.1.0",
     "react-server-dom-webpack": "19.2.6",
     "tailwindcss": "4.2.1",
+    "tsx": "^4.20.3",
     "typescript": "5.9.3",
     "vinext": "0.0.50",
     "vite": "8.0.13",

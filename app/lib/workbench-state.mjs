@@ -35,8 +35,14 @@ export function canAgentAccessProject(agentId, project) {
   );
 }
 
+export function normalizeTaskConcurrency(concurrency = 3) {
+  return Number.isFinite(concurrency)
+    ? Math.max(0, Math.min(3, Math.floor(concurrency)))
+    : 3;
+}
+
 export function scheduleTasks(tasks, concurrency = 3) {
-  const effectiveConcurrency = Math.min(concurrency, 3);
+  const effectiveConcurrency = normalizeTaskConcurrency(concurrency);
   return {
     running: tasks.slice(0, effectiveConcurrency),
     queued: tasks.slice(effectiveConcurrency),

@@ -49,6 +49,21 @@ test("caps task concurrency at three", () => {
   assert.deepEqual(result.queued.map((task) => task.id), ["t4", "t5"]);
 });
 
+test("normalizes invalid task concurrency into the zero-to-three integer range", () => {
+  const tasks = ["t1", "t2", "t3", "t4"].map((id) => ({ id }));
+  const cases = [
+    { concurrency: -1, running: [], queued: ["t1", "t2", "t3", "t4"] },
+    { concurrency: Number.NaN, running: ["t1", "t2", "t3"], queued: ["t4"] },
+    { concurrency: 2.8, running: ["t1", "t2"], queued: ["t3", "t4"] },
+  ];
+
+  for (const { concurrency, running, queued } of cases) {
+    const result = scheduleTasks(tasks, concurrency);
+    assert.deepEqual(result.running.map((task) => task.id), running);
+    assert.deepEqual(result.queued.map((task) => task.id), queued);
+  }
+});
+
 test("handoff preview contains no source project write permission", () => {
   assert.deepEqual(
     createHandoffPreview("competitor-insight", "content-matrix", "artifact-12"),

@@ -1,5 +1,6 @@
+import { PREVIEW_TASK_SCHEDULE } from "../lib/workbench-preview.mjs";
+
 type ControlDeskProps = {
-  onOpenAgent: (agentId: string) => void;
   onPreview: (message: string) => void;
 };
 
@@ -52,7 +53,7 @@ export function ControlDesk({ onPreview }: ControlDeskProps) {
       <div className="control-summaries" aria-label="任务与成果预览摘要">
         <article>
           <span>任务调度预览</span>
-          <strong>运行中 3 · 排队中 2</strong>
+          <strong>{PREVIEW_TASK_SCHEDULE.summaryLabel}</strong>
           <small>待人工确认后才会进入执行阶段</small>
         </article>
         <article>

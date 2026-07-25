@@ -49,6 +49,7 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         {PROJECT_TABS.map((tab, index) => (
           <button
             className={activeTab === tab ? "active" : ""}
+            aria-current={activeTab === tab ? "page" : undefined}
             key={tab}
             onClick={() => {
               setActiveTab(tab);
@@ -75,6 +76,24 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
             <span className="panel-label">本项目输出</span>
             <strong>{agent.output}</strong>
             <p>成果会在确认后以只读副本交接给其他项目。</p>
+            <div
+              className={`compliance-status ${agent.complianceRequired ? "requires-review" : "data-review"}`}
+              role="status"
+              aria-label="成果合规状态"
+            >
+              {agent.complianceRequired ? (
+                <>
+                  <strong>待合规检查</strong>
+                  <p>发布前需人工确认</p>
+                  <small>重点检查：诊断、疗效承诺、停换药、绝对化表达风险。</small>
+                </>
+              ) : (
+                <>
+                  <strong>数据口径确认</strong>
+                  <p>当前项目以经营分析为主，仍需人工确认数据口径。</p>
+                </>
+              )}
+            </div>
           </article>
         </div>
       )}

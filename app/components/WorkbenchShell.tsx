@@ -8,13 +8,13 @@ const NAV_ITEMS = [
   ["assets", "成果资产库", "◇"],
   ["analytics", "数据概览", "↗"],
   ["models", "模型配置", "⚙"],
+  ["settings", "系统设置", "⚙"],
 ] as const;
 
 type WorkbenchShellProps = {
   state: WorkbenchState;
   children: ReactNode;
   onNavigate: (view: WorkbenchView) => void;
-  onOpenAgent: (agentId: string) => void;
   onPreview: (message: string) => void;
 };
 
@@ -30,27 +30,26 @@ export function WorkbenchShell({
         <button className="brand-mark" aria-label="返回总控台" onClick={() => onNavigate("control")}>
           <span>A</span>
         </button>
-        <nav className="rail-nav">
-          {NAV_ITEMS.map(([view, label, icon]) => (
-            <button
-              className={`rail-button ${state.view === view ? "active" : ""}`}
-              key={view}
-              aria-label={label}
-              onClick={() => onNavigate(view)}
-            >
-              <span>{icon}</span>
-              <small>{label}</small>
-            </button>
-          ))}
+        <nav className="rail-nav" aria-label="主导航">
+          {NAV_ITEMS.map(([view, label, icon]) => {
+            const isActive =
+              state.view === view ||
+              (view === "agents" && state.view === "agent");
+
+            return (
+              <button
+                className={`rail-button ${view === "settings" ? "rail-settings" : ""} ${isActive ? "active" : ""}`}
+                key={view}
+                aria-current={isActive ? "page" : undefined}
+                aria-label={label}
+                onClick={() => onNavigate(view)}
+              >
+                <span>{icon}</span>
+                <small>{label}</small>
+              </button>
+            );
+          })}
         </nav>
-        <button
-          className={`rail-button rail-bottom ${state.view === "settings" ? "active" : ""}`}
-          aria-label="系统设置"
-          onClick={() => onNavigate("settings")}
-        >
-          <span>⚙</span>
-          <small>系统设置</small>
-        </button>
       </aside>
 
       <div className="workspace">

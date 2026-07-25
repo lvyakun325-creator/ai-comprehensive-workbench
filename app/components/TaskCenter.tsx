@@ -1,26 +1,12 @@
 import { AGENT_PROJECTS } from "../lib/agent-catalog.mjs";
-import { scheduleTasks } from "../lib/workbench-state.mjs";
+import { PREVIEW_TASK_SCHEDULE } from "../lib/workbench-preview.mjs";
+import type { PreviewTaskStatus } from "../lib/workbench-preview.mjs";
 
 type TaskCenterProps = {
   onPreview: (message: string) => void;
 };
 
-type TaskStatus = "running" | "queued" | "approval" | "completed" | "failed" | "paused";
-
-const TASKS: ReadonlyArray<{
-  id: string;
-  agentId: string;
-  title: string;
-  status: TaskStatus;
-}> = [
-  { id: "task-01", agentId: "content-matrix", title: "规划本月内容矩阵", status: "running" },
-  { id: "task-02", agentId: "competitor-insight", title: "拆解竞品内容路径", status: "running" },
-  { id: "task-03", agentId: "topic-planning", title: "整理选题优先级", status: "running" },
-  { id: "task-04", agentId: "title-planning", title: "生成标题方向", status: "queued" },
-  { id: "task-05", agentId: "media-article", title: "准备图文内容包", status: "queued" },
-];
-
-const STATUS_LABELS: Record<TaskStatus, string> = {
+const STATUS_LABELS: Record<PreviewTaskStatus, string> = {
   running: "运行中",
   queued: "排队中",
   approval: "待人工确认",
@@ -30,10 +16,15 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
 };
 
 export function TaskCenter({ onPreview }: TaskCenterProps) {
-  const schedule = scheduleTasks(TASKS, 3);
   const scheduledTasks = [
-    ...schedule.running.map((task) => ({ ...task, status: "running" as const })),
-    ...schedule.queued.map((task) => ({ ...task, status: "queued" as const })),
+    ...PREVIEW_TASK_SCHEDULE.running.map((task) => ({
+      ...task,
+      status: "running" as const,
+    })),
+    ...PREVIEW_TASK_SCHEDULE.queued.map((task) => ({
+      ...task,
+      status: "queued" as const,
+    })),
   ];
 
   return (
@@ -43,7 +34,9 @@ export function TaskCenter({ onPreview }: TaskCenterProps) {
           <span className="eyebrow">TASK ORCHESTRATION</span>
           <h2>任务中心</h2>
         </div>
-        <div className="task-capacity">运行中 3 · 排队中 2 · 最大并发 3</div>
+        <div className="task-capacity">
+          {PREVIEW_TASK_SCHEDULE.capacityLabel}
+        </div>
       </header>
       <div className="task-filters" aria-label="任务状态筛选">
         {["全部", "运行中", "排队中", "待人工确认", "已完成", "失败", "已暂停"].map(

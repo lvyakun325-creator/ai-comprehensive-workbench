@@ -53,7 +53,7 @@ export default function Home() {
     if (state.view === "control") {
       return (
         <>
-          <ControlDesk onOpenAgent={(agentId) => setState(openAgent(state, agentId))} onPreview={showPreview} />
+          <ControlDesk onPreview={showPreview} />
           <AgentDirectory onOpenAgent={(agentId) => setState(openAgent(state, agentId))} />
         </>
       );
@@ -103,7 +103,6 @@ export default function Home() {
       <WorkbenchShell
         state={state}
         onNavigate={(view) => setState(navigateTo(state, view))}
-        onOpenAgent={(agentId) => setState(openAgent(state, agentId))}
         onPreview={showPreview}
       >
         {content}
