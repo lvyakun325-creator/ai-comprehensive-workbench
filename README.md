@@ -4,6 +4,16 @@ A clean full-stack starter running on
 [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
 Drizzle support.
 
+## 当前阶段
+
+当前版本是“总控台 + 九个独立 Agent 项目”的本地 UI 原型。
+
+- 已实现：项目导航、Agent 隔离界面、任务状态、成果交接和模型配置入口。
+- 未实现：真实模型调用、Agent 运行、外部数据抓取、持久化和线上发布。
+- 安全边界：页面不收集或保存 API 密钥，所有执行按钮只显示设计预览提示。
+
+本地预览地址默认为 `http://localhost:3000/`。
+
 ## Prerequisites
 
 - Node.js `>=22.13.0`

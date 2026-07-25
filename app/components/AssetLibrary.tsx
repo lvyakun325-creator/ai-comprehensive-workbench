@@ -29,7 +29,7 @@ export function AssetLibrary({ onPreview }: AssetLibraryProps) {
       </header>
       <div className="asset-group-grid">
         {ASSET_GROUPS.map(([title, description]) => (
-          <button key={title} className="asset-group" onClick={() => onPreview("当前为设计预览，未创建或共享真实成果")}> 
+          <button key={title} className="asset-group" onClick={() => onPreview("当前为设计预览，未创建或共享真实成果")}>
             <strong>{title}</strong>
             <small>{description}</small>
           </button>

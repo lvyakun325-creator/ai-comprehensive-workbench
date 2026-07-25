@@ -98,6 +98,13 @@ test("keeps the shell focused on the total-control preview", async () => {
   assert.match(shell, /const NAV_ITEMS/);
   assert.match(shell, /系统设置/);
   assert.match(controlDesk, /onClick=\{\(\) => onPreview\(/);
+  assert.match(styles, /\.agent-directory\s*\{/);
+  assert.match(styles, /grid-template-columns:\s*repeat\(3/);
+  assert.match(styles, /\.isolation-banner\s*\{/);
+  assert.match(styles, /\.task-center\s*\{/);
+  assert.match(styles, /\.asset-library\s*\{/);
+  assert.match(styles, /\.data-overview\s*\{/);
+  assert.match(styles, /@media \(max-width: 1020px\)/);
   assert.match(styles, /@media \(max-width: 720px\)/);
   assert.match(styles, /prefers-reduced-motion/);
   assert.match(
