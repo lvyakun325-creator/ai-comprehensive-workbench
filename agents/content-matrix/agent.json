@@ -1,0 +1,8 @@
+{
+  "agentId": "content-matrix",
+  "displayName": "内容矩阵 Agent",
+  "skills": [
+    "skills/matrix-designer/SKILL.md"
+  ],
+  "status": "installed"
+}
