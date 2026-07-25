@@ -56,9 +56,7 @@ test("server-renders the AI workspace interface", async () => {
   assert.match(html, /只读副本/);
   assert.match(html, /内容产能/);
   assert.match(html, /Agent 调用量/);
-  assert.match(html, /全局可用模型/);
-  assert.match(html, /Agent 默认模型/);
-  assert.match(html, /密钥仅在后续接口阶段通过服务端保存/);
+  assert.doesNotMatch(html, /全局可用模型|Agent 默认模型|密钥仅在后续接口阶段通过服务端保存/);
   assert.doesNotMatch(html, /api[_-]?key\s*[:=]/i);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
@@ -80,14 +78,41 @@ test("keeps the shell focused on the total-control preview", async () => {
     new URL("../app/globals.css", import.meta.url),
     "utf8",
   );
+  const agentWorkspace = await readFile(
+    new URL("../app/components/AgentWorkspace.tsx", import.meta.url),
+    "utf8",
+  );
+  const modelConfigPanel = await readFile(
+    new URL("../app/components/ModelConfigPanel.tsx", import.meta.url),
+    "utf8",
+  );
 
   assert.match(page, /createInitialState/);
   assert.match(page, /navigateTo/);
   assert.match(page, /openAgent/);
   assert.match(page, /系统设置将在接口与权限阶段启用/);
+  assert.match(
+    page,
+    /if \(state\.view === "models"\) \{\s*return <ModelConfigPanel scope="global" onPreview=\{showPreview\} \/>;\s*\}/,
+  );
   assert.match(shell, /const NAV_ITEMS/);
   assert.match(shell, /系统设置/);
   assert.match(controlDesk, /onClick=\{\(\) => onPreview\(/);
   assert.match(styles, /@media \(max-width: 720px\)/);
   assert.match(styles, /prefers-reduced-motion/);
+  assert.match(
+    agentWorkspace,
+    /activeTab === "Agent 配置" \?\s*\(\s*<ModelConfigPanel scope="agent" agentTitle=\{agent\.title\} onPreview=\{onPreview\} \/>/,
+  );
+  assert.match(modelConfigPanel, /scope: "global" \| "agent";/);
+  assert.match(modelConfigPanel, /agentTitle\?: string;/);
+  assert.match(modelConfigPanel, /onPreview: \(message: string\) => void;/);
+  assert.match(
+    modelConfigPanel,
+    /scope === "global" \? "全局可用模型" : `\$\{agentTitle\} · Agent 默认模型`/,
+  );
+  assert.match(modelConfigPanel, /密钥仅在后续接口阶段通过服务端保存，当前页面不收集、不显示。/);
+  assert.match(modelConfigPanel, /onPreview\("当前为设计预览，未填写或保存任何模型密钥"\);/);
+  const props = modelConfigPanel.match(/type ModelConfigPanelProps = \{([\s\S]*?)\n\};/)?.[1] ?? "";
+  assert.doesNotMatch(props, /api[_-]?key|token|credential/i);
 });

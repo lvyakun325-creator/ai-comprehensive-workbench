@@ -107,11 +107,6 @@ export default function Home() {
         onPreview={showPreview}
       >
         {content}
-        {state.view === "control" && (
-          <p>
-            模型配置入口分为全局可用模型与 Agent 默认模型。密钥仅在后续接口阶段通过服务端保存。
-          </p>
-        )}
       </WorkbenchShell>
       <PreviewToast message={toast} />
     </>
