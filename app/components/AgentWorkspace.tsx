@@ -40,16 +40,28 @@ function ChoiceGroup({
   options,
   value,
   onChange,
+  required = false,
+  invalid = false,
 }: {
   legend: string;
   name: string;
   options: Array<[string, string]>;
   value: string;
   onChange: (value: string) => void;
+  required?: boolean;
+  invalid?: boolean;
 }) {
   return (
-    <fieldset className="matrix-choice-group">
-      <legend>{legend}</legend>
+    <fieldset
+      aria-invalid={invalid || undefined}
+      aria-required={required || undefined}
+      className="matrix-choice-group"
+      role="radiogroup"
+    >
+      <legend>
+        {legend}
+        {required ? <span className="matrix-required">（必填）</span> : null}
+      </legend>
       <div>
         {options.map(([optionValue, label]) => (
           <label key={optionValue}>
@@ -87,10 +99,12 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
     ([key]) => !matrixDiagnosis[key]?.trim(),
   );
   const completedMatrixFields = requiredMatrixFields.length - missingMatrixFields.length;
+  const isMatrixFieldInvalid = (key: string) => (
+    matrixSubmitAttempted && !matrixDiagnosis[key]?.trim()
+  );
 
   const updateMatrixDiagnosis = (key: string, value: string) => {
     setMatrixDiagnosis((current) => ({ ...current, [key]: value }));
-    setMatrixSubmitAttempted(false);
     setMatrixReady(false);
   };
 
@@ -170,11 +184,15 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 options={[["xiaohongshu", "小红书"], ["douyin", "抖音"], ["video-account", "视频号"]]}
                 value={matrixDiagnosis.platform ?? ""}
                 onChange={(value) => updateMatrixDiagnosis("platform", value)}
+                required
+                invalid={isMatrixFieldInvalid("platform")}
               />
               <label className="matrix-text-field">
-                产品/服务描述
+                产品/服务描述<span className="matrix-required">（必填）</span>
                 <textarea
                   aria-label="产品/服务描述"
+                  aria-invalid={isMatrixFieldInvalid("product") || undefined}
+                  aria-required="true"
                   onChange={(event) => updateMatrixDiagnosis("product", event.target.value)}
                   placeholder="一句话说明产品、服务或业务"
                   value={matrixDiagnosis.product ?? ""}
@@ -186,6 +204,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 options={[["local", "强同城属性"], ["national", "全国可做"]]}
                 value={matrixDiagnosis.region ?? ""}
                 onChange={(value) => updateMatrixDiagnosis("region", value)}
+                required
+                invalid={isMatrixFieldInvalid("region")}
               />
               <ChoiceGroup
                 legend="终极转化"
@@ -193,6 +213,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 options={[["platform", "平台内直接闭环"], ["lead", "获取客资"], ["private", "导流私域"]]}
                 value={matrixDiagnosis.conversion ?? ""}
                 onChange={(value) => updateMatrixDiagnosis("conversion", value)}
+                required
+                invalid={isMatrixFieldInvalid("conversion")}
               />
               <ChoiceGroup
                 legend="掏钱决策者与实际使用者分离吗？"
@@ -200,11 +222,15 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 options={[["same", "不分离"], ["separate", "分离"]]}
                 value={matrixDiagnosis.decisionMaker ?? ""}
                 onChange={(value) => updateMatrixDiagnosis("decisionMaker", value)}
+                required
+                invalid={isMatrixFieldInvalid("decisionMaker")}
               />
               <label className="matrix-text-field">
-                客户核心顾虑
+                客户核心顾虑<span className="matrix-required">（必填）</span>
                 <textarea
                   aria-label="客户核心顾虑"
+                  aria-invalid={isMatrixFieldInvalid("concerns") || undefined}
+                  aria-required="true"
                   onChange={(event) => updateMatrixDiagnosis("concerns", event.target.value)}
                   placeholder="填写 1-2 个关键顾虑"
                   value={matrixDiagnosis.concerns ?? ""}
@@ -216,6 +242,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 options={[["well-resourced", "有钱有人"], ["people-no-budget", "有人没钱"], ["budget-no-people", "有钱没人"], ["lean", "没钱没人"]]}
                 value={matrixDiagnosis.resources ?? ""}
                 onChange={(value) => updateMatrixDiagnosis("resources", value)}
+                required
+                invalid={isMatrixFieldInvalid("resources")}
               />
               <ChoiceGroup
                 legend="核心 IP 资源"
@@ -223,6 +251,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 options={[["expert", "有极具表达力的创始人/业务专家"], ["none", "无大 IP"]]}
                 value={matrixDiagnosis.ip ?? ""}
                 onChange={(value) => updateMatrixDiagnosis("ip", value)}
+                required
+                invalid={isMatrixFieldInvalid("ip")}
               />
               <ChoiceGroup
                 legend="账号归属权与全员营销意愿"
@@ -230,6 +260,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 options={[["company", "所有账号必须归属公司"], ["open", "允许并鼓励员工用个人身份建号获客"]]}
                 value={matrixDiagnosis.ownership ?? ""}
                 onChange={(value) => updateMatrixDiagnosis("ownership", value)}
+                required
+                invalid={isMatrixFieldInvalid("ownership")}
               />
               <ChoiceGroup
                 legend="当前矩阵阶段"
@@ -237,6 +269,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 options={[["zero-to-one", "0到1"], ["one-to-many", "1到N"]]}
                 value={matrixDiagnosis.stage ?? ""}
                 onChange={(value) => updateMatrixDiagnosis("stage", value)}
+                required
+                invalid={isMatrixFieldInvalid("stage")}
               />
               <ChoiceGroup
                 legend="竞品阵型"
@@ -244,6 +278,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 options={[["ip", "重兵 IP"], ["volume", "铺量战术"], ["official", "官方高举高打"], ["unknown", "完全不知道竞品怎么玩的"]]}
                 value={matrixDiagnosis.competitorFormation ?? ""}
                 onChange={(value) => updateMatrixDiagnosis("competitorFormation", value)}
+                required
+                invalid={isMatrixFieldInvalid("competitorFormation")}
               />
               <ChoiceGroup
                 legend="行业风控"
@@ -251,6 +287,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 options={[["regular", "常规行业"], ["regulated", "强监管行业"]]}
                 value={matrixDiagnosis.risk ?? ""}
                 onChange={(value) => updateMatrixDiagnosis("risk", value)}
+                required
+                invalid={isMatrixFieldInvalid("risk")}
               />
             </div>
 
@@ -276,6 +314,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 options={[["established", "已有大量老客户微信/社群"], ["limited", "几乎没有微信私域沉淀"]]}
                 value={matrixDiagnosis.privateAssets ?? ""}
                 onChange={(value) => updateMatrixDiagnosis("privateAssets", value)}
+                required={requiresPrivateAssets}
+                invalid={requiresPrivateAssets && isMatrixFieldInvalid("privateAssets")}
               />
             </section>
 
@@ -294,6 +334,11 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         </section>
       ) : isContentMatrix && activeTab === "项目总览" ? (
         <div className="matrix-overview">
+          <article className="project-panel matrix-input-panel">
+            <span className="panel-label">本项目输入</span>
+            <strong>{agent.input}</strong>
+            <p>状态：{PROJECT_STATUS}</p>
+          </article>
           <article className="matrix-skill-card">
             <span className="panel-label">已安装技能</span>
             <strong>matrix-designer 已安装</strong>

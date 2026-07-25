@@ -141,6 +141,9 @@ test("content matrix Agent collects intake details before marking diagnostic mat
 
   await user.click(screen.getByRole("button", { name: /内容矩阵 Agent/ }));
   assert.ok(screen.getByText("matrix-designer 已安装"));
+  assert.ok(screen.getByText("本项目输入"));
+  assert.ok(screen.getByText("业务目标、产品、平台与目标人群"));
+  assert.match(screen.getByText(/状态：/).textContent ?? "", /等待接收本项目任务/);
   await user.click(screen.getByRole("button", { name: "开始矩阵诊断" }));
 
   assert.equal(
@@ -153,8 +156,28 @@ test("content matrix Agent collects intake details before marking diagnostic mat
   await user.click(screen.getByRole("button", { name: "提交诊断" }));
   assert.match(screen.getByRole("alert").textContent ?? "", /主攻平台/);
   assert.match(screen.getByRole("alert").textContent ?? "", /产品\/服务描述/);
+  assert.match(
+    screen.getByLabelText("小红书").closest("fieldset")?.textContent ?? "",
+    /主攻平台.*必填/,
+  );
+  assert.equal(
+    screen.getByLabelText("小红书").closest("fieldset")?.getAttribute("aria-required"),
+    "true",
+  );
+  assert.equal(
+    screen.getByLabelText("小红书").closest("fieldset")?.getAttribute("aria-invalid"),
+    "true",
+  );
+  assert.equal(screen.getByLabelText("产品/服务描述").getAttribute("aria-required"), "true");
+  assert.equal(screen.getByLabelText("产品/服务描述").getAttribute("aria-invalid"), "true");
 
   await user.click(screen.getByLabelText("小红书"));
+  assert.doesNotMatch(screen.getByRole("alert").textContent ?? "", /主攻平台/);
+  assert.match(screen.getByRole("alert").textContent ?? "", /产品\/服务描述/);
+  assert.equal(
+    screen.getByLabelText("小红书").closest("fieldset")?.getAttribute("aria-invalid"),
+    null,
+  );
   await user.type(screen.getByLabelText("产品/服务描述"), "全国可发货的健康生活方式内容服务");
   await user.click(screen.getByLabelText("全国可做"));
   await user.click(screen.getByLabelText("获取客资"));
@@ -173,6 +196,36 @@ test("content matrix Agent collects intake details before marking diagnostic mat
     screen.getByRole("status", { name: "诊断提交状态" }).textContent ?? "",
     /诊断资料已就绪，等待下一阶段接入模型进行战略分析/,
   );
+});
+
+test("video account intake requires private assets before it can become ready", async () => {
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: /内容矩阵 Agent/ }));
+  await user.click(screen.getByRole("button", { name: "开始矩阵诊断" }));
+  await user.click(screen.getByLabelText("视频号"));
+  await user.type(screen.getByLabelText("产品/服务描述"), "全国可发货的健康生活方式内容服务");
+  await user.click(screen.getByLabelText("全国可做"));
+  await user.click(screen.getByLabelText("获取客资"));
+  await user.click(screen.getByLabelText("不分离"));
+  await user.type(screen.getByLabelText("客户核心顾虑"), "担心内容不实用");
+  await user.click(screen.getByLabelText("有人没钱"));
+  await user.click(screen.getByLabelText("无大 IP"));
+  await user.click(screen.getByLabelText("所有账号必须归属公司"));
+  await user.click(screen.getByLabelText("0到1"));
+  await user.click(screen.getByLabelText("完全不知道竞品怎么玩的"));
+  await user.click(screen.getByLabelText("常规行业"));
+
+  assert.match(screen.getByText(/必填完成度/).textContent ?? "", /12\s*\/\s*13/);
+  await user.click(screen.getByRole("button", { name: "提交诊断" }));
+  assert.match(screen.getByRole("alert").textContent ?? "", /私域资产/);
+  assert.equal(screen.queryByRole("status", { name: "诊断提交状态" }), null);
+
+  await user.click(screen.getByLabelText("已有大量老客户微信/社群"));
+  assert.match(screen.getByText(/必填完成度/).textContent ?? "", /13\s*\/\s*13/);
+  await user.click(screen.getByRole("button", { name: "提交诊断" }));
+  assert.ok(screen.getByRole("status", { name: "诊断提交状态" }));
 });
 
 test("competitor insight Agent does not show the content matrix intake form", async () => {

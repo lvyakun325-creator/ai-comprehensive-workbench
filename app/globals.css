@@ -1271,6 +1271,7 @@ button {
 .matrix-diagnosis { border: 1px solid #e1e7f0; border-radius: 16px; background: #fff; }
 .matrix-skill-card,
 .matrix-flow-card { padding: 20px; }
+.matrix-input-panel,
 .matrix-output-panel { grid-column: 1 / -1; }
 .matrix-skill-card strong { display: block; color: #5c45b4; font-size: 17px; }
 .matrix-skill-card p,
@@ -1291,6 +1292,7 @@ button {
 .matrix-choice-group,
 .matrix-text-field { min-width: 0; margin: 0; padding: 13px; border: 1px solid #e1e7f0; border-radius: 12px; color: #3e4b60; font-size: 12px; font-weight: 700; }
 .matrix-choice-group legend { padding: 0 3px; }
+.matrix-required { color: #b34a4a; font-weight: 700; }
 .matrix-choice-group > div { display: grid; gap: 8px; margin-top: 5px; }
 .matrix-choice-group label { display: flex; align-items: flex-start; gap: 7px; color: #647186; font-size: 12px; font-weight: 500; line-height: 1.45; }
 .matrix-choice-group input { margin: 2px 0 0; accent-color: #6249bd; }
