@@ -12,7 +12,10 @@ import {
 test("opens only known Agent projects", () => {
   const state = createInitialState();
   assert.deepEqual(state, { view: "control", activeAgentId: null });
-  assert.equal(navigateTo(state, "tasks").view, "tasks");
+  assert.deepEqual(
+    navigateTo({ view: "agent", activeAgentId: "competitor-insight" }, "tasks"),
+    { view: "tasks", activeAgentId: null },
+  );
   assert.equal(openAgent(state, "competitor-insight").activeAgentId, "competitor-insight");
   assert.throws(() => openAgent(state, "unknown"), /Unknown Agent/);
 });
@@ -28,6 +31,20 @@ test("prevents an Agent from accessing another Agent private project", () => {
 test("runs three tasks and queues the rest", () => {
   const tasks = ["t1", "t2", "t3", "t4", "t5"].map((id) => ({ id }));
   const result = scheduleTasks(tasks, 3);
+  assert.deepEqual(result.running.map((task) => task.id), ["t1", "t2", "t3"]);
+  assert.deepEqual(result.queued.map((task) => task.id), ["t4", "t5"]);
+});
+
+test("defaults task concurrency to three", () => {
+  const tasks = ["t1", "t2", "t3", "t4"].map((id) => ({ id }));
+  const result = scheduleTasks(tasks);
+  assert.deepEqual(result.running.map((task) => task.id), ["t1", "t2", "t3"]);
+  assert.deepEqual(result.queued.map((task) => task.id), ["t4"]);
+});
+
+test("caps task concurrency at three", () => {
+  const tasks = ["t1", "t2", "t3", "t4", "t5"].map((id) => ({ id }));
+  const result = scheduleTasks(tasks, 4);
   assert.deepEqual(result.running.map((task) => task.id), ["t1", "t2", "t3"]);
   assert.deepEqual(result.queued.map((task) => task.id), ["t4", "t5"]);
 });

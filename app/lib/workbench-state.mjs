@@ -36,9 +36,10 @@ export function canAgentAccessProject(agentId, project) {
 }
 
 export function scheduleTasks(tasks, concurrency = 3) {
+  const effectiveConcurrency = Math.min(concurrency, 3);
   return {
-    running: tasks.slice(0, concurrency),
-    queued: tasks.slice(concurrency),
+    running: tasks.slice(0, effectiveConcurrency),
+    queued: tasks.slice(effectiveConcurrency),
   };
 }
 
