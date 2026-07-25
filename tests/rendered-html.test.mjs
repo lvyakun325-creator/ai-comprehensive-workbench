@@ -31,15 +31,24 @@ test("server-renders the AI workspace interface", async () => {
   const html = await response.text();
   assert.match(html, /<html lang="zh-CN">/i);
   assert.match(html, /<title>AI 综合工作台<\/title>/i);
-  assert.match(html, /AI 经营助手/);
-  assert.match(html, /九大核心工作台/);
   assert.match(html, /GPT-5\.6/);
+  assert.match(html, /总控 Agent/);
+  assert.match(html, /拆解并分配/);
+  assert.match(html, /最大并发 3/);
+  assert.match(html, /总控台/);
+  assert.match(html, /Agent 项目/);
+  assert.match(html, /任务中心/);
+  assert.match(html, /成果资产库/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
-test("contains all nine requested workbench entries and configuration UI", async () => {
+test("keeps the shell focused on the total-control preview", async () => {
   const page = await readFile(
     new URL("../app/page.tsx", import.meta.url),
+    "utf8",
+  );
+  const shell = await readFile(
+    new URL("../app/components/WorkbenchShell.tsx", import.meta.url),
     "utf8",
   );
   const styles = await readFile(
@@ -47,27 +56,12 @@ test("contains all nine requested workbench entries and configuration UI", async
     "utf8",
   );
 
-  const expectedTools = [
-    "内容矩阵设计",
-    "竞品洞察",
-    "选题策划",
-    "标题策划",
-    "新媒体图文生成器",
-    "超级 AI 写作系统",
-    "爆款拆解与口播生成",
-    "新媒体获客视频工作台",
-    "数据复盘",
-  ];
-
-  for (const tool of expectedTools) {
-    assert.match(page, new RegExp(tool));
-  }
-
-  assert.match(page, /大模型配置/);
-  assert.match(page, /OpenAI/);
-  assert.match(page, /Anthropic/);
-  assert.match(page, /Google AI/);
-  assert.match(page, /DeepSeek/);
+  assert.match(page, /createInitialState/);
+  assert.match(page, /navigateTo/);
+  assert.match(page, /openAgent/);
+  assert.match(page, /系统设置将在接口与权限阶段启用/);
+  assert.match(shell, /const NAV_ITEMS/);
+  assert.match(shell, /系统设置/);
   assert.match(styles, /@media \(max-width: 720px\)/);
   assert.match(styles, /prefers-reduced-motion/);
 });

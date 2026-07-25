@@ -223,6 +223,64 @@ button {
   padding: 0 clamp(28px, 4vw, 68px) 64px;
 }
 
+.control-desk,
+.design-preview {
+  min-height: 590px;
+  padding: clamp(42px, 6vw, 80px) clamp(26px, 5vw, 72px);
+  border: 1px solid rgba(220, 225, 234, 0.86);
+  border-radius: 30px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.94), rgba(239, 244, 255, 0.92)),
+    #fff;
+  box-shadow: 0 28px 90px rgba(43, 66, 110, 0.09);
+}
+
+.control-hero {
+  max-width: 740px;
+}
+
+.control-hero h1,
+.design-preview h1 {
+  margin: 20px 0 12px;
+  font-family: "Songti SC", "STSong", serif;
+  font-size: clamp(38px, 4.4vw, 64px);
+  font-weight: 500;
+  line-height: 1.18;
+  letter-spacing: -0.04em;
+}
+
+.control-hero > p,
+.design-preview > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.capacity-badge {
+  width: fit-content;
+  margin-top: 22px;
+  padding: 9px 12px;
+  border: 1px solid #d7e2ff;
+  border-radius: 999px;
+  background: #f4f7ff;
+  color: var(--blue-dark);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dispatch-button {
+  height: 40px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--blue);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 10px 22px rgba(47, 102, 246, 0.28);
+}
+
 .hero {
   position: relative;
   min-height: 590px;
