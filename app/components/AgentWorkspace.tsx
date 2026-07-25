@@ -1,4 +1,6 @@
 import type { AgentProject } from "../lib/agent-catalog.mjs";
+import { useState } from "react";
+import { ModelConfigPanel } from "./ModelConfigPanel";
 
 const PROJECT_TABS = [
   "项目总览",
@@ -20,6 +22,8 @@ type AgentWorkspaceProps = {
 };
 
 export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps) {
+  const [activeTab, setActiveTab] = useState(PROJECT_TABS[0]);
+
   return (
     <section className="agent-workspace">
       <div className="agent-workspace-topbar">
@@ -44,27 +48,36 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       <nav className="project-tabs" aria-label={`${agent.title} 项目导航`}>
         {PROJECT_TABS.map((tab, index) => (
           <button
-            className={index === 0 ? "active" : ""}
+            className={activeTab === tab ? "active" : ""}
             key={tab}
-            onClick={() => index > 0 && onPreview(`${tab}将在真实 Agent 接入后启用`)}
+            onClick={() => {
+              setActiveTab(tab);
+              if (index > 0 && tab !== "Agent 配置") {
+                onPreview(`${tab}将在真实 Agent 接入后启用`);
+              }
+            }}
           >
             {tab}
           </button>
         ))}
       </nav>
 
-      <div className="agent-project-grid">
-        <article className="project-panel">
-          <span className="panel-label">本项目输入</span>
-          <strong>{agent.input}</strong>
-          <p>状态：{PROJECT_STATUS}</p>
-        </article>
-        <article className="project-panel">
-          <span className="panel-label">本项目输出</span>
-          <strong>{agent.output}</strong>
-          <p>成果会在确认后以只读副本交接给其他项目。</p>
-        </article>
-      </div>
+      {activeTab === "Agent 配置" ? (
+        <ModelConfigPanel scope="agent" agentTitle={agent.title} onPreview={onPreview} />
+      ) : (
+        <div className="agent-project-grid">
+          <article className="project-panel">
+            <span className="panel-label">本项目输入</span>
+            <strong>{agent.input}</strong>
+            <p>状态：{PROJECT_STATUS}</p>
+          </article>
+          <article className="project-panel">
+            <span className="panel-label">本项目输出</span>
+            <strong>{agent.output}</strong>
+            <p>成果会在确认后以只读副本交接给其他项目。</p>
+          </article>
+        </div>
+      )}
     </section>
   );
 }

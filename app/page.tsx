@@ -6,6 +6,7 @@ import { AgentDirectory } from "./components/AgentDirectory";
 import { AgentWorkspace } from "./components/AgentWorkspace";
 import { AssetLibrary } from "./components/AssetLibrary";
 import { DataOverview } from "./components/DataOverview";
+import { ModelConfigPanel } from "./components/ModelConfigPanel";
 import { PreviewToast } from "./components/PreviewToast";
 import { TaskCenter } from "./components/TaskCenter";
 import { WorkbenchShell } from "./components/WorkbenchShell";
@@ -74,6 +75,10 @@ export default function Home() {
       return <DataOverview />;
     }
 
+    if (state.view === "models") {
+      return <ModelConfigPanel scope="global" onPreview={showPreview} />;
+    }
+
     if (state.view === "settings") {
       return (
         <section className="design-preview">
@@ -102,6 +107,11 @@ export default function Home() {
         onPreview={showPreview}
       >
         {content}
+        {state.view === "control" && (
+          <p>
+            模型配置入口分为全局可用模型与 Agent 默认模型。密钥仅在后续接口阶段通过服务端保存。
+          </p>
+        )}
       </WorkbenchShell>
       <PreviewToast message={toast} />
     </>

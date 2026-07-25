@@ -56,6 +56,10 @@ test("server-renders the AI workspace interface", async () => {
   assert.match(html, /只读副本/);
   assert.match(html, /内容产能/);
   assert.match(html, /Agent 调用量/);
+  assert.match(html, /全局可用模型/);
+  assert.match(html, /Agent 默认模型/);
+  assert.match(html, /密钥仅在后续接口阶段通过服务端保存/);
+  assert.doesNotMatch(html, /api[_-]?key\s*[:=]/i);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
