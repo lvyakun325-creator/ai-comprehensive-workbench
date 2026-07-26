@@ -93,6 +93,11 @@ const SAFE_ERRORS = {
     "模型服务返回格式异常，请稍后重试。",
     502,
   ],
+  INVALID_STAGE_OUTPUT: [
+    "INVALID_STAGE_OUTPUT",
+    "模型输出未满足正式方案要求，请重试。",
+    502,
+  ],
 } as const;
 
 type SafeErrorName = keyof typeof SAFE_ERRORS;
@@ -141,10 +146,12 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
         buildGenerationRequest(runInput, prompt),
       );
       const markdown = parseGeneratedMarkdown(runInput.protocol, body);
+      const safeMarkdown = redactSecret(markdown, runInput.apiKey);
+      validateStageOutput(runInput.stage, safeMarkdown);
 
       return {
         stage: runInput.stage,
-        markdown: redactSecret(markdown, runInput.apiKey),
+        markdown: safeMarkdown,
       };
     },
   };
@@ -444,6 +451,7 @@ async function fetchProviderJson(
   try {
     const response = await fetchImpl(request.url, {
       ...request.init,
+      redirect: "error",
       signal: controller.signal,
     });
 
@@ -565,6 +573,24 @@ function parseGeneratedMarkdown(
     throw new ContentMatrixRuntimeError("INVALID_PROVIDER_RESPONSE");
   }
   return text;
+}
+
+function validateStageOutput(stage: number, markdown: string): void {
+  if (stage !== 5) return;
+
+  const hasMarkdownHeading = /^#{1,6}[ \t]+\S+/m.test(markdown);
+  const hasBusinessConclusion =
+    /最终建议摘要|一页结论|最终建议|核心建议|推荐阵型|矩阵总览|结论先行/.test(
+      markdown,
+    );
+  const hasWorkflowPrompt =
+    /检查点|请(?:您)?确认|是否认可|等待(?:用户)?确认|确认后.{0,24}(?:进入|继续|生成|下一阶段)|下一步.{0,24}(?:请|进入|继续|确认|生成)/.test(
+      markdown,
+    );
+
+  if (!hasMarkdownHeading || !hasBusinessConclusion || hasWorkflowPrompt) {
+    throw new ContentMatrixRuntimeError("INVALID_STAGE_OUTPUT");
+  }
 }
 
 function firstRecord(value: unknown): Record<string, unknown> {

@@ -147,6 +147,104 @@ test("connection test reports a configured model missing without returning the m
   assert.equal(JSON.stringify(result).includes("another-model"), false);
 });
 
+test("all provider connection requests disable redirects before sending credentials", async () => {
+  const cases = [
+    {
+      config: config(
+        "openai-compatible",
+        "https://api.example.com/v1",
+        "gpt-example",
+      ),
+      successBody: {
+        object: "list",
+        data: [{ id: "gpt-example", object: "model", created: 1, owned_by: "test" }],
+      },
+    },
+    {
+      config: config(
+        "anthropic",
+        "https://api.anthropic.com/v1",
+        "claude-example",
+      ),
+      successBody: {
+        data: [
+          {
+            type: "model",
+            id: "claude-example",
+            display_name: "Claude Example",
+            created_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+        has_more: false,
+        first_id: "claude-example",
+        last_id: "claude-example",
+      },
+    },
+    {
+      config: config(
+        "gemini",
+        "https://generativelanguage.googleapis.com/v1beta",
+        "gemini-example",
+      ),
+      successBody: {
+        models: [
+          {
+            name: "models/gemini-example",
+            version: "001",
+            displayName: "Gemini Example",
+            description: "Fixture",
+            inputTokenLimit: 1,
+            outputTokenLimit: 1,
+            supportedGenerationMethods: ["generateContent"],
+          },
+        ],
+      },
+    },
+  ];
+
+  for (const fixture of cases) {
+    const runtime = createContentMatrixRuntime({
+      fetchImpl: async (_url, init) => {
+        if (init.redirect !== "error") {
+          return jsonResponse(fixture.successBody);
+        }
+        throw new TypeError(`redirect target rejected ${FAKE_KEY}`);
+      },
+    });
+
+    await assert.rejects(
+      runtime.testConnection(fixture.config),
+      (error) => {
+        assert.equal(error.code, "PROVIDER_UNAVAILABLE");
+        assert.doesNotMatch(error.message, /redirect|sk-fake/);
+        return true;
+      },
+    );
+  }
+});
+
+test("provider generation requests also disable redirects", async () => {
+  const runtime = createContentMatrixRuntime({
+    fetchImpl: async (_url, init) => {
+      if (init.redirect !== "error") {
+        return jsonResponse({
+          choices: [{ message: { role: "assistant", content: "## 战略\n内容" } }],
+        });
+      }
+      throw new TypeError(`generation redirect rejected ${FAKE_KEY}`);
+    },
+  });
+
+  await assert.rejects(
+    runtime.runStage(validRunInput(2)),
+    (error) => {
+      assert.equal(error.code, "PROVIDER_UNAVAILABLE");
+      assert.doesNotMatch(error.message, /generation redirect|sk-fake/);
+      return true;
+    },
+  );
+});
+
 test("OpenAI-compatible generation sends model and messages then parses Markdown", async () => {
   let captured;
   const runtime = createContentMatrixRuntime({
@@ -314,7 +412,14 @@ test("final-stage system prompt requires conclusion-first Markdown without check
     fetchImpl: async (_url, init) => {
       systemPrompt = JSON.parse(init.body).messages[0].content;
       return jsonResponse({
-        choices: [{ message: { role: "assistant", content: "完成" } }],
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "# 正式方案\n## 最终建议摘要\n推荐阵型：章鱼型。",
+            },
+          },
+        ],
       });
     },
   });
@@ -350,7 +455,17 @@ test("each stage prompt preserves its matrix-designer hard rules", async () => {
         .replace("五", "5"));
       prompts.set(stage, prompt);
       return jsonResponse({
-        choices: [{ message: { role: "assistant", content: "完成" } }],
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content:
+                stage === 5
+                  ? "# 正式方案\n## 最终建议摘要\n推荐阵型：章鱼型。"
+                  : "完成",
+            },
+          },
+        ],
       });
     },
   });
@@ -422,7 +537,14 @@ test("redacts API Key occurrences from all untrusted data before building the pr
     fetchImpl: async (_url, init) => {
       providerBody = init.body;
       return jsonResponse({
-        choices: [{ message: { role: "assistant", content: "完成" } }],
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "# 正式方案\n## 最终建议摘要\n推荐阵型：章鱼型。",
+            },
+          },
+        ],
       });
     },
   });
@@ -647,6 +769,52 @@ test("rejects API keys containing control characters as invalid configuration", 
     );
   }
   assert.equal(calls, 0);
+});
+
+test("rejects stage 5 output that retains workflow prompts or lacks conclusion-first structure", async () => {
+  const invalidOutputs = [
+    "# 正式方案\n## 最终建议摘要\n推荐阵型：章鱼型。\n【执行检查点】请确认后进入下一步。",
+    "这是一份内容很多但没有标题和业务结论的完整方案。",
+    "# 正式方案\n这里仅复述了过程资料，没有形成业务判断。",
+  ];
+
+  for (const output of invalidOutputs) {
+    const runtime = createContentMatrixRuntime({
+      fetchImpl: async () =>
+        jsonResponse({
+          choices: [{ message: { role: "assistant", content: output } }],
+        }),
+    });
+
+    await assert.rejects(
+      runtime.runStage(validRunInput(5)),
+      (error) => {
+        assert.equal(error.code, "INVALID_STAGE_OUTPUT");
+        assert.match(error.message, /正式方案.*重试/);
+        assert.doesNotMatch(error.message, /检查点|下一步|过程资料/);
+        return true;
+      },
+    );
+  }
+});
+
+test("accepts flexible stage 5 Markdown when it has a heading and a business conclusion", async () => {
+  const validOutputs = [
+    "# 某公司内容矩阵方案\n## 最终建议摘要\n推荐阵型：章鱼型，先验证一个主账号。",
+    "# 正式交付件\n一页结论：先做小红书单点验证，再按数据复制。",
+  ];
+
+  for (const output of validOutputs) {
+    const runtime = createContentMatrixRuntime({
+      fetchImpl: async () =>
+        jsonResponse({
+          choices: [{ message: { role: "assistant", content: output } }],
+        }),
+    });
+
+    const result = await runtime.runStage(validRunInput(5));
+    assert.equal(result.markdown, output);
+  }
 });
 
 test("maps malformed provider JSON and malformed payloads to safe errors", async () => {

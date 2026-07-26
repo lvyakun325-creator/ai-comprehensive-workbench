@@ -63,6 +63,72 @@ test("route connection success returns only necessary connection information", a
   });
 });
 
+test("route safely blocks redirects for all provider authentication protocols", async () => {
+  const cases = [
+    testPayload(),
+    testPayload({
+      protocol: "anthropic",
+      baseUrl: "https://api.anthropic.com/v1",
+      model: "claude-example",
+    }),
+    testPayload({
+      protocol: "gemini",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      model: "gemini-example",
+    }),
+  ];
+
+  for (const payload of cases) {
+    const handler = createContentMatrixRoute({
+      fetchImpl: async (_url, init) => {
+        if (init.redirect !== "error") {
+          if (payload.protocol === "gemini") {
+            return Response.json({
+              models: [
+                {
+                  name: "models/gemini-example",
+                  version: "001",
+                  displayName: "Gemini Example",
+                  description: "Fixture",
+                  inputTokenLimit: 1,
+                  outputTokenLimit: 1,
+                  supportedGenerationMethods: ["generateContent"],
+                },
+              ],
+            });
+          }
+          return Response.json({
+            data: [
+              payload.protocol === "anthropic"
+                ? {
+                    type: "model",
+                    id: "claude-example",
+                    display_name: "Claude Example",
+                    created_at: "2026-01-01T00:00:00Z",
+                  }
+                : {
+                    id: "gpt-example",
+                    object: "model",
+                    created: 1,
+                    owned_by: "test",
+                  },
+            ],
+          });
+        }
+        throw new TypeError(`redirected credential ${FAKE_KEY}`);
+      },
+    });
+
+    const response = await handler(request(payload));
+    const body = JSON.stringify(await response.json());
+
+    assert.equal(response.status, 502);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.match(body, /PROVIDER_UNAVAILABLE/);
+    assert.doesNotMatch(body, /redirected credential|sk-fake|api\.anthropic/);
+  }
+});
+
 test("route stage success returns only stage Markdown", async () => {
   const handler = createContentMatrixRoute({
     fetchImpl: async () =>
@@ -196,6 +262,47 @@ test("route returns a no-store safe error when the previous stage is not explici
   assert.match(body, /STAGE_CONFIRMATION_REQUIRED/);
   assert.doesNotMatch(body, /sk-fake|战略|api\.example/);
   assert.equal(calls, 0);
+});
+
+test("route rejects invalid stage 5 output without exposing Key or enabling a final result", async () => {
+  const handler = createContentMatrixRoute({
+    fetchImpl: async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: `# 正式方案\n推荐阵型：章鱼型。\n【检查点】请确认 ${FAKE_KEY} 后进入下一步。`,
+            },
+          },
+        ],
+      }),
+  });
+
+  const response = await handler(
+    request(
+      testPayload({
+        action: "run",
+        stage: 5,
+        diagnostic: "诊断",
+        history: [
+          { stage: 2, markdown: "战略" },
+          { stage: 3, markdown: "战术" },
+          { stage: 4, markdown: "执行" },
+        ],
+        feedback: "确认",
+        confirmed: true,
+        confirmedStage: 4,
+      }),
+    ),
+  );
+  const body = JSON.stringify(await response.json());
+
+  assert.equal(response.status, 502);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.match(body, /INVALID_STAGE_OUTPUT/);
+  assert.doesNotMatch(body, /sk-fake|检查点|下一步|章鱼型/);
+  assert.doesNotMatch(body, /markdown/);
 });
 
 test("route never includes the API Key or provider response body in an error", async () => {
