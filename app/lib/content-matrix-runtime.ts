@@ -20,6 +20,8 @@ export type ContentMatrixRunInput = ContentMatrixConfig & {
   diagnostic: string;
   history: ContentMatrixHistoryEntry[];
   feedback: string;
+  confirmed?: boolean;
+  confirmedStage?: number;
 };
 
 type Fetch = typeof fetch;
@@ -68,6 +70,11 @@ const SAFE_ERRORS = {
     400,
   ],
   INVALID_HISTORY: ["INVALID_HISTORY", "历史阶段顺序无效。", 400],
+  STAGE_CONFIRMATION_REQUIRED: [
+    "STAGE_CONFIRMATION_REQUIRED",
+    "请先人工确认上一阶段结果。",
+    409,
+  ],
   AUTH_FAILED: ["AUTH_FAILED", "模型服务鉴权失败，请检查 API Key。", 401],
   RATE_LIMITED: ["RATE_LIMITED", "模型服务请求过于频繁，请稍后重试。", 429],
   PROVIDER_UNAVAILABLE: [
@@ -110,12 +117,11 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
   return {
     async testConnection(input: unknown) {
       const config = validateConfig(input);
-      const response = await providerFetch(
+      const body = await fetchProviderJson(
         fetchImpl,
         timeoutMs,
         buildModelsRequest(config),
       );
-      const body = await safeJson(response);
       const modelIds = parseModelIds(config.protocol, body);
 
       return {
@@ -129,12 +135,11 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
     async runStage(input: unknown) {
       const runInput = validateRunInput(input);
       const prompt = buildStagePrompt(runInput);
-      const response = await providerFetch(
+      const body = await fetchProviderJson(
         fetchImpl,
         timeoutMs,
         buildGenerationRequest(runInput, prompt),
       );
-      const body = await safeJson(response);
       const markdown = parseGeneratedMarkdown(runInput.protocol, body);
 
       return {
@@ -153,7 +158,14 @@ function validateConfig(input: unknown): ValidatedConfig {
   }
 
   const baseUrl = requiredString(record.baseUrl, MAX_URL_LENGTH);
-  const apiKey = requiredString(record.apiKey, MAX_KEY_LENGTH);
+  const rawApiKey = record.apiKey;
+  if (
+    typeof rawApiKey !== "string" ||
+    hasControlCharacter(rawApiKey)
+  ) {
+    throw new ContentMatrixRuntimeError("INVALID_CONFIG");
+  }
+  const apiKey = requiredString(rawApiKey, MAX_KEY_LENGTH);
   const model = requiredString(record.model, MAX_MODEL_LENGTH);
   if (!baseUrl || !apiKey || !model || hasControlCharacter(model)) {
     throw new ContentMatrixRuntimeError("INVALID_CONFIG");
@@ -205,12 +217,22 @@ function validateRunInput(input: unknown): ValidatedRunInput {
     return { stage: index + 2, markdown };
   });
 
+  if (
+    stage > 2 &&
+    (record.confirmed !== true || record.confirmedStage !== stage - 1)
+  ) {
+    throw new ContentMatrixRuntimeError("STAGE_CONFIRMATION_REQUIRED");
+  }
+
   return {
     ...config,
     stage: stage as 2 | 3 | 4 | 5,
-    diagnostic,
-    history,
-    feedback,
+    diagnostic: redactSecret(diagnostic, config.apiKey),
+    history: history.map((entry) => ({
+      ...entry,
+      markdown: redactSecret(entry.markdown, config.apiKey),
+    })),
+    feedback: redactSecret(feedback, config.apiKey),
   };
 }
 
@@ -373,7 +395,7 @@ function buildGenerationRequest(
   return {
     url: appendEndpoint(input.baseUrl, [
       "models",
-      `${encodeURIComponent(input.model)}:generateContent`,
+      `${encodeURIComponent(stripGeminiPrefix(input.model))}:generateContent`,
     ]),
     init: {
       method: "POST",
@@ -411,53 +433,59 @@ function appendEndpoint(baseUrl: string, segments: string[]): string {
   return url.toString();
 }
 
-async function providerFetch(
+async function fetchProviderJson(
   fetchImpl: Fetch,
   timeoutMs: number,
   request: { url: string; init: RequestInit },
-): Promise<Response> {
+): Promise<unknown> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  let response: Response;
   try {
-    response = await fetchImpl(request.url, {
+    const response = await fetchImpl(request.url, {
       ...request.init,
       signal: controller.signal,
     });
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new ContentMatrixRuntimeError("AUTH_FAILED");
+      }
+      if (response.status === 429) {
+        throw new ContentMatrixRuntimeError("RATE_LIMITED");
+      }
+      if (response.status >= 500) {
+        throw new ContentMatrixRuntimeError("PROVIDER_UNAVAILABLE");
+      }
+      throw new ContentMatrixRuntimeError("PROVIDER_REQUEST_FAILED");
+    }
+
+    try {
+      return await response.json();
+    } catch (error) {
+      if (isTimeoutError(error, controller.signal)) {
+        throw new ContentMatrixRuntimeError("PROVIDER_TIMEOUT");
+      }
+      throw new ContentMatrixRuntimeError("INVALID_PROVIDER_RESPONSE");
+    }
   } catch (error) {
-    if (
-      controller.signal.aborted ||
-      (error instanceof DOMException && error.name === "AbortError")
-    ) {
+    if (error instanceof ContentMatrixRuntimeError) {
+      throw error;
+    }
+    if (isTimeoutError(error, controller.signal)) {
       throw new ContentMatrixRuntimeError("PROVIDER_TIMEOUT");
     }
     throw new ContentMatrixRuntimeError("PROVIDER_UNAVAILABLE");
   } finally {
     clearTimeout(timer);
   }
-
-  if (!response.ok) {
-    if (response.status === 401 || response.status === 403) {
-      throw new ContentMatrixRuntimeError("AUTH_FAILED");
-    }
-    if (response.status === 429) {
-      throw new ContentMatrixRuntimeError("RATE_LIMITED");
-    }
-    if (response.status >= 500) {
-      throw new ContentMatrixRuntimeError("PROVIDER_UNAVAILABLE");
-    }
-    throw new ContentMatrixRuntimeError("PROVIDER_REQUEST_FAILED");
-  }
-  return response;
 }
 
-async function safeJson(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
-    throw new ContentMatrixRuntimeError("INVALID_PROVIDER_RESPONSE");
-  }
+function isTimeoutError(error: unknown, signal: AbortSignal): boolean {
+  return (
+    signal.aborted ||
+    (error instanceof DOMException && error.name === "AbortError")
+  );
 }
 
 function parseModelIds(
@@ -558,21 +586,33 @@ function buildStagePrompt(input: ValidatedRunInput) {
     2: [
       "你现在执行第二阶段：架构选型与竞品拆解（战略判断）。",
       "只完成本阶段战略内容：竞品拆解卡、矩阵目标卡、矩阵模式说明书和阵型注释。",
+      "竞品拆解必须覆盖人群、痛点、定位与内容钩子；竞品信息不足时必须明确写“竞品信息不足，暂不做该项判断”，不得脑补。",
+      "必须明确我方不跟竞品抢什么位置，以及我方应抢占的差异化位置。",
+      "矩阵目标卡必须写清主目标、次目标和本阶段主动放弃；所有阵型术语必须先通俗解释阵型是什么样子、适合谁及核心区别。",
       "输出战略检查点后必须停下，等待用户确认；不得提前进入账号配置或执行 SOP。",
     ],
     3: [
       "你现在执行第三阶段：账号分层与人设包装。",
       "只完成账号谱系选择、5A 职责说明、单账号落地配置和引流拓扑。",
+      "账号谱系必须说明为什么选、为什么不选相近账号类型；解释 A1-A5 的人群阶段和职责，并明确一个账号可以承担多个 A 阶段。",
+      "昵称必须一眼看懂、贴近搜索、符合账号类型且无高监管风险；配置表必须包含昵称、头像、简介、视觉、内容、禁发内容和具体引流动作。",
+      "引流拓扑必须明确谁负责吸引、谁负责教育、谁负责收割及最终承接。",
       "输出战术检查点后必须停下，等待用户确认；不得提前进入执行 SOP。",
     ],
     4: [
       "你现在执行第四阶段：内容裂变与起号 SOP。",
       "只完成启动顺序、复制节奏、内容裂变和按账号类型拆分的首周动作。",
+      "启动顺序必须写清达到什么数据再复制、下一批复制谁；素材池优先归纳为过程型、结果型、决策型，并解释不同账号与 5A 职责的裂变逻辑。",
+      "物理去重底线：严禁发布同样视频或图片，必须通过多机位拍摄或核心卖点重组完成去重。",
+      "首周动作必须逐类账号写明第1天、第2-3天、第4天和第5-7天，并结合目标平台规律。",
+      "必须给出止损标准；没有可靠绝对阈值时，使用相对判断口径并给出调整动作。",
       "输出执行检查点后必须停下，等待用户确认；不得提前生成正式成品。",
     ],
     5: [
       "你现在执行第五阶段：结论先行正式方案。",
       "输出完整 Markdown，依次组织最终建议摘要、一页结论、矩阵总览、启动顺序、首周动作、内容裂变、账号配置、方案依据。",
+      "竞品拆解、阵型解释、5A 说明、昵称校验和承接边界等支撑信息必须后置。",
+      "全文使用稳定、清晰、面向老板或客户的正式交付语言，删除内部操盘口吻和团队黑话。",
       "正式成品必须删除所有检查点、确认语、下一步提示和阶段推进话术。",
     ],
   }[input.stage];

@@ -23,6 +23,22 @@ function jsonResponse(body, status = 200) {
   });
 }
 
+function validRunInput(stage, overrides = {}) {
+  const history = Array.from({ length: stage - 2 }, (_, index) => ({
+    stage: index + 2,
+    markdown: `第${index + 2}阶段输出`,
+  }));
+  return {
+    ...config("openai-compatible", "https://api.example.com/v1", "gpt-example"),
+    stage,
+    diagnostic: "诊断资料",
+    history,
+    feedback: stage === 2 ? "" : "确认上一阶段",
+    ...(stage === 2 ? {} : { confirmed: true, confirmedStage: stage - 1 }),
+    ...overrides,
+  };
+}
+
 test("OpenAI-compatible connection test uses Bearer auth and parses model availability", async () => {
   let captured;
   const runtime = createContentMatrixRuntime({
@@ -198,6 +214,8 @@ test("Anthropic generation separates system and user messages and parses text bl
     diagnostic: "诊断资料",
     history: [{ stage: 2, markdown: "第二阶段已确认" }],
     feedback: "昵称更贴近搜索",
+    confirmed: true,
+    confirmedStage: 2,
   });
 
   assert.deepEqual(result, { stage: 3, markdown: "## 账号配置\n内容" });
@@ -211,7 +229,7 @@ test("Anthropic generation separates system and user messages and parses text bl
   assert.match(body.messages[0].content, /昵称更贴近搜索/);
 });
 
-test("Gemini generation safely encodes the model path and parses candidate parts", async () => {
+test("Gemini generation strips the standard models prefix and parses candidate parts", async () => {
   let captured;
   const runtime = createContentMatrixRuntime({
     fetchImpl: async (url, init) => {
@@ -235,7 +253,7 @@ test("Gemini generation safely encodes the model path and parses candidate parts
     ...config(
       "gemini",
       "https://generativelanguage.googleapis.com/v1beta/",
-      "gemini/example",
+      "models/gemini-example",
     ),
     stage: 5,
     diagnostic: "诊断资料",
@@ -245,12 +263,14 @@ test("Gemini generation safely encodes the model path and parses candidate parts
       { stage: 4, markdown: "执行" },
     ],
     feedback: "确认",
+    confirmed: true,
+    confirmedStage: 4,
   });
 
   assert.deepEqual(result, { stage: 5, markdown: "# 正式方案\n结论先行" });
   assert.equal(
     captured.url,
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini%2Fexample:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-example:generateContent",
   );
   const body = JSON.parse(captured.init.body);
   assert.equal(body.systemInstruction.parts.length, 1);
@@ -309,11 +329,118 @@ test("final-stage system prompt requires conclusion-first Markdown without check
       { stage: 4, markdown: "执行" },
     ],
     feedback: "确认",
+    confirmed: true,
+    confirmedStage: 4,
   });
 
   assert.match(systemPrompt, /第五阶段/);
   assert.match(systemPrompt, /结论先行/);
   assert.match(systemPrompt, /删除.*检查点.*确认语.*下一步提示/);
+});
+
+test("each stage prompt preserves its matrix-designer hard rules", async () => {
+  const prompts = new Map();
+  const runtime = createContentMatrixRuntime({
+    fetchImpl: async (_url, init) => {
+      const prompt = JSON.parse(init.body).messages[0].content;
+      const stage = Number(prompt.match(/第([二三四五])阶段/)?.[1]
+        .replace("二", "2")
+        .replace("三", "3")
+        .replace("四", "4")
+        .replace("五", "5"));
+      prompts.set(stage, prompt);
+      return jsonResponse({
+        choices: [{ message: { role: "assistant", content: "完成" } }],
+      });
+    },
+  });
+
+  for (const stage of [2, 3, 4, 5]) {
+    await runtime.runStage(validRunInput(stage));
+  }
+
+  assert.match(prompts.get(2), /竞品信息不足.*暂不.*判断/);
+  assert.match(prompts.get(2), /不.*竞品.*抢.*位置/);
+  assert.match(prompts.get(2), /差异化位置/);
+  assert.match(prompts.get(2), /主目标.*次目标.*主动放弃/);
+  assert.match(prompts.get(2), /通俗.*阵型/);
+
+  assert.match(prompts.get(3), /A1-A5/);
+  assert.match(prompts.get(3), /一个账号.*多个.*阶段/);
+  assert.match(prompts.get(3), /选.*不选.*账号类型/);
+  assert.match(prompts.get(3), /昵称.*一眼看懂.*搜索/);
+  assert.match(prompts.get(3), /吸引.*教育.*收割/);
+
+  assert.match(prompts.get(4), /达到什么数据.*复制/);
+  assert.match(prompts.get(4), /过程型.*结果型.*决策型/);
+  assert.match(prompts.get(4), /严禁.*同样.*视频.*图片/);
+  assert.match(prompts.get(4), /多机位.*卖点重组/);
+  assert.match(prompts.get(4), /第1天.*第2-3天.*第4天.*第5-7天/);
+  assert.match(prompts.get(4), /止损标准.*相对判断.*调整动作/);
+
+  assert.match(prompts.get(5), /最终建议摘要.*一页结论.*矩阵总览/);
+  assert.match(prompts.get(5), /支撑信息.*后置/);
+  assert.match(prompts.get(5), /正式交付语言/);
+});
+
+test("stages 3 through 5 require explicit confirmation of the immediately previous stage", async () => {
+  let calls = 0;
+  const runtime = createContentMatrixRuntime({
+    fetchImpl: async () => {
+      calls += 1;
+      return jsonResponse({
+        choices: [{ message: { role: "assistant", content: "不应调用" } }],
+      });
+    },
+  });
+
+  for (const stage of [3, 4, 5]) {
+    const invalidConfirmations = [
+      {},
+      { confirmed: false, confirmedStage: stage - 1 },
+      { confirmed: true, confirmedStage: stage - 2 },
+    ];
+    for (const confirmation of invalidConfirmations) {
+      await assert.rejects(
+        runtime.runStage(
+          validRunInput(stage, {
+            confirmed: undefined,
+            confirmedStage: undefined,
+            ...confirmation,
+          }),
+        ),
+        (error) => error.code === "STAGE_CONFIRMATION_REQUIRED",
+      );
+    }
+  }
+  assert.equal(calls, 0);
+});
+
+test("redacts API Key occurrences from all untrusted data before building the provider request", async () => {
+  let providerBody = "";
+  const runtime = createContentMatrixRuntime({
+    fetchImpl: async (_url, init) => {
+      providerBody = init.body;
+      return jsonResponse({
+        choices: [{ message: { role: "assistant", content: "完成" } }],
+      });
+    },
+  });
+
+  await runtime.runStage(
+    validRunInput(5, {
+      diagnostic: `诊断中误贴 ${FAKE_KEY}`,
+      history: [
+        { stage: 2, markdown: `战略 ${FAKE_KEY}` },
+        { stage: 3, markdown: `战术 ${FAKE_KEY}` },
+        { stage: 4, markdown: `执行 ${FAKE_KEY}` },
+      ],
+      feedback: `反馈 ${FAKE_KEY}`,
+    }),
+  );
+
+  assert.doesNotMatch(providerBody, /sk-fake/);
+  assert.match(providerBody, /已隐藏敏感信息/);
 });
 
 test("rejects non-public custom endpoints before making a network request", async () => {
@@ -460,6 +587,66 @@ test("maps timeout to a safe error without exposing request details", async () =
       return true;
     },
   );
+});
+
+test("deadline remains active while response headers are ready but the body stalls", async () => {
+  const runtime = createContentMatrixRuntime({
+    timeoutMs: 5,
+    fetchImpl: async (_url, init) => {
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode('{"data":[{"id":"gpt-example"'),
+          );
+          init.signal.addEventListener("abort", () => {
+            controller.error(new DOMException("body stalled", "AbortError"));
+          });
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+
+  const outcome = await Promise.race([
+    runtime
+      .testConnection(
+        config("openai-compatible", "https://api.example.com/v1", "gpt-example"),
+      )
+      .then(
+        () => ({ code: "UNEXPECTED_SUCCESS" }),
+        (error) => error,
+      ),
+    new Promise((resolve) =>
+      setTimeout(() => resolve({ code: "BODY_READ_HUNG" }), 50),
+    ),
+  ]);
+
+  assert.equal(outcome.code, "PROVIDER_TIMEOUT");
+  assert.doesNotMatch(outcome.message, /body stalled|api\.example|sk-fake/);
+});
+
+test("rejects API keys containing control characters as invalid configuration", async () => {
+  let calls = 0;
+  const runtime = createContentMatrixRuntime({
+    fetchImpl: async () => {
+      calls += 1;
+      return jsonResponse({ data: [] });
+    },
+  });
+
+  for (const apiKey of ["fake\nkey", "fake\tkey", "fake\u0000key"]) {
+    await assert.rejects(
+      runtime.testConnection({
+        ...config("openai-compatible", "https://api.example.com/v1", "gpt-example"),
+        apiKey,
+      }),
+      (error) => error.code === "INVALID_CONFIG",
+    );
+  }
+  assert.equal(calls, 0);
 });
 
 test("maps malformed provider JSON and malformed payloads to safe errors", async () => {

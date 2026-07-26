@@ -125,6 +125,79 @@ test("route rejects an oversized body before calling the provider", async () => 
   });
 });
 
+test("route incrementally cancels an oversized chunked body without Content-Length", async () => {
+  let calls = 0;
+  let canceled = false;
+  let chunksSent = 0;
+  const handler = createContentMatrixRoute({
+    fetchImpl: async () => {
+      calls += 1;
+      return Response.json({ data: [] });
+    },
+  });
+  const body = new ReadableStream({
+    pull(controller) {
+      if (chunksSent < 3) {
+        controller.enqueue(new Uint8Array(64 * 1024).fill(120));
+        chunksSent += 1;
+      } else {
+        controller.close();
+      }
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  const chunkedRequest = new Request(
+    "https://workbench.example/api/agents/content-matrix",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+      duplex: "half",
+    },
+  );
+  assert.equal(chunkedRequest.headers.get("content-length"), null);
+
+  const response = await handler(chunkedRequest);
+
+  assert.equal(response.status, 413);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(canceled, true);
+  assert.equal(calls, 0);
+});
+
+test("route returns a no-store safe error when the previous stage is not explicitly confirmed", async () => {
+  let calls = 0;
+  const handler = createContentMatrixRoute({
+    fetchImpl: async () => {
+      calls += 1;
+      return Response.json({
+        choices: [{ message: { role: "assistant", content: "不应调用" } }],
+      });
+    },
+  });
+
+  const response = await handler(
+    request(
+      testPayload({
+        action: "run",
+        stage: 3,
+        diagnostic: "诊断",
+        history: [{ stage: 2, markdown: "战略" }],
+        feedback: "继续",
+      }),
+    ),
+  );
+  const body = JSON.stringify(await response.json());
+
+  assert.equal(response.status, 409);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.match(body, /STAGE_CONFIRMATION_REQUIRED/);
+  assert.doesNotMatch(body, /sk-fake|战略|api\.example/);
+  assert.equal(calls, 0);
+});
+
 test("route never includes the API Key or provider response body in an error", async () => {
   const handler = createContentMatrixRoute({
     fetchImpl: async () =>
