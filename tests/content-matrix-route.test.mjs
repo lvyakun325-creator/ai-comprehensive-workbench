@@ -272,7 +272,14 @@ test("route rejects invalid stage 5 output without exposing Key or enabling a fi
           {
             message: {
               role: "assistant",
-              content: `# 正式方案\n推荐阵型：章鱼型。\n【检查点】请确认 ${FAKE_KEY} 后进入下一步。`,
+              content: `# 最终矩阵方案
+结论：推荐阵型为章鱼型。
+## 战略判断
+先做搜索。
+## 账号配置
+配置品牌号和 KOS。
+## 执行 SOP
+供应商错误回显 ${FAKE_KEY}。`,
             },
           },
         ],

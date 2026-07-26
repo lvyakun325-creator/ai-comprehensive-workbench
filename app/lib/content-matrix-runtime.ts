@@ -578,19 +578,70 @@ function parseGeneratedMarkdown(
 function validateStageOutput(stage: number, markdown: string): void {
   if (stage !== 5) return;
 
-  const hasMarkdownHeading = /^#{1,6}[ \t]+\S+/m.test(markdown);
-  const hasBusinessConclusion =
-    /最终建议摘要|一页结论|最终建议|核心建议|推荐阵型|矩阵总览|结论先行/.test(
-      markdown,
-    );
+  const headings = parseMarkdownHeadings(markdown);
+  const firstMajorHeadingIndex = headings.findIndex(
+    (heading) => heading.level <= 2,
+  );
+  const firstMajorHeading = headings[firstMajorHeadingIndex];
+  const isConclusionFirst =
+    firstMajorHeading !== undefined &&
+    /结论|矩阵方案|推荐阵型|最终建议/.test(firstMajorHeading.title);
+  const requiredSections = [
+    /战略|矩阵总览|架构|竞品|方案依据|定位/,
+    /账号|战术|人设|谱系|角色分工/,
+    /执行|SOP|起号|启动|首周|内容裂变|复制/,
+    /风险|止损|合规|风控|退出阈值|审方/,
+  ];
+  let previousSectionIndex = firstMajorHeadingIndex;
+  const hasOrderedSections =
+    isConclusionFirst &&
+    requiredSections.every((pattern) => {
+      const sectionIndex = headings.findIndex(
+        (heading, index) =>
+          index > previousSectionIndex && pattern.test(heading.title),
+      );
+      if (sectionIndex === -1) return false;
+      previousSectionIndex = sectionIndex;
+      return true;
+    });
   const hasWorkflowPrompt =
-    /检查点|请(?:您)?确认|是否认可|等待(?:用户)?确认|确认后.{0,24}(?:进入|继续|生成|下一阶段)|下一步.{0,24}(?:请|进入|继续|确认|生成)/.test(
+    /检查点|等待(?:用户)?确认|请(?:您)?确认后[^\n]{0,24}(?:进入|继续|生成|推进)|确认后[^\n]{0,24}(?:进入|继续|生成|推进)|是否(?:确认)?(?:进入|继续|生成|推进)(?:下一阶段|下一步)|下一步[^\n]{0,12}请(?:您)?确认(?:上述|以上|方案|内容)|(?:回复|输入)[^\n]{0,8}(?:确认|同意)[^\n]{0,20}(?:进入|继续|生成|推进)/.test(
       markdown,
     );
 
-  if (!hasMarkdownHeading || !hasBusinessConclusion || hasWorkflowPrompt) {
+  if (!hasOrderedSections || hasWorkflowPrompt) {
     throw new ContentMatrixRuntimeError("INVALID_STAGE_OUTPUT");
   }
+}
+
+function parseMarkdownHeadings(
+  markdown: string,
+): Array<{ level: number; title: string }> {
+  const headings: Array<{ level: number; title: string }> = [];
+  let fenceMarker: "`" | "~" | null = null;
+
+  for (const line of markdown.split(/\r?\n/)) {
+    const trimmedStart = line.trimStart();
+    const fence = trimmedStart.match(/^(`{3,}|~{3,})/);
+    if (fence) {
+      const marker = fence[1][0] as "`" | "~";
+      if (fenceMarker === null) {
+        fenceMarker = marker;
+      } else if (fenceMarker === marker) {
+        fenceMarker = null;
+      }
+      continue;
+    }
+    if (fenceMarker !== null) continue;
+
+    const heading = line.match(/^(#{1,6})[ \t]+(.+?)\s*$/);
+    if (!heading) continue;
+    headings.push({
+      level: heading[1].length,
+      title: heading[2].replace(/[ \t]+#+[ \t]*$/, "").trim(),
+    });
+  }
+  return headings;
 }
 
 function firstRecord(value: unknown): Record<string, unknown> {
@@ -636,7 +687,8 @@ function buildStagePrompt(input: ValidatedRunInput) {
     ],
     5: [
       "你现在执行第五阶段：结论先行正式方案。",
-      "输出完整 Markdown，依次组织最终建议摘要、一页结论、矩阵总览、启动顺序、首周动作、内容裂变、账号配置、方案依据。",
+      "输出完整 Markdown：先给结论型总标题与摘要，再依次组织战略判断与矩阵总览、账号分层与战术配置、执行 SOP（启动顺序、首周动作、内容裂变）、风险与止损、方案依据。",
+      "首个 H1/H2 标题必须包含结论、矩阵方案、推荐阵型或最终建议之一；后续标题必须按战略判断、账号与战术配置、执行 SOP、风险与止损的顺序完整覆盖，不得只输出两行空壳。",
       "竞品拆解、阵型解释、5A 说明、昵称校验和承接边界等支撑信息必须后置。",
       "全文使用稳定、清晰、面向老板或客户的正式交付语言，删除内部操盘口吻和团队黑话。",
       "正式成品必须删除所有检查点、确认语、下一步提示和阶段推进话术。",

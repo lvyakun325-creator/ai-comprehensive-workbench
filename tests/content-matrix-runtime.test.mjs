@@ -6,6 +6,20 @@ import {
 } from "../app/lib/content-matrix-runtime.ts";
 
 const FAKE_KEY = "sk-fake";
+const VALID_FINAL_MARKDOWN = `# 最终矩阵方案
+结论：推荐采用章鱼型矩阵，先验证主账号再复制。
+
+## 战略判断与矩阵总览
+主攻小红书搜索场景，品牌号负责正式承接。
+
+## 账号分层与战术配置
+配置品牌号、专家号和单一问题域 KOS 账号。
+
+## 执行 SOP 与启动顺序
+首周先完成账号建库，再按相对数据表现复制。
+
+## 风险控制与止损标准
+发布前请确认资质与审方流程；低于同类内容中位数时调整选题。`;
 
 function config(protocol, baseUrl, model) {
   return {
@@ -337,7 +351,7 @@ test("Gemini generation strips the standard models prefix and parses candidate p
           {
             content: {
               role: "model",
-              parts: [{ text: "# 正式方案\n" }, { text: "结论先行" }],
+              parts: [{ text: VALID_FINAL_MARKDOWN }],
             },
             finishReason: "STOP",
             index: 0,
@@ -365,7 +379,7 @@ test("Gemini generation strips the standard models prefix and parses candidate p
     confirmedStage: 4,
   });
 
-  assert.deepEqual(result, { stage: 5, markdown: "# 正式方案\n结论先行" });
+  assert.deepEqual(result, { stage: 5, markdown: VALID_FINAL_MARKDOWN });
   assert.equal(
     captured.url,
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-example:generateContent",
@@ -416,7 +430,7 @@ test("final-stage system prompt requires conclusion-first Markdown without check
           {
             message: {
               role: "assistant",
-              content: "# 正式方案\n## 最终建议摘要\n推荐阵型：章鱼型。",
+              content: VALID_FINAL_MARKDOWN,
             },
           },
         ],
@@ -441,6 +455,8 @@ test("final-stage system prompt requires conclusion-first Markdown without check
   assert.match(systemPrompt, /第五阶段/);
   assert.match(systemPrompt, /结论先行/);
   assert.match(systemPrompt, /删除.*检查点.*确认语.*下一步提示/);
+  assert.match(systemPrompt, /首个.*标题.*结论.*矩阵方案.*推荐阵型/);
+  assert.match(systemPrompt, /战略判断.*账号.*战术.*执行 SOP.*风险.*止损/);
 });
 
 test("each stage prompt preserves its matrix-designer hard rules", async () => {
@@ -461,7 +477,7 @@ test("each stage prompt preserves its matrix-designer hard rules", async () => {
               role: "assistant",
               content:
                 stage === 5
-                  ? "# 正式方案\n## 最终建议摘要\n推荐阵型：章鱼型。"
+                  ? VALID_FINAL_MARKDOWN
                   : "完成",
             },
           },
@@ -493,7 +509,10 @@ test("each stage prompt preserves its matrix-designer hard rules", async () => {
   assert.match(prompts.get(4), /第1天.*第2-3天.*第4天.*第5-7天/);
   assert.match(prompts.get(4), /止损标准.*相对判断.*调整动作/);
 
-  assert.match(prompts.get(5), /最终建议摘要.*一页结论.*矩阵总览/);
+  assert.match(
+    prompts.get(5),
+    /结论型总标题.*战略判断.*矩阵总览.*账号.*战术.*执行 SOP.*风险.*止损/,
+  );
   assert.match(prompts.get(5), /支撑信息.*后置/);
   assert.match(prompts.get(5), /正式交付语言/);
 });
@@ -541,7 +560,7 @@ test("redacts API Key occurrences from all untrusted data before building the pr
           {
             message: {
               role: "assistant",
-              content: "# 正式方案\n## 最终建议摘要\n推荐阵型：章鱼型。",
+              content: VALID_FINAL_MARKDOWN,
             },
           },
         ],
@@ -771,11 +790,30 @@ test("rejects API keys containing control characters as invalid configuration", 
   assert.equal(calls, 0);
 });
 
-test("rejects stage 5 output that retains workflow prompts or lacks conclusion-first structure", async () => {
+test("rejects stage 5 shells, missing sections, wrong section order, and workflow prompts", async () => {
   const invalidOutputs = [
-    "# 正式方案\n## 最终建议摘要\n推荐阵型：章鱼型。\n【执行检查点】请确认后进入下一步。",
-    "这是一份内容很多但没有标题和业务结论的完整方案。",
-    "# 正式方案\n这里仅复述了过程资料，没有形成业务判断。",
+    "# 最终矩阵方案\n推荐阵型：章鱼型。",
+    `# 最终矩阵方案
+结论：推荐采用章鱼型。
+## 战略判断
+先做搜索。
+## 账号配置
+配置品牌号和 KOS。
+## 执行 SOP
+首周建库。`,
+    `# 一页结论
+推荐采用章鱼型。
+## 战略判断
+先做搜索。
+## 风险与止损
+发布前人工复核。
+## 账号战术配置
+配置品牌号和 KOS。
+## 执行 SOP
+首周建库。`,
+    `${VALID_FINAL_MARKDOWN}
+
+【执行检查点】请确认后进入下一阶段。`,
   ];
 
   for (const output of invalidOutputs) {
@@ -791,17 +829,30 @@ test("rejects stage 5 output that retains workflow prompts or lacks conclusion-f
       (error) => {
         assert.equal(error.code, "INVALID_STAGE_OUTPUT");
         assert.match(error.message, /正式方案.*重试/);
-        assert.doesNotMatch(error.message, /检查点|下一步|过程资料/);
+        assert.doesNotMatch(error.message, /检查点|下一阶段|章鱼型/);
         return true;
       },
     );
   }
 });
 
-test("accepts flexible stage 5 Markdown when it has a heading and a business conclusion", async () => {
+test("accepts complete ordered stage 5 Markdown and does not reject compliance confirmation", async () => {
   const validOutputs = [
-    "# 某公司内容矩阵方案\n## 最终建议摘要\n推荐阵型：章鱼型，先验证一个主账号。",
-    "# 正式交付件\n一页结论：先做小红书单点验证，再按数据复制。",
+    VALID_FINAL_MARKDOWN,
+    `## 一页结论与推荐阵型
+先做视频号老客验证。
+
+## 架构选型与战略依据
+采用子母型矩阵。
+
+## 账号谱系与人设包装
+母号负责信任，子号负责问题入口。
+
+## 起号执行计划
+先启动母号，再按七日相对表现复制。
+
+## 合规风险与退出阈值
+发布前请确认资质、审方流程与平台规则。`,
   ];
 
   for (const output of validOutputs) {
