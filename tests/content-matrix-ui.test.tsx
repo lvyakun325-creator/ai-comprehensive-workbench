@@ -29,7 +29,7 @@ Object.defineProperty(dom.window, "setTimeout", {
   value: () => 1,
 });
 
-const { cleanup, render, screen } = await import("@testing-library/react");
+const { act, cleanup, render, screen } = await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 const { AGENT_PROJECTS } = await import("../app/lib/agent-catalog.mjs");
 const { default: Home } = await import("../app/page");
@@ -198,6 +198,83 @@ test("only content matrix exposes temporary API configuration and requires a suc
   await user.click(screen.getByRole("button", { name: "模型配置" }));
   assert.ok(screen.getByRole("heading", { name: "全局可用模型" }));
   assert.equal(screen.queryByLabelText("API Key"), null);
+});
+
+test("ignores a successful connection response that arrives after the draft configuration changes", async () => {
+  const user = userEvent.setup({ document });
+  let releaseResponse: (() => void) | undefined;
+  globalThis.fetch = async () => {
+    await new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+    return new Response(JSON.stringify({
+      ok: true,
+      action: "test",
+      connected: true,
+      modelAvailable: true,
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  await openContentMatrixConfig(user);
+  await user.type(screen.getByLabelText("API Key"), "sk-stale-secret");
+  await user.click(screen.getByRole("button", { name: "测试连接" }));
+  assert.ok(screen.getByRole("button", { name: "正在测试…" }));
+
+  await user.clear(screen.getByLabelText("模型名称"));
+  await user.type(screen.getByLabelText("模型名称"), "gpt-new-draft");
+  assert.match(screen.getByRole("status").textContent ?? "", /配置已修改/);
+  assert.ok(releaseResponse);
+  await act(async () => {
+    releaseResponse?.();
+    await Promise.resolve();
+  });
+
+  assert.match(screen.getByRole("status").textContent ?? "", /配置已修改/);
+  assert.equal(screen.queryByText("连接测试成功，模型可用"), null);
+  assert.equal(
+    screen.getByRole("button", { name: "应用到当前会话" }).hasAttribute("disabled"),
+    true,
+  );
+  assert.equal(document.documentElement.outerHTML.includes("sk-stale-secret"), false);
+  assert.equal(storageAccesses, 0);
+});
+
+test("ignores a successful connection response that arrives after the session configuration is cleared", async () => {
+  const user = userEvent.setup({ document });
+  let releaseResponse: (() => void) | undefined;
+  globalThis.fetch = async () => {
+    await new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+    return new Response(JSON.stringify({
+      ok: true,
+      action: "test",
+      connected: true,
+      modelAvailable: true,
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  await openContentMatrixConfig(user);
+  await user.type(screen.getByLabelText("API Key"), "sk-cleared-secret");
+  await user.click(screen.getByRole("button", { name: "测试连接" }));
+  assert.ok(screen.getByRole("button", { name: "正在测试…" }));
+
+  await user.click(screen.getByRole("button", { name: "清空当前会话配置" }));
+  assert.match(screen.getByRole("status").textContent ?? "", /已清空/);
+  assert.ok(releaseResponse);
+  await act(async () => {
+    releaseResponse?.();
+    await Promise.resolve();
+  });
+
+  assert.match(screen.getByRole("status").textContent ?? "", /已清空/);
+  assert.equal(screen.queryByText("连接测试成功，模型可用"), null);
+  assert.equal(
+    screen.getByRole("button", { name: "应用到当前会话" }).hasAttribute("disabled"),
+    true,
+  );
+  assert.equal(document.documentElement.outerHTML.includes("sk-cleared-secret"), false);
+  assert.equal(storageAccesses, 0);
 });
 
 test("blocks model execution until configuration and diagnosis are both ready", async () => {

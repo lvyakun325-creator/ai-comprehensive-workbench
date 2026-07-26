@@ -1,5 +1,5 @@
 import type { AgentProject } from "../lib/agent-catalog.mjs";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   ContentMatrixConfigPanel,
   createDefaultContentMatrixConfig,
@@ -120,6 +120,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
     stage: 2 | 3 | 4 | 5;
     message: string;
   } | null>(null);
+  const matrixConfigRevision = useRef(0);
+  const matrixConnectionRequest = useRef(0);
   const isContentMatrix = agent.id === "content-matrix";
   const requiresPrivateAssets = matrixDiagnosis.platform === "video-account";
   const requiredMatrixFields = requiresPrivateAssets
@@ -144,6 +146,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   };
 
   const updateMatrixConfigDraft = (draft: ContentMatrixSessionConfig) => {
+    matrixConfigRevision.current += 1;
+    matrixConnectionRequest.current += 1;
     setMatrixConfigDraft(draft);
     setMatrixTestedConfig(null);
     setMatrixConnection({ kind: "idle", message: "配置已修改，请重新测试连接。" });
@@ -159,6 +163,14 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
 
   const testMatrixConnection = async () => {
     if (matrixConnection.kind === "testing") return;
+    const requestId = matrixConnectionRequest.current + 1;
+    matrixConnectionRequest.current = requestId;
+    const configRevision = matrixConfigRevision.current;
+    const testedDraft = { ...matrixConfigDraft };
+    const requestIsCurrent = () => (
+      matrixConnectionRequest.current === requestId
+      && matrixConfigRevision.current === configRevision
+    );
     setMatrixTestedConfig(null);
     setMatrixConnection({ kind: "testing", message: "正在通过服务端代理测试连接…" });
     try {
@@ -168,10 +180,11 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           action: "test",
-          ...matrixConfigDraft,
+          ...testedDraft,
         }),
       });
       const payload = await readMatrixResponse(response);
+      if (!requestIsCurrent()) return;
       if (
         !response.ok
         || payload.ok !== true
@@ -179,7 +192,7 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       ) {
         setMatrixConnection({
           kind: "error",
-          message: matrixSafeErrorMessage(payload, matrixConfigDraft.apiKey),
+          message: matrixSafeErrorMessage(payload, testedDraft.apiKey),
         });
         return;
       }
@@ -190,12 +203,13 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         });
         return;
       }
-      setMatrixTestedConfig({ ...matrixConfigDraft });
+      setMatrixTestedConfig(testedDraft);
       setMatrixConnection({
         kind: "success",
         message: "连接测试成功，模型可用",
       });
     } catch {
+      if (!requestIsCurrent()) return;
       setMatrixConnection({
         kind: "error",
         message: "连接测试失败，请检查网络与配置后重试。",
@@ -214,6 +228,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   };
 
   const clearMatrixConfig = () => {
+    matrixConfigRevision.current += 1;
+    matrixConnectionRequest.current += 1;
     setMatrixConfigDraft(createDefaultContentMatrixConfig());
     setMatrixConfigPreset("openai");
     setMatrixTestedConfig(null);
