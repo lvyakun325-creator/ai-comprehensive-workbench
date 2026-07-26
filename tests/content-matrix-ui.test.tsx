@@ -345,7 +345,10 @@ test("regenerates the current stage from feedback without advancing, then advanc
 
   await user.type(screen.getByLabelText("第二阶段修改意见"), "先强调旧意见");
   assert.ok(screen.getByRole("button", { name: "按意见重生成当前阶段" }));
-  assert.ok(screen.getByRole("button", { name: "确认战略并进入账号设计" }));
+  assert.equal(
+    screen.getByRole("button", { name: "确认战略并进入账号设计" }).hasAttribute("disabled"),
+    true,
+  );
   await user.click(screen.getByRole("button", { name: "按意见重生成当前阶段" }));
   assert.ok(screen.getByRole("button", { name: "正在按意见重生成…" }));
 
@@ -361,13 +364,27 @@ test("regenerates the current stage from feedback without advancing, then advanc
 
   await user.click(screen.getByRole("button", { name: "按意见重生成当前阶段" }));
   assert.ok(await screen.findByText(/已采用：改用最新意见/));
+  assert.equal((screen.getByLabelText("第二阶段修改意见") as HTMLTextAreaElement).value, "");
+  assert.equal(
+    screen.getByRole("button", { name: "确认战略并进入账号设计" }).hasAttribute("disabled"),
+    false,
+  );
   assert.equal(screen.queryByRole("heading", { name: "第三阶段 · 账号分层与人设包装" }), null);
 
   await user.click(screen.getByRole("button", { name: "确认战略并进入账号设计" }));
   assert.ok(await screen.findByRole("heading", { name: "第三阶段 · 账号分层与人设包装" }));
   await user.type(screen.getByLabelText("第三阶段修改意见"), "收紧账号谱系");
+  assert.equal(
+    screen.getByRole("button", { name: "确认战术并进入执行 SOP" }).hasAttribute("disabled"),
+    true,
+  );
   await user.click(screen.getByRole("button", { name: "按意见重生成当前阶段" }));
   assert.ok(await screen.findByText(/已采用：收紧账号谱系/));
+  assert.equal((screen.getByLabelText("第三阶段修改意见") as HTMLTextAreaElement).value, "");
+  assert.equal(
+    screen.getByRole("button", { name: "确认战术并进入执行 SOP" }).hasAttribute("disabled"),
+    false,
+  );
   await user.click(screen.getByRole("button", { name: "确认战术并进入执行 SOP" }));
   assert.ok(await screen.findByRole("heading", { name: "第四阶段 · 内容裂变与起号 SOP" }));
 
@@ -395,6 +412,54 @@ test("regenerates the current stage from feedback without advancing, then advanc
   assert.match(
     JSON.stringify(runRequests[5].history),
     /已采用：收紧账号谱系/,
+  );
+});
+
+test("reapplying the identical tested configuration preserves completed stages and download", async () => {
+  const user = userEvent.setup({ document });
+  const requests: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    requests.push(body);
+    if (body.action === "test") {
+      return new Response(JSON.stringify({
+        ok: true,
+        action: "test",
+        connected: true,
+        modelAvailable: true,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    const stage = Number(body.stage);
+    return new Response(JSON.stringify({
+      ok: true,
+      action: "run",
+      stage,
+      markdown: `# 阶段 ${stage}\n保留结果 ${stage}`,
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  await prepareRunnableMatrix(user);
+  await user.click(screen.getByRole("button", { name: "开始战略分析" }));
+  await screen.findByRole("heading", { name: "第二阶段 · 战略判断" });
+  await user.click(screen.getByRole("button", { name: "确认战略并进入账号设计" }));
+  await screen.findByRole("heading", { name: "第三阶段 · 账号分层与人设包装" });
+  await user.click(screen.getByRole("button", { name: "确认战术并进入执行 SOP" }));
+  await screen.findByRole("heading", { name: "第四阶段 · 内容裂变与起号 SOP" });
+  await user.click(screen.getByRole("button", { name: "确认执行方案并生成正式成品" }));
+  await screen.findByRole("heading", { name: "第五阶段 · 正式矩阵方案" });
+  const downloadHref = screen.getByRole("link", { name: "下载 Markdown" }).getAttribute("href");
+
+  await user.click(screen.getByRole("button", { name: "Agent 配置" }));
+  const requestCountBeforeReapply = requests.length;
+  await user.click(screen.getByRole("button", { name: "应用到当前会话" }));
+  assert.equal(requests.length, requestCountBeforeReapply);
+  await user.click(screen.getByRole("button", { name: "Agent 对话" }));
+
+  assert.ok(screen.getByRole("heading", { name: "第五阶段 · 正式矩阵方案" }));
+  assert.match(screen.getByText(/保留结果 5/).textContent ?? "", /保留结果 5/);
+  assert.equal(
+    screen.getByRole("link", { name: "下载 Markdown" }).getAttribute("href"),
+    downloadHref,
   );
 });
 
@@ -618,15 +683,12 @@ test("runs stages 2 through 5 in order, keeps completed output on retry, prevent
 
   await user.click(screen.getByRole("button", { name: "开始战略分析" }));
   assert.ok(await screen.findByRole("heading", { name: "第二阶段 · 战略判断" }));
-  await user.type(screen.getByLabelText("第二阶段修改意见"), "战略部分强调搜索入口");
   await user.click(screen.getByRole("button", { name: "确认战略并进入账号设计" }));
   assert.match(await screen.findByRole("alert").then((node) => node.textContent ?? ""), /请求过于频繁/);
   assert.ok(screen.getByRole("heading", { name: "第二阶段 · 战略判断" }));
-  assert.ok(screen.getByDisplayValue("战略部分强调搜索入口"));
 
   await user.click(screen.getByRole("button", { name: "重试账号设计" }));
   assert.ok(await screen.findByRole("heading", { name: "第三阶段 · 账号分层与人设包装" }));
-  await user.type(screen.getByLabelText("第三阶段修改意见"), "品牌号只做正式承接");
   await user.click(screen.getByRole("button", { name: "确认战术并进入执行 SOP" }));
   const runningButton = screen.getByRole("button", { name: "正在生成执行 SOP…" });
   assert.equal(runningButton.hasAttribute("disabled"), true);
@@ -636,7 +698,6 @@ test("runs stages 2 through 5 in order, keeps completed output on retry, prevent
   releaseStage4?.();
   assert.ok(await screen.findByRole("heading", { name: "第四阶段 · 内容裂变与起号 SOP" }));
 
-  await user.type(screen.getByLabelText("第四阶段修改意见"), "增加相对止损口径");
   await user.click(screen.getByRole("button", { name: "确认执行方案并生成正式成品" }));
   assert.ok(await screen.findByRole("heading", { name: "第五阶段 · 正式矩阵方案" }));
   const download = screen.getByRole("link", { name: "下载 Markdown" });

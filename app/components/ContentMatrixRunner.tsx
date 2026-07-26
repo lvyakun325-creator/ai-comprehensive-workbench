@@ -143,7 +143,10 @@ export function ContentMatrixRunner({
                   </button>
                   <button
                     className="primary"
-                    disabled={!canRun}
+                    disabled={
+                      !canRun
+                      || Boolean((feedback[result.stage] ?? "").trim())
+                    }
                     onClick={() => onAdvanceStage(nextStage)}
                     type="button"
                   >

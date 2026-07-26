@@ -46,6 +46,19 @@ const MATRIX_FLOW = ["需求澄清", "战略判断", "战术设计", "执行 SOP
 
 type MatrixDiagnosisValues = Record<string, string>;
 
+function matrixConfigsMatch(
+  first: ContentMatrixSessionConfig | null,
+  second: ContentMatrixSessionConfig,
+) {
+  return Boolean(
+    first
+    && first.protocol === second.protocol
+    && first.baseUrl === second.baseUrl
+    && first.apiKey === second.apiKey
+    && first.model === second.model,
+  );
+}
+
 function ChoiceGroup({
   legend,
   name,
@@ -227,13 +240,19 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
 
   const applyMatrixConfig = () => {
     if (!matrixTestedConfig) return;
-    matrixRunRevision.current += 1;
-    matrixRunRequest.current += 1;
+    const configChanged = !matrixConfigsMatch(
+      matrixActiveConfig,
+      matrixTestedConfig,
+    );
     setMatrixActiveConfig({ ...matrixTestedConfig });
     setMatrixConnection({
       kind: "success",
       message: `当前会话已应用：${matrixTestedConfig.model}`,
     });
+    if (!configChanged) return;
+
+    matrixRunRevision.current += 1;
+    matrixRunRequest.current += 1;
     setMatrixStages([]);
     setMatrixFeedback({});
     setMatrixRunError(null);
@@ -344,6 +363,9 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
           ),
         },
       ]);
+      if (mode === "regenerate") {
+        setMatrixFeedback((current) => ({ ...current, [stage]: "" }));
+      }
     } catch {
       if (!requestIsCurrent()) return;
       setMatrixRunError({
