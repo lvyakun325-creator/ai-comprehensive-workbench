@@ -107,15 +107,13 @@ test("keeps Agent model choices isolated while content matrix opens its intake p
   await user.click(screen.getByRole("button", { name: "Agent 配置" }));
   assert.ok(
     screen.getByRole("heading", {
-      name: "内容矩阵 Agent · Agent 默认模型",
+      name: "内容矩阵 Agent · 当前会话模型",
     }),
   );
-  await user.click(screen.getByRole("button", { name: /Anthropic Claude 系列/ }));
+  await user.selectOptions(screen.getByLabelText("服务商预设"), "anthropic");
   assert.equal(
-    screen
-      .getByRole("button", { name: /Anthropic Claude 系列/ })
-      .getAttribute("aria-pressed"),
-    "true",
+    (screen.getByLabelText("协议") as HTMLSelectElement).value,
+    "anthropic",
   );
 
   await user.click(screen.getByRole("button", { name: "← 返回 Agent 项目" }));

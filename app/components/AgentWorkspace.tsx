@@ -1,5 +1,16 @@
 import type { AgentProject } from "../lib/agent-catalog.mjs";
 import { useState } from "react";
+import {
+  ContentMatrixConfigPanel,
+  createDefaultContentMatrixConfig,
+  type ContentMatrixConnectionState,
+  type ContentMatrixPreset,
+  type ContentMatrixSessionConfig,
+} from "./ContentMatrixConfigPanel";
+import {
+  ContentMatrixRunner,
+  type ContentMatrixStageResult,
+} from "./ContentMatrixRunner";
 import { ModelConfigPanel } from "./ModelConfigPanel";
 
 const PROJECT_TABS = [
@@ -90,6 +101,25 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   const [matrixDiagnosis, setMatrixDiagnosis] = useState<MatrixDiagnosisValues>({});
   const [matrixSubmitAttempted, setMatrixSubmitAttempted] = useState(false);
   const [matrixReady, setMatrixReady] = useState(false);
+  const [matrixConfigDraft, setMatrixConfigDraft] = useState(
+    createDefaultContentMatrixConfig,
+  );
+  const [matrixConfigPreset, setMatrixConfigPreset] =
+    useState<ContentMatrixPreset>("openai");
+  const [matrixTestedConfig, setMatrixTestedConfig] =
+    useState<ContentMatrixSessionConfig | null>(null);
+  const [matrixActiveConfig, setMatrixActiveConfig] =
+    useState<ContentMatrixSessionConfig | null>(null);
+  const [matrixConnection, setMatrixConnection] =
+    useState<ContentMatrixConnectionState>({ kind: "idle", message: "" });
+  const [matrixStages, setMatrixStages] = useState<ContentMatrixStageResult[]>([]);
+  const [matrixFeedback, setMatrixFeedback] = useState<Record<number, string>>({});
+  const [matrixRunningStage, setMatrixRunningStage] =
+    useState<2 | 3 | 4 | 5 | null>(null);
+  const [matrixRunError, setMatrixRunError] = useState<{
+    stage: 2 | 3 | 4 | 5;
+    message: string;
+  } | null>(null);
   const isContentMatrix = agent.id === "content-matrix";
   const requiresPrivateAssets = matrixDiagnosis.platform === "video-account";
   const requiredMatrixFields = requiresPrivateAssets
@@ -111,6 +141,158 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   const submitMatrixDiagnosis = () => {
     setMatrixSubmitAttempted(true);
     setMatrixReady(missingMatrixFields.length === 0);
+  };
+
+  const updateMatrixConfigDraft = (draft: ContentMatrixSessionConfig) => {
+    setMatrixConfigDraft(draft);
+    setMatrixTestedConfig(null);
+    setMatrixConnection({ kind: "idle", message: "配置已修改，请重新测试连接。" });
+  };
+
+  const changeMatrixPreset = (
+    preset: ContentMatrixPreset,
+    draft: ContentMatrixSessionConfig,
+  ) => {
+    setMatrixConfigPreset(preset);
+    updateMatrixConfigDraft(draft);
+  };
+
+  const testMatrixConnection = async () => {
+    if (matrixConnection.kind === "testing") return;
+    setMatrixTestedConfig(null);
+    setMatrixConnection({ kind: "testing", message: "正在通过服务端代理测试连接…" });
+    try {
+      const response = await fetch("/api/agents/content-matrix", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "test",
+          ...matrixConfigDraft,
+        }),
+      });
+      const payload = await readMatrixResponse(response);
+      if (
+        !response.ok
+        || payload.ok !== true
+        || payload.connected !== true
+      ) {
+        setMatrixConnection({
+          kind: "error",
+          message: matrixSafeErrorMessage(payload, matrixConfigDraft.apiKey),
+        });
+        return;
+      }
+      if (payload.modelAvailable !== true) {
+        setMatrixConnection({
+          kind: "error",
+          message: "连接成功，但模型列表中未找到当前模型，请核对模型名称。",
+        });
+        return;
+      }
+      setMatrixTestedConfig({ ...matrixConfigDraft });
+      setMatrixConnection({
+        kind: "success",
+        message: "连接测试成功，模型可用",
+      });
+    } catch {
+      setMatrixConnection({
+        kind: "error",
+        message: "连接测试失败，请检查网络与配置后重试。",
+      });
+    }
+  };
+
+  const applyMatrixConfig = () => {
+    if (!matrixTestedConfig) return;
+    setMatrixActiveConfig({ ...matrixTestedConfig });
+    setMatrixConnection({
+      kind: "success",
+      message: `当前会话已应用：${matrixTestedConfig.model}`,
+    });
+    setMatrixRunError(null);
+  };
+
+  const clearMatrixConfig = () => {
+    setMatrixConfigDraft(createDefaultContentMatrixConfig());
+    setMatrixConfigPreset("openai");
+    setMatrixTestedConfig(null);
+    setMatrixActiveConfig(null);
+    setMatrixConnection({
+      kind: "success",
+      message: "当前会话配置已清空；已完成的非敏感阶段结果仍保留。",
+    });
+    setMatrixRunError(null);
+  };
+
+  const runMatrixStage = async (stage: 2 | 3 | 4 | 5) => {
+    if (
+      matrixRunningStage !== null
+      || !matrixActiveConfig
+      || !matrixReady
+    ) {
+      return;
+    }
+
+    setMatrixRunningStage(stage);
+    setMatrixRunError(null);
+    const history = matrixStages
+      .filter((result) => result.stage < stage)
+      .map((result) => ({
+        stage: result.stage,
+        markdown: result.markdown,
+      }));
+    const confirmation =
+      stage > 2
+        ? { confirmed: true, confirmedStage: stage - 1 }
+        : {};
+
+    try {
+      const response = await fetch("/api/agents/content-matrix", {
+        method: "POST",
+        cache: "no-store",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "run",
+          ...matrixActiveConfig,
+          stage,
+          diagnostic: JSON.stringify(matrixDiagnosis),
+          history,
+          feedback: stage > 2 ? matrixFeedback[stage - 1] ?? "" : "",
+          ...confirmation,
+        }),
+      });
+      const payload = await readMatrixResponse(response);
+      if (
+        !response.ok
+        || payload.ok !== true
+        || payload.stage !== stage
+        || typeof payload.markdown !== "string"
+      ) {
+        setMatrixRunError({
+          stage,
+          message: matrixSafeErrorMessage(payload, matrixActiveConfig.apiKey),
+        });
+        return;
+      }
+      setMatrixStages((current) => [
+        ...current.filter((result) => result.stage !== stage),
+        {
+          stage,
+          markdown: redactMatrixSecret(
+            payload.markdown as string,
+            matrixActiveConfig.apiKey,
+          ),
+        },
+      ]);
+    } catch {
+      setMatrixRunError({
+        stage,
+        message: "模型请求失败，请检查网络后安全重试。",
+      });
+    } finally {
+      setMatrixRunningStage(null);
+    }
   };
 
   return (
@@ -156,7 +338,20 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         ))}
       </nav>
 
-      {activeTab === "Agent 配置" ? (
+      {activeTab === "Agent 配置" && isContentMatrix ? (
+        <ContentMatrixConfigPanel
+          activeConfig={matrixActiveConfig}
+          canApply={matrixTestedConfig !== null}
+          connection={matrixConnection}
+          draft={matrixConfigDraft}
+          onApply={applyMatrixConfig}
+          onClear={clearMatrixConfig}
+          onDraftChange={updateMatrixConfigDraft}
+          onPresetChange={changeMatrixPreset}
+          onTest={testMatrixConnection}
+          preset={matrixConfigPreset}
+        />
+      ) : activeTab === "Agent 配置" ? (
         <ModelConfigPanel scope="agent" agentTitle={agent.title} onPreview={onPreview} />
       ) : isContentMatrix && activeTab === "Agent 对话" ? (
         <section className="matrix-diagnosis" aria-labelledby="matrix-diagnosis-title">
@@ -331,6 +526,19 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
             ) : null}
             <button className="matrix-submit-button" type="submit">提交诊断</button>
           </form>
+          <ContentMatrixRunner
+            config={matrixActiveConfig}
+            diagnosisReady={matrixReady}
+            error={matrixRunError}
+            feedback={matrixFeedback}
+            onFeedbackChange={(stage, value) =>
+              setMatrixFeedback((current) => ({ ...current, [stage]: value }))
+            }
+            onOpenConfig={() => setActiveTab("Agent 配置")}
+            onRunStage={runMatrixStage}
+            runningStage={matrixRunningStage}
+            stages={matrixStages}
+          />
         </section>
       ) : isContentMatrix && activeTab === "项目总览" ? (
         <div className="matrix-overview">
@@ -406,4 +614,40 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       )}
     </section>
   );
+}
+
+async function readMatrixResponse(
+  response: Response,
+): Promise<Record<string, unknown>> {
+  try {
+    const payload: unknown = await response.json();
+    return typeof payload === "object" && payload !== null && !Array.isArray(payload)
+      ? payload as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function matrixSafeErrorMessage(
+  payload: Record<string, unknown>,
+  apiKey: string,
+): string {
+  const error = payload.error;
+  if (
+    typeof error === "object"
+    && error !== null
+    && !Array.isArray(error)
+    && typeof (error as Record<string, unknown>).message === "string"
+  ) {
+    return redactMatrixSecret(
+      (error as Record<string, unknown>).message as string,
+      apiKey,
+    );
+  }
+  return "服务暂时不可用，请稍后重试。";
+}
+
+function redactMatrixSecret(value: string, apiKey: string): string {
+  return apiKey ? value.split(apiKey).join("[已隐藏]") : value;
 }

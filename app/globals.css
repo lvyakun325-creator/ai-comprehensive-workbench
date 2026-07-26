@@ -1314,6 +1314,252 @@ button {
 .matrix-ready { border: 1px solid #b9e4ce; background: #effaf4; color: #25714d; }
 .matrix-submit-button { margin-top: 14px; padding: 11px 16px; }
 
+.matrix-config-panel,
+.matrix-runner {
+  padding: 22px;
+  border: 1px solid #e1e7f0;
+  border-radius: 16px;
+  background: #fff;
+}
+
+.matrix-config-heading,
+.matrix-model-status,
+.matrix-runner-heading,
+.matrix-config-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.matrix-config-heading {
+  padding-bottom: 18px;
+  border-bottom: 1px solid #e7ebf2;
+}
+
+.matrix-config-heading h2 {
+  margin: 5px 0 7px;
+  font-size: 23px;
+}
+
+.matrix-config-heading p,
+.matrix-runner-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.matrix-config-badge {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: #f4f6fa;
+  color: #7b8799;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.matrix-config-badge.ready {
+  background: #eef9f4;
+  color: #25714d;
+}
+
+.matrix-config-grid {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.matrix-config-grid label,
+.matrix-feedback {
+  display: grid;
+  gap: 7px;
+  color: #3e4b60;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.matrix-config-grid input,
+.matrix-config-grid select,
+.matrix-feedback textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 11px;
+  border: 1px solid #dce3ed;
+  border-radius: 9px;
+  background: #fbfcfe;
+  color: #354156;
+  font: inherit;
+  font-weight: 400;
+}
+
+.matrix-config-grid small {
+  color: #8591a3;
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.matrix-config-wide {
+  grid-column: 1 / -1;
+}
+
+.matrix-config-message,
+.matrix-run-error,
+.matrix-run-hint {
+  margin-top: 14px;
+  padding: 11px 13px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.matrix-config-message.idle,
+.matrix-config-message.testing {
+  border: 1px solid #cddded;
+  background: #f4f8fc;
+  color: #42647f;
+}
+
+.matrix-config-message.success {
+  border: 1px solid #b9e4ce;
+  background: #effaf4;
+  color: #25714d;
+}
+
+.matrix-config-message.error,
+.matrix-run-error {
+  border: 1px solid #f0c4c4;
+  background: #fff3f3;
+  color: #9a3636;
+}
+
+.matrix-config-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.matrix-config-actions button,
+.matrix-model-status button,
+.matrix-run-button,
+.matrix-stage-output a {
+  padding: 10px 13px;
+  border: 1px solid #d6deea;
+  border-radius: 9px;
+  background: #fff;
+  color: #4b5970;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.matrix-config-actions button.primary,
+.matrix-run-button,
+.matrix-stage-output a {
+  border-color: #6249bd;
+  background: #6249bd;
+  color: #fff;
+}
+
+.matrix-config-actions button.danger {
+  margin-left: auto;
+  border-color: #e5cccc;
+  color: #a04b4b;
+}
+
+.matrix-config-actions button:disabled,
+.matrix-run-button:disabled {
+  cursor: not-allowed;
+  opacity: .48;
+}
+
+.matrix-runner {
+  margin-top: 18px;
+  background: #fbfcff;
+}
+
+.matrix-model-status {
+  align-items: center;
+  padding: 14px;
+  border: 1px solid #ddd7f5;
+  border-radius: 12px;
+  background: #f5f2ff;
+}
+
+.matrix-model-status .panel-label {
+  margin-bottom: 5px;
+}
+
+.matrix-model-status strong {
+  color: #5946a2;
+  font-size: 13px;
+}
+
+.matrix-model-status button {
+  border-color: #cfc4f1;
+  color: #5c45b4;
+}
+
+.matrix-runner-heading {
+  align-items: end;
+  margin-top: 20px;
+}
+
+.matrix-runner-heading h3 {
+  margin: 3px 0 0;
+  font-size: 18px;
+}
+
+.matrix-stage-output {
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid #e1e7f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.matrix-stage-output h3 {
+  margin: 0 0 12px;
+  color: #3c4960;
+  font-size: 15px;
+}
+
+.matrix-stage-output pre {
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  color: #49566c;
+  font: 12px/1.75 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.matrix-feedback {
+  margin-top: 14px;
+}
+
+.matrix-feedback textarea {
+  min-height: 82px;
+  resize: vertical;
+}
+
+.matrix-stage-output a {
+  display: inline-block;
+  margin-top: 15px;
+}
+
+.matrix-run-hint {
+  border: 1px solid #f0cf98;
+  background: #fff8ec;
+  color: #8d5817;
+}
+
+.matrix-run-button {
+  margin-top: 14px;
+}
+
 @keyframes toast-in {
   from {
     transform: translate(-50%, 8px);
@@ -1477,11 +1723,25 @@ button {
   .matrix-overview,
   .matrix-form-grid,
   .matrix-optional-fields,
-  .matrix-private-assets {
+  .matrix-private-assets,
+  .matrix-config-grid {
     grid-template-columns: 1fr;
   }
 
-  .matrix-diagnosis-heading { display: grid; }
+  .matrix-diagnosis-heading,
+  .matrix-config-heading,
+  .matrix-model-status,
+  .matrix-runner-heading {
+    display: grid;
+  }
+
+  .matrix-config-wide {
+    grid-column: auto;
+  }
+
+  .matrix-config-actions button.danger {
+    margin-left: 0;
+  }
 
   .agent-directory {
     grid-template-columns: 1fr;
