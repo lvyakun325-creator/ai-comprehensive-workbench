@@ -836,6 +836,39 @@ test("rejects stage 5 shells, missing sections, wrong section order, and workflo
   }
 });
 
+test("rejects final-plan approval prompts", async () => {
+  const approvalPrompts = [
+    "请确认以上方案是否认可？",
+    "请确认上述方案是否同意。",
+  ];
+
+  for (const approvalPrompt of approvalPrompts) {
+    const runtime = createContentMatrixRuntime({
+      fetchImpl: async () =>
+        jsonResponse({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: `${VALID_FINAL_MARKDOWN}\n\n${approvalPrompt}`,
+              },
+            },
+          ],
+        }),
+    });
+
+    await assert.rejects(
+      runtime.runStage(validRunInput(5)),
+      (error) => {
+        assert.equal(error.code, "INVALID_STAGE_OUTPUT");
+        assert.match(error.message, /正式方案.*重试/);
+        assert.doesNotMatch(error.message, /认可|同意/);
+        return true;
+      },
+    );
+  }
+});
+
 test("accepts complete ordered stage 5 Markdown and does not reject compliance confirmation", async () => {
   const validOutputs = [
     VALID_FINAL_MARKDOWN,
