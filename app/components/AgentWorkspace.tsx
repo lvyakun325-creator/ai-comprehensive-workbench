@@ -9,6 +9,7 @@ import {
 } from "./ContentMatrixConfigPanel";
 import {
   ContentMatrixRunner,
+  type ContentMatrixRunOperation,
   type ContentMatrixStageResult,
 } from "./ContentMatrixRunner";
 import { ModelConfigPanel } from "./ModelConfigPanel";
@@ -114,14 +115,15 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
     useState<ContentMatrixConnectionState>({ kind: "idle", message: "" });
   const [matrixStages, setMatrixStages] = useState<ContentMatrixStageResult[]>([]);
   const [matrixFeedback, setMatrixFeedback] = useState<Record<number, string>>({});
-  const [matrixRunningStage, setMatrixRunningStage] =
-    useState<2 | 3 | 4 | 5 | null>(null);
-  const [matrixRunError, setMatrixRunError] = useState<{
-    stage: 2 | 3 | 4 | 5;
-    message: string;
-  } | null>(null);
+  const [matrixRunningOperation, setMatrixRunningOperation] =
+    useState<ContentMatrixRunOperation | null>(null);
+  const [matrixRunError, setMatrixRunError] = useState<
+    (ContentMatrixRunOperation & { message: string }) | null
+  >(null);
   const matrixConfigRevision = useRef(0);
   const matrixConnectionRequest = useRef(0);
+  const matrixRunRevision = useRef(0);
+  const matrixRunRequest = useRef(0);
   const isContentMatrix = agent.id === "content-matrix";
   const requiresPrivateAssets = matrixDiagnosis.platform === "video-account";
   const requiredMatrixFields = requiresPrivateAssets
@@ -136,8 +138,14 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   );
 
   const updateMatrixDiagnosis = (key: string, value: string) => {
+    matrixRunRevision.current += 1;
+    matrixRunRequest.current += 1;
     setMatrixDiagnosis((current) => ({ ...current, [key]: value }));
     setMatrixReady(false);
+    setMatrixStages([]);
+    setMatrixFeedback({});
+    setMatrixRunError(null);
+    setMatrixRunningOperation(null);
   };
 
   const submitMatrixDiagnosis = () => {
@@ -219,17 +227,24 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
 
   const applyMatrixConfig = () => {
     if (!matrixTestedConfig) return;
+    matrixRunRevision.current += 1;
+    matrixRunRequest.current += 1;
     setMatrixActiveConfig({ ...matrixTestedConfig });
     setMatrixConnection({
       kind: "success",
       message: `当前会话已应用：${matrixTestedConfig.model}`,
     });
+    setMatrixStages([]);
+    setMatrixFeedback({});
     setMatrixRunError(null);
+    setMatrixRunningOperation(null);
   };
 
   const clearMatrixConfig = () => {
     matrixConfigRevision.current += 1;
     matrixConnectionRequest.current += 1;
+    matrixRunRevision.current += 1;
+    matrixRunRequest.current += 1;
     setMatrixConfigDraft(createDefaultContentMatrixConfig());
     setMatrixConfigPreset("openai");
     setMatrixTestedConfig(null);
@@ -239,18 +254,43 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       message: "当前会话配置已清空；已完成的非敏感阶段结果仍保留。",
     });
     setMatrixRunError(null);
+    setMatrixRunningOperation(null);
   };
 
-  const runMatrixStage = async (stage: 2 | 3 | 4 | 5) => {
+  const updateMatrixFeedback = (
+    stage: 2 | 3 | 4,
+    value: string,
+  ) => {
+    matrixRunRevision.current += 1;
+    matrixRunRequest.current += 1;
+    setMatrixFeedback((current) => ({ ...current, [stage]: value }));
+    setMatrixRunError(null);
+    setMatrixRunningOperation(null);
+  };
+
+  const runMatrixStage = async (
+    stage: 2 | 3 | 4 | 5,
+    mode: "advance" | "regenerate",
+  ) => {
     if (
-      matrixRunningStage !== null
+      matrixRunningOperation !== null
       || !matrixActiveConfig
       || !matrixReady
+      || (mode === "regenerate" && !matrixFeedback[stage]?.trim())
     ) {
       return;
     }
 
-    setMatrixRunningStage(stage);
+    const operation = { stage, mode } as const;
+    const requestId = matrixRunRequest.current + 1;
+    matrixRunRequest.current = requestId;
+    const runRevision = matrixRunRevision.current;
+    const activeConfig = { ...matrixActiveConfig };
+    const requestIsCurrent = () => (
+      matrixRunRequest.current === requestId
+      && matrixRunRevision.current === runRevision
+    );
+    setMatrixRunningOperation(operation);
     setMatrixRunError(null);
     const history = matrixStages
       .filter((result) => result.stage < stage)
@@ -270,15 +310,18 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           action: "run",
-          ...matrixActiveConfig,
+          ...activeConfig,
           stage,
           diagnostic: JSON.stringify(matrixDiagnosis),
           history,
-          feedback: stage > 2 ? matrixFeedback[stage - 1] ?? "" : "",
+          feedback: mode === "regenerate"
+            ? matrixFeedback[stage] ?? ""
+            : "",
           ...confirmation,
         }),
       });
       const payload = await readMatrixResponse(response);
+      if (!requestIsCurrent()) return;
       if (
         !response.ok
         || payload.ok !== true
@@ -286,8 +329,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         || typeof payload.markdown !== "string"
       ) {
         setMatrixRunError({
-          stage,
-          message: matrixSafeErrorMessage(payload, matrixActiveConfig.apiKey),
+          ...operation,
+          message: matrixSafeErrorMessage(payload, activeConfig.apiKey),
         });
         return;
       }
@@ -297,17 +340,20 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
           stage,
           markdown: redactMatrixSecret(
             payload.markdown as string,
-            matrixActiveConfig.apiKey,
+            activeConfig.apiKey,
           ),
         },
       ]);
     } catch {
+      if (!requestIsCurrent()) return;
       setMatrixRunError({
-        stage,
+        ...operation,
         message: "模型请求失败，请检查网络后安全重试。",
       });
     } finally {
-      setMatrixRunningStage(null);
+      if (requestIsCurrent()) {
+        setMatrixRunningOperation(null);
+      }
     }
   };
 
@@ -547,12 +593,13 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
             diagnosisReady={matrixReady}
             error={matrixRunError}
             feedback={matrixFeedback}
-            onFeedbackChange={(stage, value) =>
-              setMatrixFeedback((current) => ({ ...current, [stage]: value }))
-            }
+            onAdvanceStage={(stage) => runMatrixStage(stage, "advance")}
+            onFeedbackChange={updateMatrixFeedback}
             onOpenConfig={() => setActiveTab("Agent 配置")}
-            onRunStage={runMatrixStage}
-            runningStage={matrixRunningStage}
+            onRegenerateStage={(stage) =>
+              runMatrixStage(stage, "regenerate")
+            }
+            runningOperation={matrixRunningOperation}
             stages={matrixStages}
           />
         </section>

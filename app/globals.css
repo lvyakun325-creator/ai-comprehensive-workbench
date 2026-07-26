@@ -1325,7 +1325,8 @@ button {
 .matrix-config-heading,
 .matrix-model-status,
 .matrix-runner-heading,
-.matrix-config-actions {
+.matrix-config-actions,
+.matrix-stage-actions {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -1443,6 +1444,7 @@ button {
 }
 
 .matrix-config-actions button,
+.matrix-stage-actions button,
 .matrix-model-status button,
 .matrix-run-button,
 .matrix-stage-output a {
@@ -1458,6 +1460,7 @@ button {
 }
 
 .matrix-config-actions button.primary,
+.matrix-stage-actions button.primary,
 .matrix-run-button,
 .matrix-stage-output a {
   border-color: #6249bd;
@@ -1472,6 +1475,7 @@ button {
 }
 
 .matrix-config-actions button:disabled,
+.matrix-stage-actions button:disabled,
 .matrix-run-button:disabled {
   cursor: not-allowed;
   opacity: .48;
@@ -1543,6 +1547,12 @@ button {
 .matrix-feedback textarea {
   min-height: 82px;
   resize: vertical;
+}
+
+.matrix-stage-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  margin-top: 12px;
 }
 
 .matrix-stage-output a {

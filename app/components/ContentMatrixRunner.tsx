@@ -8,6 +8,11 @@ export type ContentMatrixStageResult = {
   markdown: string;
 };
 
+export type ContentMatrixRunOperation = {
+  stage: 2 | 3 | 4 | 5;
+  mode: "advance" | "regenerate";
+};
+
 const STAGE_TITLES = {
   2: "第二阶段 · 战略判断",
   3: "第三阶段 · 账号分层与人设包装",
@@ -41,11 +46,12 @@ type ContentMatrixRunnerProps = {
   diagnosisReady: boolean;
   stages: ContentMatrixStageResult[];
   feedback: Record<number, string>;
-  error: { stage: 2 | 3 | 4 | 5; message: string } | null;
-  runningStage: 2 | 3 | 4 | 5 | null;
+  error: (ContentMatrixRunOperation & { message: string }) | null;
+  runningOperation: ContentMatrixRunOperation | null;
   onOpenConfig: () => void;
   onFeedbackChange: (stage: 2 | 3 | 4, value: string) => void;
-  onRunStage: (stage: 2 | 3 | 4 | 5) => void;
+  onAdvanceStage: (stage: 2 | 3 | 4 | 5) => void;
+  onRegenerateStage: (stage: 2 | 3 | 4) => void;
 };
 
 export function ContentMatrixRunner({
@@ -54,18 +60,20 @@ export function ContentMatrixRunner({
   stages,
   feedback,
   error,
-  runningStage,
+  runningOperation,
   onOpenConfig,
   onFeedbackChange,
-  onRunStage,
+  onAdvanceStage,
+  onRegenerateStage,
 }: ContentMatrixRunnerProps) {
   const finalMarkdown = stages.find((result) => result.stage === 5)?.markdown;
 
   const nextStage = Math.min(5, stages.length + 2) as 2 | 3 | 4 | 5;
   const isComplete = stages.some((result) => result.stage === 5);
-  const isRunning = runningStage !== null;
+  const isRunning = runningOperation !== null;
   const canRun = Boolean(config) && diagnosisReady && !isRunning && !isComplete;
-  const isRetry = error?.stage === nextStage;
+  const isAdvanceRetry =
+    error?.mode === "advance" && error.stage === nextStage;
 
   return (
     <section className="matrix-runner" aria-labelledby="matrix-runner-title">
@@ -99,20 +107,55 @@ export function ContentMatrixRunner({
             <h3>{STAGE_TITLES[result.stage]}</h3>
             <pre>{result.markdown}</pre>
             {isCurrentCheckpoint ? (
-              <label className="matrix-feedback">
-                {`第${["", "", "二", "三", "四"][result.stage]}阶段修改意见`}
-                <textarea
-                  aria-label={`${STAGE_TITLES[result.stage].slice(0, 4)}修改意见`}
-                  onChange={(event) =>
-                    onFeedbackChange(
-                      result.stage as 2 | 3 | 4,
-                      event.target.value,
-                    )
-                  }
-                  placeholder="没有修改可留空；确认后将连同本阶段结果进入下一阶段。"
-                  value={feedback[result.stage] ?? ""}
-                />
-              </label>
+              <>
+                <label className="matrix-feedback">
+                  {`第${["", "", "二", "三", "四"][result.stage]}阶段修改意见`}
+                  <textarea
+                    aria-label={`${STAGE_TITLES[result.stage].slice(0, 4)}修改意见`}
+                    onChange={(event) =>
+                      onFeedbackChange(
+                        result.stage as 2 | 3 | 4,
+                        event.target.value,
+                      )
+                    }
+                    placeholder="填写后可重生成当前阶段；确认推进是单独动作。"
+                    value={feedback[result.stage] ?? ""}
+                  />
+                </label>
+                <div className="matrix-stage-actions">
+                  <button
+                    disabled={
+                      !canRun
+                      || !(feedback[result.stage] ?? "").trim()
+                    }
+                    onClick={() =>
+                      onRegenerateStage(result.stage as 2 | 3 | 4)
+                    }
+                    type="button"
+                  >
+                    {runningOperation?.mode === "regenerate"
+                      && runningOperation.stage === result.stage
+                      ? "正在按意见重生成…"
+                      : error?.mode === "regenerate"
+                          && error.stage === result.stage
+                        ? "重试按意见重生成当前阶段"
+                        : "按意见重生成当前阶段"}
+                  </button>
+                  <button
+                    className="primary"
+                    disabled={!canRun}
+                    onClick={() => onAdvanceStage(nextStage)}
+                    type="button"
+                  >
+                    {runningOperation?.mode === "advance"
+                      && runningOperation.stage === nextStage
+                      ? RUNNING_BUTTON_LABELS[nextStage]
+                      : isAdvanceRetry
+                        ? RETRY_BUTTON_LABELS[nextStage]
+                        : NEXT_BUTTON_LABELS[nextStage]}
+                  </button>
+                </div>
+              </>
             ) : null}
             {result.stage === 5 && finalMarkdown ? (
               <MarkdownDownload key={finalMarkdown} markdown={finalMarkdown} />
@@ -127,16 +170,17 @@ export function ContentMatrixRunner({
           请先完成当前会话模型配置，再从 Agent 配置返回继续运行。
         </p>
       ) : null}
-      {diagnosisReady && !isComplete ? (
+      {diagnosisReady && !isComplete && stages.length === 0 ? (
         <button
           className="matrix-run-button"
           disabled={!canRun}
-          onClick={() => onRunStage(nextStage)}
+          onClick={() => onAdvanceStage(nextStage)}
           type="button"
         >
-          {runningStage === nextStage
+          {runningOperation?.mode === "advance"
+            && runningOperation.stage === nextStage
             ? RUNNING_BUTTON_LABELS[nextStage]
-            : isRetry
+            : isAdvanceRetry
               ? RETRY_BUTTON_LABELS[nextStage]
               : NEXT_BUTTON_LABELS[nextStage]}
         </button>
