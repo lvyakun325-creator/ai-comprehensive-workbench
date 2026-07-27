@@ -286,6 +286,41 @@ test("APINebula CODEX preset uses the recommended endpoint and adds a safe actio
   assert.equal(screen.queryByLabelText("API Key"), null);
 });
 
+test("APINebula probe disclosure follows the effective protocol and exact hostname", async () => {
+  const user = userEvent.setup({ document });
+  await openContentMatrixConfig(user);
+  await user.selectOptions(
+    screen.getByLabelText("服务商预设"),
+    "apinebula-codex",
+  );
+
+  assert.ok(screen.getByRole("button", { name: "测试文案模型" }));
+  assert.ok(screen.getByText(/可能产生极少量模型调用费用/));
+
+  await user.selectOptions(screen.getByLabelText("协议"), "anthropic");
+  assert.ok(screen.getByRole("button", { name: "测试连接" }));
+  assert.equal(screen.queryByText(/可能产生极少量模型调用费用/), null);
+
+  await user.selectOptions(screen.getByLabelText("协议"), "openai-compatible");
+  await user.clear(screen.getByLabelText("API 地址"));
+  await user.type(
+    screen.getByLabelText("API 地址"),
+    "https://apinebula.ai.evil.example/v1",
+  );
+  assert.ok(screen.getByRole("button", { name: "测试连接" }));
+  assert.equal(screen.queryByText(/可能产生极少量模型调用费用/), null);
+
+  await user.selectOptions(screen.getByLabelText("服务商预设"), "custom");
+  await user.clear(screen.getByLabelText("API 地址"));
+  await user.type(
+    screen.getByLabelText("API 地址"),
+    "https://apinebula.ai/v1",
+  );
+  assert.ok(screen.getByRole("button", { name: "测试文案模型" }));
+  assert.ok(screen.getByText(/可能产生极少量模型调用费用/));
+  assert.equal(storageAccesses, 0);
+});
+
 test("ignores a successful connection response that arrives after the draft configuration changes", async () => {
   const user = userEvent.setup({ document });
   let releaseResponse: (() => void) | undefined;

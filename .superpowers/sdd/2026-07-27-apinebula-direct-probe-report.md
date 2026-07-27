@@ -53,3 +53,23 @@ Updated the APINebula-only configuration UI to:
 - The provider reply is parsed only for validity and is never returned to the browser.
 - API Key remains only in the existing React page memory and provider auth header.
 - A successful probe is a real generation request and may incur a very small charge; the UI now states this explicitly.
+
+## Review fix: disclosure/runtime predicate alignment
+
+### RED
+
+Added tests for both directions of the UI decision:
+
+- changing the APINebula preset to the wrong protocol or a lookalike hostname must restore `测试连接` and remove the charge disclosure;
+- a custom OpenAI-compatible configuration using the exact official hostname must show `测试文案模型` and the charge disclosure.
+
+The UI test failed as expected because it still keyed the disclosure from the selected preset. Runtime boundary fixtures for both lookalike hostnames and the wrong protocol passed, confirming the server branch was already exact.
+
+### GREEN
+
+- Exported one client-safe pure `usesApinebulaDirectProbe(protocol, baseUrl)` predicate from the content-matrix runtime.
+- Reused that predicate in both the server runtime and the content-matrix configuration UI.
+- Invalid URLs safely return `false`.
+- Exact official hostnames plus `openai-compatible` are now the only condition that enables both the paid probe and its disclosure.
+
+Targeted review-fix verification: `3/3` passed.

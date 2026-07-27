@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { ContentMatrixProtocol } from "../lib/content-matrix-runtime";
+import {
+  usesApinebulaDirectProbe,
+  type ContentMatrixProtocol,
+} from "../lib/content-matrix-runtime";
 
 export type ContentMatrixSessionConfig = {
   protocol: ContentMatrixProtocol;
@@ -90,7 +93,10 @@ export function ContentMatrixConfigPanel({
   onClear,
 }: ContentMatrixConfigPanelProps) {
   const apiKeyInput = useRef<HTMLInputElement>(null);
-  const usesApinebulaProbe = preset === "apinebula-codex";
+  const usesApinebulaProbe = usesApinebulaDirectProbe(
+    draft.protocol,
+    draft.baseUrl,
+  );
 
   useEffect(() => {
     if (draft.apiKey === "" && apiKeyInput.current) {

@@ -154,6 +154,54 @@ test("APINebula direct probe rejects malformed chat output and keeps auth errors
   );
 });
 
+test("APINebula probe matching rejects lookalike hosts and the wrong protocol", async () => {
+  const cases = [
+    config(
+      "openai-compatible",
+      "https://apinebula.ai.evil.example/v1",
+      "gpt-5.5",
+    ),
+    config(
+      "openai-compatible",
+      "https://api.yhlxj.ai.evil.example/v1",
+      "gpt-5.5",
+    ),
+    config("anthropic", "https://apinebula.ai/v1", "gpt-5.5"),
+  ];
+
+  for (const testConfig of cases) {
+    let captured;
+    const runtime = createContentMatrixRuntime({
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), init };
+        return jsonResponse({
+          data: [
+            testConfig.protocol === "anthropic"
+              ? {
+                  type: "model",
+                  id: "gpt-5.5",
+                  display_name: "GPT 5.5",
+                  created_at: "2026-01-01T00:00:00Z",
+                }
+              : {
+                  id: "gpt-5.5",
+                  object: "model",
+                  created: 1,
+                  owned_by: "test",
+                },
+          ],
+        });
+      },
+    });
+
+    const result = await runtime.testConnection(testConfig);
+
+    assert.deepEqual(result, { connected: true, modelAvailable: true });
+    assert.equal(captured.url.endsWith("/models"), true);
+    assert.equal(captured.init.method, "GET");
+  }
+});
+
 test("Anthropic connection test uses required versioned API-key auth", async () => {
   let captured;
   const runtime = createContentMatrixRuntime({

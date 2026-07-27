@@ -122,7 +122,7 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
   return {
     async testConnection(input: unknown) {
       const config = validateConfig(input);
-      if (usesApinebulaDirectProbe(config)) {
+      if (usesApinebulaDirectProbe(config.protocol, config.baseUrl)) {
         const body = await fetchProviderJson(
           fetchImpl,
           timeoutMs,
@@ -169,10 +169,17 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
   };
 }
 
-function usesApinebulaDirectProbe(config: ValidatedConfig): boolean {
-  if (config.protocol !== "openai-compatible") return false;
-  const hostname = new URL(config.baseUrl).hostname.toLowerCase();
-  return hostname === "apinebula.ai" || hostname === "api.yhlxj.ai";
+export function usesApinebulaDirectProbe(
+  protocol: ContentMatrixProtocol,
+  baseUrl: string,
+): boolean {
+  if (protocol !== "openai-compatible") return false;
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === "apinebula.ai" || hostname === "api.yhlxj.ai";
+  } catch {
+    return false;
+  }
 }
 
 function buildApinebulaProbeRequest(config: ValidatedConfig) {
