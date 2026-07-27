@@ -210,16 +210,16 @@ test("only content matrix exposes temporary API configuration and requires a suc
 test("APINebula CODEX preset uses the recommended endpoint and adds a safe actionable outage hint", async () => {
   const user = userEvent.setup({ document });
   const fakeKey = "sk-fake-apinebula-secret";
-  const requests: Array<Record<string, unknown>> = [];
-  globalThis.fetch = async (_input, init) => {
-    requests.push(JSON.parse(String(init?.body)));
-    return new Response(JSON.stringify({
-      ok: false,
-      error: {
-        code: "PROVIDER_UNAVAILABLE",
-        message: `upstream https://api.yhlxj.ai/v1 failed with ${fakeKey}`,
-      },
-    }), { status: 502, headers: { "content-type": "application/json" } });
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = async (input, init) => {
+    requests.push({
+      url: String(input),
+      body: JSON.parse(String(init?.body)),
+    });
+    return new Response(
+      `upstream https://apinebula.ai/v1 failed with ${fakeKey}`,
+      { status: 503 },
+    );
   };
 
   await openContentMatrixConfig(user);
@@ -257,16 +257,18 @@ test("APINebula CODEX preset uses the recommended endpoint and adds a safe actio
   const alert = await screen.findByRole("alert");
   assert.equal(
     alert.textContent,
-    "上游服务暂时不可用；APINebula 请确认使用官方 API 地址、CODEX 分组令牌及控制台模型名。",
+    "模型服务暂时不可用，请稍后重试。",
   );
   assert.equal(alert.textContent?.includes(fakeKey), false);
   assert.equal(alert.textContent?.includes("apinebula.ai"), false);
-  assert.deepEqual(requests[0], {
-    action: "test",
-    protocol: "openai-compatible",
-    baseUrl: "https://apinebula.ai/v1",
-    apiKey: fakeKey,
+  assert.equal(requests[0].url, "https://apinebula.ai/v1/chat/completions");
+  assert.deepEqual(requests[0].body, {
     model: "gpt-5.5",
+    messages: [
+      { role: "system", content: "你是接口连通性测试助手。" },
+      { role: "user", content: "只回复：连接正常" },
+    ],
+    max_tokens: 32,
   });
   assert.equal(storageAccesses, 0);
 
@@ -318,6 +320,147 @@ test("APINebula probe disclosure follows the effective protocol and exact hostna
   );
   assert.ok(screen.getByRole("button", { name: "测试文案模型" }));
   assert.ok(screen.getByText(/可能产生极少量模型调用费用/));
+  assert.equal(storageAccesses, 0);
+});
+
+test("APINebula tests and runs content matrix stages directly in the browser without sending the Key to the workbench route", async () => {
+  const user = userEvent.setup({ document });
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  const fakeKey = "sk-direct-browser-only";
+  globalThis.fetch = async (input, init) => {
+    requests.push({ url: String(input), init });
+    const body = JSON.parse(String(init?.body));
+    const isProbe = body.messages?.[0]?.content === "你是接口连通性测试助手。";
+    const isStageThree = /第三阶段/.test(body.messages?.[0]?.content ?? "");
+    return new Response(JSON.stringify({
+      id: isProbe ? "chatcmpl-probe" : "chatcmpl-stage",
+      object: "chat.completion",
+      created: 1,
+      model: "gpt-5.5",
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: isProbe
+              ? "连接正常"
+              : isStageThree
+                ? "## 账号配置\n浏览器直连第三阶段结果"
+                : "## 战略判断\n浏览器直连阶段结果",
+          },
+          finish_reason: "stop",
+        },
+      ],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  await openContentMatrixConfig(user);
+  await user.selectOptions(
+    screen.getByLabelText("服务商预设"),
+    "apinebula-codex",
+  );
+  assert.match(
+    screen.getByText(/浏览器直接发送至APINebula官方域名/).textContent ?? "",
+    /Key不经过工作台服务端.*极少量费用/,
+  );
+  await user.type(screen.getByLabelText("API Key"), fakeKey);
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await screen.findByText("连接测试成功，模型可用");
+  await user.click(screen.getByRole("button", { name: "应用到当前会话" }));
+  await user.click(screen.getByRole("button", { name: "Agent 对话" }));
+  await fillCompleteDiagnosis(user);
+  await user.click(screen.getByRole("button", { name: "开始战略分析" }));
+  assert.ok(await screen.findByText(/浏览器直连阶段结果/));
+  await user.click(
+    screen.getByRole("button", { name: "确认战略并进入账号设计" }),
+  );
+  assert.ok(await screen.findByText(/浏览器直连第三阶段结果/));
+
+  assert.equal(requests.length, 3);
+  assert.deepEqual(
+    requests.map(({ url }) => url),
+    [
+      "https://apinebula.ai/v1/chat/completions",
+      "https://apinebula.ai/v1/chat/completions",
+      "https://apinebula.ai/v1/chat/completions",
+    ],
+  );
+  assert.equal(
+    requests.some(({ url }) => url.includes("/api/agents/content-matrix")),
+    false,
+  );
+  const probeBody = JSON.parse(String(requests[0].init?.body));
+  assert.deepEqual(probeBody, {
+    model: "gpt-5.5",
+    messages: [
+      { role: "system", content: "你是接口连通性测试助手。" },
+      { role: "user", content: "只回复：连接正常" },
+    ],
+    max_tokens: 32,
+  });
+  const stageBody = JSON.parse(String(requests[1].init?.body));
+  assert.match(stageBody.messages[0].content, /第二阶段/);
+  assert.match(stageBody.messages[1].content, /全国可发货/);
+  assert.equal(JSON.stringify(stageBody).includes(fakeKey), false);
+  const stageThreeBody = JSON.parse(String(requests[2].init?.body));
+  assert.match(stageThreeBody.messages[0].content, /第三阶段/);
+  assert.match(stageThreeBody.messages[1].content, /浏览器直连阶段结果/);
+  assert.equal(
+    new Headers(requests[0].init?.headers).get("authorization"),
+    `Bearer ${fakeKey}`,
+  );
+  assert.equal(document.documentElement.outerHTML.includes(fakeKey), false);
+  assert.equal(storageAccesses, 0);
+});
+
+test("non-APINebula providers keep using the workbench server proxy", async () => {
+  const user = userEvent.setup({ document });
+  const urls: string[] = [];
+  globalThis.fetch = async (input) => {
+    urls.push(String(input));
+    return new Response(JSON.stringify({
+      ok: true,
+      action: "test",
+      connected: true,
+      modelAvailable: true,
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  await openContentMatrixConfig(user);
+  await user.type(screen.getByLabelText("API Key"), "sk-server-proxy-only");
+  await user.click(screen.getByRole("button", { name: "测试连接" }));
+  await screen.findByText("连接测试成功，模型可用");
+
+  assert.deepEqual(urls, ["/api/agents/content-matrix"]);
+  assert.match(
+    screen.getByText(/模型请求会经过工作台服务端代理/).textContent ?? "",
+    /刷新即清空/,
+  );
+  assert.equal(storageAccesses, 0);
+});
+
+test("APINebula browser-direct failures show only safe runtime errors", async () => {
+  const user = userEvent.setup({ document });
+  const fakeKey = "sk-provider-must-not-reflect";
+  globalThis.fetch = async () =>
+    new Response(`provider rejected ${fakeKey} at https://apinebula.ai/v1`, {
+      status: 401,
+    });
+
+  await openContentMatrixConfig(user);
+  await user.selectOptions(
+    screen.getByLabelText("服务商预设"),
+    "apinebula-codex",
+  );
+  await user.type(screen.getByLabelText("API Key"), fakeKey);
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+
+  const alert = await screen.findByRole("alert");
+  assert.match(alert.textContent ?? "", /鉴权失败/);
+  assert.equal(alert.textContent?.includes(fakeKey), false);
+  assert.equal(alert.textContent?.includes("provider rejected"), false);
+  assert.equal(alert.textContent?.includes("apinebula.ai"), false);
+  assert.equal(document.documentElement.outerHTML.includes(fakeKey), false);
   assert.equal(storageAccesses, 0);
 });
 

@@ -12,6 +12,11 @@ import {
   type ContentMatrixRunOperation,
   type ContentMatrixStageResult,
 } from "./ContentMatrixRunner";
+import {
+  ContentMatrixRuntimeError,
+  createContentMatrixRuntime,
+  usesApinebulaDirectProbe,
+} from "../lib/content-matrix-runtime";
 import { ModelConfigPanel } from "./ModelConfigPanel";
 
 const PROJECT_TABS = [
@@ -192,9 +197,32 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       matrixConnectionRequest.current === requestId
       && matrixConfigRevision.current === configRevision
     );
+    const directApinebula = usesApinebulaDirectProbe(
+      testedDraft.protocol,
+      testedDraft.baseUrl,
+    );
     setMatrixTestedConfig(null);
-    setMatrixConnection({ kind: "testing", message: "正在通过服务端代理测试连接…" });
+    setMatrixConnection({
+      kind: "testing",
+      message: directApinebula
+        ? "正在由浏览器直接测试 APINebula 文案模型…"
+        : "正在通过服务端代理测试连接…",
+    });
     try {
+      if (directApinebula) {
+        const result = await createContentMatrixRuntime({
+          fetchImpl: fetch,
+        }).testConnection(testedDraft);
+        if (!requestIsCurrent()) return;
+        setMatrixTestedConfig(testedDraft);
+        setMatrixConnection({
+          kind: "success",
+          message: result.modelAvailable
+            ? "连接测试成功，模型可用"
+            : "连接成功，但模型列表中未找到当前模型，请核对模型名称。",
+        });
+        return;
+      }
       const response = await fetch("/api/agents/content-matrix", {
         method: "POST",
         cache: "no-store",
@@ -233,11 +261,13 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         kind: "success",
         message: "连接测试成功，模型可用",
       });
-    } catch {
+    } catch (error) {
       if (!requestIsCurrent()) return;
       setMatrixConnection({
         kind: "error",
-        message: "连接测试失败，请检查网络与配置后重试。",
+        message: error instanceof ContentMatrixRuntimeError
+          ? error.message
+          : "连接测试失败，请检查网络与配置后重试。",
       });
     }
   };
@@ -325,22 +355,47 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       stage > 2
         ? { confirmed: true, confirmedStage: stage - 1 }
         : {};
+    const runPayload = {
+      ...activeConfig,
+      stage,
+      diagnostic: JSON.stringify(matrixDiagnosis),
+      history,
+      feedback: mode === "regenerate"
+        ? matrixFeedback[stage] ?? ""
+        : "",
+      ...confirmation,
+    };
 
     try {
+      if (
+        usesApinebulaDirectProbe(
+          activeConfig.protocol,
+          activeConfig.baseUrl,
+        )
+      ) {
+        const result = await createContentMatrixRuntime({
+          fetchImpl: fetch,
+        }).runStage(runPayload);
+        if (!requestIsCurrent()) return;
+        setMatrixStages((current) => [
+          ...current.filter((stageResult) => stageResult.stage !== stage),
+          {
+            stage,
+            markdown: redactMatrixSecret(result.markdown, activeConfig.apiKey),
+          },
+        ]);
+        if (mode === "regenerate") {
+          setMatrixFeedback((current) => ({ ...current, [stage]: "" }));
+        }
+        return;
+      }
       const response = await fetch("/api/agents/content-matrix", {
         method: "POST",
         cache: "no-store",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           action: "run",
-          ...activeConfig,
-          stage,
-          diagnostic: JSON.stringify(matrixDiagnosis),
-          history,
-          feedback: mode === "regenerate"
-            ? matrixFeedback[stage] ?? ""
-            : "",
-          ...confirmation,
+          ...runPayload,
         }),
       });
       const payload = await readMatrixResponse(response);
@@ -370,11 +425,13 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       if (mode === "regenerate") {
         setMatrixFeedback((current) => ({ ...current, [stage]: "" }));
       }
-    } catch {
+    } catch (error) {
       if (!requestIsCurrent()) return;
       setMatrixRunError({
         ...operation,
-        message: "模型请求失败，请检查网络后安全重试。",
+        message: error instanceof ContentMatrixRuntimeError
+          ? error.message
+          : "模型请求失败，请检查网络后安全重试。",
       });
     } finally {
       if (requestIsCurrent()) {

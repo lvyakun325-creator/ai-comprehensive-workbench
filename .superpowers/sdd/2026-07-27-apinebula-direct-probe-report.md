@@ -73,3 +73,37 @@ The UI test failed as expected because it still keyed the disclosure from the se
 - Exact official hostnames plus `openai-compatible` are now the only condition that enables both the paid probe and its disclosure.
 
 Targeted review-fix verification: `3/3` passed.
+
+## Root-cause closure: browser-direct APINebula path
+
+### Evidence
+
+- The reference new-media generator successfully loaded its already-saved text-model configuration and returned `文案模型连接正常`.
+- The same saved configuration returned HTTP 200 with non-empty OpenAI `choices/message/content` when called locally with the fixed 32-token probe.
+- The deployed Sites route returned the same sanitized `PROVIDER_UNAVAILABLE` result for fake-key requests to both official APINebula hostnames, isolating the failure to the Cloudflare outbound path rather than one hostname or token format.
+- Both official domains answered the workbench-origin CORS preflight with status 204 and permitted the required origin, headers, and POST method.
+- No real API Key was read, copied, logged, or written during this implementation.
+
+### RED
+
+Added React behavior tests requiring:
+
+- APINebula test and stage execution to call the official provider URL directly instead of the same-origin workbench route;
+- a later confirmed stage to preserve the runtime-built history and stage prompt;
+- APINebula 401 bodies, URLs, and Keys to be replaced by the runtime's safe error;
+- non-APINebula providers to remain on the workbench server proxy;
+- browser storage and the rendered DOM to remain free of the Key.
+
+The direct-call and safe-error tests both failed before implementation because APINebula still used the same-origin route and the configuration panel still claimed every request used the server proxy.
+
+### GREEN
+
+- `AgentWorkspace` now calls the existing `createContentMatrixRuntime({ fetchImpl: fetch })` only when the shared exact-host/protocol predicate selects APINebula.
+- Both connection testing and stages 2 through 5 reuse the same runtime validation, fixed probe, prompts, confirmation rules, response parsing, timeout, redirect blocking, Key redaction, and final-stage contract.
+- The existing revision/request guards still discard stale direct responses.
+- Known runtime errors expose only `ContentMatrixRuntimeError.message`; unknown failures use the existing generic safe message.
+- Other providers still POST only to `/api/agents/content-matrix`.
+- The panel now accurately distinguishes the APINebula browser-direct path from the server-proxy path and discloses the small probe charge.
+
+Final browser-direct targeted verification: `5/5` passed.
+Full verification after this change: build passed and `77/77` tests passed.
