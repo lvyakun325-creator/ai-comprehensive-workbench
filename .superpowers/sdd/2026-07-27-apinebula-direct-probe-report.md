@@ -107,3 +107,21 @@ The direct-call and safe-error tests both failed before implementation because A
 
 Final browser-direct targeted verification: `5/5` passed.
 Full verification after this change: build passed and `77/77` tests passed.
+
+## Review fix: draft versus active-session disclosure
+
+### RED
+
+A new React test applied an APINebula browser-direct configuration and then edited the draft back to a proxied provider. It failed because the panel described only the draft, incorrectly implying the already-applied session would run through the server. The inverse draft/active mismatch was included in the same behavior test.
+
+### GREEN
+
+- The panel now labels two independent paths:
+  - `当前草稿测试路径`, derived from the editable draft;
+  - `已应用会话运行路径`, derived from `activeConfig`.
+- Applying APINebula and editing the draft to another provider keeps the active-session browser-direct disclosure accurate.
+- Applying a proxied provider and editing the draft to APINebula shows the inverse paths accurately.
+- Neither disclosure renders a Key.
+- The browser-direct integration test now runs and validates every stage from 2 through 5, including each confirmation and the accumulated prior-stage history.
+
+Final verification: build passed; `78/78` tests passed.

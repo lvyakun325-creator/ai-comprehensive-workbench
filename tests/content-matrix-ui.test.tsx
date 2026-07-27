@@ -147,7 +147,11 @@ test("only content matrix exposes temporary API configuration and requires a suc
   assert.equal(keyInput.getAttribute("type"), "password");
   assert.match(
     screen.getByText(/Key 只保留在当前页面内存/).textContent ?? "",
-    /刷新即清空.*服务端代理/,
+    /刷新即清空/,
+  );
+  assert.match(
+    screen.getByText(/^当前草稿测试路径/).textContent ?? "",
+    /工作台服务端代理/,
   );
   assert.equal(
     screen.getByRole("button", { name: "应用到当前会话" }).hasAttribute("disabled"),
@@ -323,6 +327,73 @@ test("APINebula probe disclosure follows the effective protocol and exact hostna
   assert.equal(storageAccesses, 0);
 });
 
+test("configuration disclosure distinguishes the draft test path from the applied session run path", async () => {
+  const user = userEvent.setup({ document });
+  globalThis.fetch = async (input, init) => {
+    if (String(input) === "/api/agents/content-matrix") {
+      return new Response(JSON.stringify({
+        ok: true,
+        action: "test",
+        connected: true,
+        modelAvailable: true,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    const body = JSON.parse(String(init?.body));
+    const isProbe = body.messages?.[0]?.content === "你是接口连通性测试助手。";
+    return new Response(JSON.stringify({
+      choices: [
+        {
+          message: {
+            role: "assistant",
+            content: isProbe ? "连接正常" : "不应运行",
+          },
+        },
+      ],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  await openContentMatrixConfig(user);
+  await user.selectOptions(
+    screen.getByLabelText("服务商预设"),
+    "apinebula-codex",
+  );
+  await user.type(screen.getByLabelText("API Key"), "sk-active-direct");
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await screen.findByText("连接测试成功，模型可用");
+  await user.click(screen.getByRole("button", { name: "应用到当前会话" }));
+
+  await user.selectOptions(screen.getByLabelText("服务商预设"), "openai");
+  assert.match(
+    screen.getByText(/^当前草稿测试路径/).textContent ?? "",
+    /工作台服务端代理/,
+  );
+  assert.match(
+    screen.getByText(/^已应用会话运行路径/).textContent ?? "",
+    /浏览器直接发送至APINebula官方域名.*Key不经过工作台服务端/,
+  );
+
+  await user.type(screen.getByLabelText("API Key"), "sk-active-proxy");
+  await user.click(screen.getByRole("button", { name: "测试连接" }));
+  await screen.findByText("连接测试成功，模型可用");
+  await user.click(screen.getByRole("button", { name: "应用到当前会话" }));
+  await user.selectOptions(
+    screen.getByLabelText("服务商预设"),
+    "apinebula-codex",
+  );
+
+  assert.match(
+    screen.getByText(/^当前草稿测试路径/).textContent ?? "",
+    /浏览器直接发送至APINebula官方域名.*极少量费用/,
+  );
+  assert.match(
+    screen.getByText(/^已应用会话运行路径/).textContent ?? "",
+    /工作台服务端代理/,
+  );
+  assert.equal(document.documentElement.outerHTML.includes("sk-active-direct"), false);
+  assert.equal(document.documentElement.outerHTML.includes("sk-active-proxy"), false);
+  assert.equal(storageAccesses, 0);
+});
+
 test("APINebula tests and runs content matrix stages directly in the browser without sending the Key to the workbench route", async () => {
   const user = userEvent.setup({ document });
   const requests: Array<{ url: string; init?: RequestInit }> = [];
@@ -332,6 +403,22 @@ test("APINebula tests and runs content matrix stages directly in the browser wit
     const body = JSON.parse(String(init?.body));
     const isProbe = body.messages?.[0]?.content === "你是接口连通性测试助手。";
     const isStageThree = /第三阶段/.test(body.messages?.[0]?.content ?? "");
+    const isStageFour = /第四阶段/.test(body.messages?.[0]?.content ?? "");
+    const isStageFive = /第五阶段/.test(body.messages?.[0]?.content ?? "");
+    const finalMarkdown = `# 最终矩阵方案
+结论：推荐采用章鱼型矩阵，先验证再复制。
+
+## 战略判断与矩阵总览
+先做小红书搜索。
+
+## 账号分层与战术配置
+品牌号负责承接。
+
+## 执行 SOP 与启动顺序
+首周验证后复制。
+
+## 风险控制与止损标准
+发布前人工复核。`;
     return new Response(JSON.stringify({
       id: isProbe ? "chatcmpl-probe" : "chatcmpl-stage",
       object: "chat.completion",
@@ -344,6 +431,10 @@ test("APINebula tests and runs content matrix stages directly in the browser wit
             role: "assistant",
             content: isProbe
               ? "连接正常"
+              : isStageFive
+                ? finalMarkdown
+                : isStageFour
+                  ? "## 执行 SOP\n浏览器直连第四阶段结果"
               : isStageThree
                 ? "## 账号配置\n浏览器直连第三阶段结果"
                 : "## 战略判断\n浏览器直连阶段结果",
@@ -375,11 +466,23 @@ test("APINebula tests and runs content matrix stages directly in the browser wit
     screen.getByRole("button", { name: "确认战略并进入账号设计" }),
   );
   assert.ok(await screen.findByText(/浏览器直连第三阶段结果/));
+  await user.click(
+    screen.getByRole("button", { name: "确认战术并进入执行 SOP" }),
+  );
+  assert.ok(await screen.findByText(/浏览器直连第四阶段结果/));
+  await user.click(
+    screen.getByRole("button", { name: "确认执行方案并生成正式成品" }),
+  );
+  assert.ok(await screen.findByRole("heading", {
+    name: "第五阶段 · 正式矩阵方案",
+  }));
 
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 5);
   assert.deepEqual(
     requests.map(({ url }) => url),
     [
+      "https://apinebula.ai/v1/chat/completions",
+      "https://apinebula.ai/v1/chat/completions",
       "https://apinebula.ai/v1/chat/completions",
       "https://apinebula.ai/v1/chat/completions",
       "https://apinebula.ai/v1/chat/completions",
@@ -405,6 +508,12 @@ test("APINebula tests and runs content matrix stages directly in the browser wit
   const stageThreeBody = JSON.parse(String(requests[2].init?.body));
   assert.match(stageThreeBody.messages[0].content, /第三阶段/);
   assert.match(stageThreeBody.messages[1].content, /浏览器直连阶段结果/);
+  const stageFourBody = JSON.parse(String(requests[3].init?.body));
+  assert.match(stageFourBody.messages[0].content, /第四阶段/);
+  assert.match(stageFourBody.messages[1].content, /浏览器直连第三阶段结果/);
+  const stageFiveBody = JSON.parse(String(requests[4].init?.body));
+  assert.match(stageFiveBody.messages[0].content, /第五阶段/);
+  assert.match(stageFiveBody.messages[1].content, /浏览器直连第四阶段结果/);
   assert.equal(
     new Headers(requests[0].init?.headers).get("authorization"),
     `Bearer ${fakeKey}`,
@@ -433,8 +542,8 @@ test("non-APINebula providers keep using the workbench server proxy", async () =
 
   assert.deepEqual(urls, ["/api/agents/content-matrix"]);
   assert.match(
-    screen.getByText(/模型请求会经过工作台服务端代理/).textContent ?? "",
-    /刷新即清空/,
+    screen.getByText(/^当前草稿测试路径/).textContent ?? "",
+    /工作台服务端代理/,
   );
   assert.equal(storageAccesses, 0);
 });

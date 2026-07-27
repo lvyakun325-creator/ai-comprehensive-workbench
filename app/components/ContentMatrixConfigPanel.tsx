@@ -97,6 +97,9 @@ export function ContentMatrixConfigPanel({
     draft.protocol,
     draft.baseUrl,
   );
+  const activeUsesApinebulaProbe = activeConfig
+    ? usesApinebulaDirectProbe(activeConfig.protocol, activeConfig.baseUrl)
+    : false;
 
   useEffect(() => {
     if (draft.apiKey === "" && apiKeyInput.current) {
@@ -131,15 +134,21 @@ export function ContentMatrixConfigPanel({
         <div>
           <span className="eyebrow">CONTENT MATRIX RUNTIME</span>
           <h2 id="matrix-config-title">内容矩阵 Agent · 当前会话模型</h2>
-          {usesApinebulaProbe ? (
-            <p>
-              API Key 只保留在当前页面内存中，刷新即清空；当前会话由浏览器直接发送至APINebula官方域名，Key不经过工作台服务端；测试会产生极少量费用。
-            </p>
-          ) : (
-            <p>
-              API Key 只保留在当前页面内存中，刷新即清空；模型请求会经过工作台服务端代理。
-            </p>
-          )}
+          <p>API Key 只保留在当前页面内存中，刷新即清空。</p>
+          <p>
+            当前草稿测试路径：
+            {usesApinebulaProbe
+              ? "浏览器直接发送至APINebula官方域名，Key不经过工作台服务端；测试会产生极少量费用。"
+              : "经过工作台服务端代理。"}
+          </p>
+          <p>
+            已应用会话运行路径：
+            {!activeConfig
+              ? "尚未应用会话配置。"
+              : activeUsesApinebulaProbe
+                ? "浏览器直接发送至APINebula官方域名，Key不经过工作台服务端。"
+                : "经过工作台服务端代理。"}
+          </p>
         </div>
         <span className={`matrix-config-badge ${activeConfig ? "ready" : ""}`}>
           {activeConfig ? "会话已配置" : "尚未应用"}
