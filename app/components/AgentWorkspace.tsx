@@ -1,5 +1,5 @@
 import type { AgentProject } from "../lib/agent-catalog.mjs";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ContentMatrixConfigPanel,
   createDefaultContentMatrixConfig,
@@ -31,6 +31,7 @@ const PROJECT_TABS = [
 ];
 
 const PROJECT_STATUS = "等待接收本项目任务";
+const APINEBULA_GENERATION_TIMEOUT_MS = 180_000;
 
 const MATRIX_DIAGNOSIS_FIELDS = [
   ["platform", "主攻平台"],
@@ -142,6 +143,7 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   const matrixConnectionRequest = useRef(0);
   const matrixRunRevision = useRef(0);
   const matrixRunRequest = useRef(0);
+  const matrixRunAbortController = useRef<AbortController | null>(null);
   const isContentMatrix = agent.id === "content-matrix";
   const requiresPrivateAssets = matrixDiagnosis.platform === "video-account";
   const requiredMatrixFields = requiresPrivateAssets
@@ -155,7 +157,18 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
     matrixSubmitAttempted && !matrixDiagnosis[key]?.trim()
   );
 
+  useEffect(
+    () => () => matrixRunAbortController.current?.abort(),
+    [],
+  );
+
+  const abortActiveMatrixRun = () => {
+    matrixRunAbortController.current?.abort();
+    matrixRunAbortController.current = null;
+  };
+
   const updateMatrixDiagnosis = (key: string, value: string) => {
+    abortActiveMatrixRun();
     matrixRunRevision.current += 1;
     matrixRunRequest.current += 1;
     setMatrixDiagnosis((current) => ({ ...current, [key]: value }));
@@ -285,6 +298,7 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
     });
     if (!configChanged) return;
 
+    abortActiveMatrixRun();
     matrixRunRevision.current += 1;
     matrixRunRequest.current += 1;
     setMatrixStages([]);
@@ -294,6 +308,7 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   };
 
   const clearMatrixConfig = () => {
+    abortActiveMatrixRun();
     matrixConfigRevision.current += 1;
     matrixConnectionRequest.current += 1;
     matrixRunRevision.current += 1;
@@ -314,9 +329,19 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
     stage: 2 | 3 | 4,
     value: string,
   ) => {
+    abortActiveMatrixRun();
     matrixRunRevision.current += 1;
     matrixRunRequest.current += 1;
     setMatrixFeedback((current) => ({ ...current, [stage]: value }));
+    setMatrixRunError(null);
+    setMatrixRunningOperation(null);
+  };
+
+  const cancelMatrixRun = () => {
+    if (!matrixRunningOperation) return;
+    matrixRunRevision.current += 1;
+    matrixRunRequest.current += 1;
+    abortActiveMatrixRun();
     setMatrixRunError(null);
     setMatrixRunningOperation(null);
   };
@@ -339,6 +364,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
     matrixRunRequest.current = requestId;
     const runRevision = matrixRunRevision.current;
     const activeConfig = { ...matrixActiveConfig };
+    const runController = new AbortController();
+    matrixRunAbortController.current = runController;
     const requestIsCurrent = () => (
       matrixRunRequest.current === requestId
       && matrixRunRevision.current === runRevision
@@ -375,6 +402,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       ) {
         const result = await createContentMatrixRuntime({
           fetchImpl: fetch,
+          generationTimeoutMs: APINEBULA_GENERATION_TIMEOUT_MS,
+          signal: runController.signal,
         }).runStage(runPayload);
         if (!requestIsCurrent()) return;
         setMatrixStages((current) => [
@@ -393,6 +422,7 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         method: "POST",
         cache: "no-store",
         headers: { "content-type": "application/json" },
+        signal: runController.signal,
         body: JSON.stringify({
           action: "run",
           ...runPayload,
@@ -435,6 +465,9 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       });
     } finally {
       if (requestIsCurrent()) {
+        if (matrixRunAbortController.current === runController) {
+          matrixRunAbortController.current = null;
+        }
         setMatrixRunningOperation(null);
       }
     }
@@ -677,6 +710,7 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
             error={matrixRunError}
             feedback={matrixFeedback}
             onAdvanceStage={(stage) => runMatrixStage(stage, "advance")}
+            onCancel={cancelMatrixRun}
             onFeedbackChange={updateMatrixFeedback}
             onOpenConfig={() => setActiveTab("Agent 配置")}
             onRegenerateStage={(stage) =>

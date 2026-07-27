@@ -154,6 +154,42 @@ test("APINebula direct probe rejects malformed chat output and keeps auth errors
   );
 });
 
+test("APINebula long-form generation uses the bounded output settings accepted by the reference text model", async () => {
+  const requests = [];
+  const runtime = createContentMatrixRuntime({
+    fetchImpl: async (url, init) => {
+      requests.push({ url: String(url), init });
+      return jsonResponse({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "## 战略判断\n长文生成完成",
+            },
+          },
+        ],
+      });
+    },
+  });
+
+  await runtime.runStage({
+    ...config("openai-compatible", "https://apinebula.ai/v1", "gpt-5.5"),
+    stage: 2,
+    diagnostic: "诊断资料",
+    history: [],
+    feedback: "",
+  });
+  await runtime.runStage(validRunInput(2));
+
+  const apinebulaBody = JSON.parse(requests[0].init.body);
+  assert.equal(apinebulaBody.max_tokens, 3800);
+  assert.equal(apinebulaBody.temperature, 0.65);
+
+  const otherOpenAiBody = JSON.parse(requests[1].init.body);
+  assert.equal("max_tokens" in otherOpenAiBody, false);
+  assert.equal("temperature" in otherOpenAiBody, false);
+});
+
 test("APINebula probe matching rejects lookalike hosts and the wrong protocol", async () => {
   const cases = [
     config(
@@ -855,6 +891,81 @@ test("maps timeout to a safe error without exposing request details", async () =
       return true;
     },
   );
+});
+
+test("long-form generation can use a longer bounded deadline than the connection probe", async () => {
+  const runtime = createContentMatrixRuntime({
+    timeoutMs: 5,
+    generationTimeoutMs: 50,
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.max_tokens === 32) {
+        return jsonResponse({
+          choices: [{ message: { content: "连接正常" } }],
+        });
+      }
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          resolve(jsonResponse({
+            choices: [{ message: { content: "## 战略判断\n长文生成完成" } }],
+          }));
+        }, 15);
+        init.signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new DOMException("short deadline fired", "AbortError"));
+        }, { once: true });
+      });
+    },
+  });
+  const apinebula = config(
+    "openai-compatible",
+    "https://apinebula.ai/v1",
+    "gpt-5.5",
+  );
+
+  assert.deepEqual(
+    await runtime.testConnection(apinebula),
+    { connected: true, modelAvailable: true },
+  );
+  assert.deepEqual(
+    await runtime.runStage({
+      ...apinebula,
+      stage: 2,
+      diagnostic: "诊断资料",
+      history: [],
+      feedback: "",
+    }),
+    { stage: 2, markdown: "## 战略判断\n长文生成完成" },
+  );
+});
+
+test("caller cancellation aborts an in-flight stage safely instead of waiting for its deadline", async () => {
+  const caller = new AbortController();
+  let providerSignalAborted = false;
+  const runtime = createContentMatrixRuntime({
+    timeoutMs: 50,
+    signal: caller.signal,
+    fetchImpl: async (_url, init) =>
+      new Promise((_resolve, reject) => {
+        init.signal.addEventListener("abort", () => {
+          providerSignalAborted = true;
+          reject(new DOMException("cancelled with sk-fake", "AbortError"));
+        });
+      }),
+  });
+
+  const result = runtime.runStage(validRunInput(2));
+  caller.abort();
+
+  await assert.rejects(
+    result,
+    (error) => {
+      assert.equal(error.code, "REQUEST_CANCELLED");
+      assert.doesNotMatch(error.message, /sk-fake|api\.example/);
+      return true;
+    },
+  );
+  assert.equal(providerSignalAborted, true);
 });
 
 test("deadline remains active while response headers are ready but the body stalls", async () => {

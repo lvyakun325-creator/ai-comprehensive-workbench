@@ -1508,6 +1508,33 @@ button {
   color: #5c45b4;
 }
 
+.matrix-run-progress {
+  margin-top: 14px;
+  padding: 11px 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #cddded;
+  border-radius: 10px;
+  background: #f4f8fc;
+  color: #42647f;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.matrix-run-progress button {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border: 1px solid #c4d4e4;
+  border-radius: 8px;
+  background: #fff;
+  color: #42647f;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
 .matrix-runner-heading {
   align-items: end;
   margin-top: 20px;

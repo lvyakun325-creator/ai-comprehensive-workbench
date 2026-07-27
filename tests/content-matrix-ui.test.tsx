@@ -522,6 +522,52 @@ test("APINebula tests and runs content matrix stages directly in the browser wit
   assert.equal(storageAccesses, 0);
 });
 
+test("running strategic analysis shows its bounded wait and can abort the provider request", async () => {
+  const user = userEvent.setup({ document });
+  const fakeKey = "sk-controlled-cancel";
+  let providerSignalAborted = false;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.max_tokens === 32) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: "连接正常" } }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        providerSignalAborted = true;
+        reject(new DOMException(`cancelled ${fakeKey}`, "AbortError"));
+      }, { once: true });
+    });
+  };
+
+  await openContentMatrixConfig(user);
+  await user.selectOptions(
+    screen.getByLabelText("服务商预设"),
+    "apinebula-codex",
+  );
+  await user.type(screen.getByLabelText("API Key"), fakeKey);
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await screen.findByText("连接测试成功，模型可用");
+  await user.click(screen.getByRole("button", { name: "应用到当前会话" }));
+  await user.click(screen.getByRole("button", { name: "Agent 对话" }));
+  await fillCompleteDiagnosis(user);
+  await user.click(screen.getByRole("button", { name: "开始战略分析" }));
+
+  assert.match(
+    screen.getByRole("status", { name: "内容矩阵生成状态" }).textContent ?? "",
+    /最长约3分钟.*可随时取消/,
+  );
+  await user.click(screen.getByRole("button", { name: "取消本次生成" }));
+
+  assert.equal(providerSignalAborted, true);
+  assert.equal(screen.queryByRole("status", { name: "内容矩阵生成状态" }), null);
+  assert.ok(screen.getByRole("button", { name: "开始战略分析" }));
+  assert.equal(screen.queryByRole("alert"), null);
+  assert.equal(document.documentElement.outerHTML.includes(fakeKey), false);
+  assert.equal(storageAccesses, 0);
+});
+
 test("non-APINebula providers keep using the workbench server proxy", async () => {
   const user = userEvent.setup({ document });
   const urls: string[] = [];

@@ -49,6 +49,7 @@ type ContentMatrixRunnerProps = {
   error: (ContentMatrixRunOperation & { message: string }) | null;
   runningOperation: ContentMatrixRunOperation | null;
   onOpenConfig: () => void;
+  onCancel: () => void;
   onFeedbackChange: (stage: 2 | 3 | 4, value: string) => void;
   onAdvanceStage: (stage: 2 | 3 | 4 | 5) => void;
   onRegenerateStage: (stage: 2 | 3 | 4) => void;
@@ -62,6 +63,7 @@ export function ContentMatrixRunner({
   error,
   runningOperation,
   onOpenConfig,
+  onCancel,
   onFeedbackChange,
   onAdvanceStage,
   onRegenerateStage,
@@ -98,6 +100,20 @@ export function ContentMatrixRunner({
         </div>
         <p>第二至第四阶段逐步确认，第五阶段生成正式 Markdown。</p>
       </div>
+
+      {runningOperation ? (
+        <div
+          className="matrix-run-progress"
+          role="status"
+          aria-label="内容矩阵生成状态"
+        >
+          <span>
+            {RUNNING_BUTTON_LABELS[runningOperation.stage]}
+            长文生成最长约3分钟，可随时取消。
+          </span>
+          <button onClick={onCancel} type="button">取消本次生成</button>
+        </div>
+      ) : null}
 
       {stages.map((result) => {
         const isCurrentCheckpoint =

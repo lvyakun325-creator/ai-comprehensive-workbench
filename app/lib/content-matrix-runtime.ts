@@ -29,6 +29,8 @@ type Fetch = typeof fetch;
 type RuntimeOptions = {
   fetchImpl?: Fetch;
   timeoutMs?: number;
+  generationTimeoutMs?: number;
+  signal?: AbortSignal;
 };
 
 type ValidatedConfig = ContentMatrixConfig & {
@@ -75,6 +77,7 @@ const SAFE_ERRORS = {
     "请先人工确认上一阶段结果。",
     409,
   ],
+  REQUEST_CANCELLED: ["REQUEST_CANCELLED", "本次生成已取消。", 499],
   AUTH_FAILED: ["AUTH_FAILED", "模型服务鉴权失败，请检查 API Key。", 401],
   RATE_LIMITED: ["RATE_LIMITED", "模型服务请求过于频繁，请稍后重试。", 429],
   PROVIDER_UNAVAILABLE: [
@@ -118,6 +121,8 @@ export class ContentMatrixRuntimeError extends Error {
 export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const generationTimeoutMs = options.generationTimeoutMs ?? timeoutMs;
+  const callerSignal = options.signal;
 
   return {
     async testConnection(input: unknown) {
@@ -127,6 +132,7 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
           fetchImpl,
           timeoutMs,
           buildApinebulaProbeRequest(config),
+          callerSignal,
         );
         parseGeneratedMarkdown("openai-compatible", body);
         return {
@@ -138,6 +144,7 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
         fetchImpl,
         timeoutMs,
         buildModelsRequest(config),
+        callerSignal,
       );
       const modelIds = parseModelIds(config.protocol, body);
 
@@ -154,8 +161,9 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
       const prompt = buildStagePrompt(runInput);
       const body = await fetchProviderJson(
         fetchImpl,
-        timeoutMs,
+        generationTimeoutMs,
         buildGenerationRequest(runInput, prompt),
+        callerSignal,
       );
       const markdown = parseGeneratedMarkdown(runInput.protocol, body);
       const safeMarkdown = redactSecret(markdown, runInput.apiKey);
@@ -410,6 +418,10 @@ function buildGenerationRequest(
   prompt: { system: string; user: string },
 ) {
   if (input.protocol === "openai-compatible") {
+    const apinebulaGeneration = usesApinebulaDirectProbe(
+      input.protocol,
+      input.baseUrl,
+    );
     return {
       url: appendEndpoint(input.baseUrl, ["chat", "completions"]),
       init: {
@@ -421,6 +433,9 @@ function buildGenerationRequest(
             { role: "system", content: prompt.system },
             { role: "user", content: prompt.user },
           ],
+          ...(apinebulaGeneration
+            ? { temperature: 0.65, max_tokens: 3800 }
+            : {}),
         }),
       } satisfies RequestInit,
     };
@@ -487,9 +502,20 @@ async function fetchProviderJson(
   fetchImpl: Fetch,
   timeoutMs: number,
   request: { url: string; init: RequestInit },
+  callerSignal?: AbortSignal,
 ): Promise<unknown> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const abortFromCaller = () => controller.abort();
+  if (callerSignal?.aborted) {
+    controller.abort();
+  } else {
+    callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  }
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
 
   try {
     const response = await fetchImpl(request.url, {
@@ -514,6 +540,9 @@ async function fetchProviderJson(
     try {
       return await response.json();
     } catch (error) {
+      if (callerSignal?.aborted) {
+        throw new ContentMatrixRuntimeError("REQUEST_CANCELLED");
+      }
       if (isTimeoutError(error, controller.signal)) {
         throw new ContentMatrixRuntimeError("PROVIDER_TIMEOUT");
       }
@@ -523,12 +552,16 @@ async function fetchProviderJson(
     if (error instanceof ContentMatrixRuntimeError) {
       throw error;
     }
-    if (isTimeoutError(error, controller.signal)) {
+    if (callerSignal?.aborted) {
+      throw new ContentMatrixRuntimeError("REQUEST_CANCELLED");
+    }
+    if (timedOut || isTimeoutError(error, controller.signal)) {
       throw new ContentMatrixRuntimeError("PROVIDER_TIMEOUT");
     }
     throw new ContentMatrixRuntimeError("PROVIDER_UNAVAILABLE");
   } finally {
     clearTimeout(timer);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
   }
 }
 
