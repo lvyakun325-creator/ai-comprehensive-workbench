@@ -63,6 +63,51 @@ test("route connection success returns only necessary connection information", a
   });
 });
 
+test("route APINebula test probes chat without returning the provider reply", async () => {
+  let captured;
+  const handler = createContentMatrixRoute({
+    fetchImpl: async (url, init) => {
+      captured = { url: String(url), init };
+      return Response.json({
+        id: "chatcmpl-probe",
+        object: "chat.completion",
+        created: 1,
+        model: "gpt-5.5",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "连接正常" },
+            finish_reason: "stop",
+          },
+        ],
+      });
+    },
+  });
+
+  const response = await handler(
+    request(
+      testPayload({
+        baseUrl: "https://apinebula.ai/v1",
+        model: "gpt-5.5",
+      }),
+    ),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(captured.url, "https://apinebula.ai/v1/chat/completions");
+  assert.equal(captured.init.method, "POST");
+  assert.deepEqual(body, {
+    ok: true,
+    action: "test",
+    connected: true,
+    modelAvailable: true,
+  });
+  assert.equal(JSON.stringify(body).includes("连接正常"), false);
+  assert.equal(JSON.stringify(body).includes(FAKE_KEY), false);
+});
+
 test("route safely blocks redirects for all provider authentication protocols", async () => {
   const cases = [
     testPayload(),

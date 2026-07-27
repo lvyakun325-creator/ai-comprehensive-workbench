@@ -75,6 +75,85 @@ test("OpenAI-compatible connection test uses Bearer auth and parses model availa
   assert.equal(new Headers(captured.init.headers).get("authorization"), "Bearer sk-fake");
 });
 
+test("APINebula connection test directly probes the configured text model with a fixed short message", async () => {
+  for (const hostname of ["apinebula.ai", "api.yhlxj.ai"]) {
+    const requests = [];
+    const runtime = createContentMatrixRuntime({
+      fetchImpl: async (url, init) => {
+        requests.push({ url: String(url), init });
+        return jsonResponse({
+          id: "chatcmpl-probe",
+          object: "chat.completion",
+          created: 1,
+          model: "gpt-5.5",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: "连接正常" },
+              finish_reason: "stop",
+            },
+          ],
+        });
+      },
+    });
+
+    const result = await runtime.testConnection(
+      config("openai-compatible", `https://${hostname}/v1`, "gpt-5.5"),
+    );
+
+    assert.deepEqual(result, { connected: true, modelAvailable: true });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, `https://${hostname}/v1/chat/completions`);
+    assert.equal(requests[0].init.method, "POST");
+    assert.equal(
+      new Headers(requests[0].init.headers).get("authorization"),
+      "Bearer sk-fake",
+    );
+    const body = JSON.parse(requests[0].init.body);
+    assert.deepEqual(body, {
+      model: "gpt-5.5",
+      messages: [
+        { role: "system", content: "你是接口连通性测试助手。" },
+        { role: "user", content: "只回复：连接正常" },
+      ],
+      max_tokens: 32,
+    });
+    assert.equal(JSON.stringify(body).includes("诊断资料"), false);
+    assert.equal(requests.some(({ url }) => url.endsWith("/models")), false);
+  }
+});
+
+test("APINebula direct probe rejects malformed chat output and keeps auth errors safe", async () => {
+  const malformedRuntime = createContentMatrixRuntime({
+    fetchImpl: async () => jsonResponse({ choices: [{ message: {} }] }),
+  });
+  await assert.rejects(
+    malformedRuntime.testConnection(
+      config("openai-compatible", "https://apinebula.ai/v1", "gpt-5.5"),
+    ),
+    (error) => {
+      assert.equal(error.code, "INVALID_PROVIDER_RESPONSE");
+      assert.doesNotMatch(error.message, /choices|sk-fake|apinebula/);
+      return true;
+    },
+  );
+
+  const unauthorizedRuntime = createContentMatrixRuntime({
+    fetchImpl: async () =>
+      new Response(`invalid token ${FAKE_KEY}`, { status: 401 }),
+  });
+  await assert.rejects(
+    unauthorizedRuntime.testConnection(
+      config("openai-compatible", "https://api.yhlxj.ai/v1", "gpt-5.5"),
+    ),
+    (error) => {
+      assert.equal(error.code, "AUTH_FAILED");
+      assert.doesNotMatch(error.message, /invalid token|sk-fake|yhlxj/);
+      return true;
+    },
+  );
+});
+
 test("Anthropic connection test uses required versioned API-key auth", async () => {
   let captured;
   const runtime = createContentMatrixRuntime({

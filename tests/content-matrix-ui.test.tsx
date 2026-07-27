@@ -245,9 +245,14 @@ test("APINebula CODEX preset uses the recommended endpoint and adds a safe actio
     (screen.getByLabelText("API Key") as HTMLInputElement).value,
     "",
   );
+  assert.ok(screen.getByRole("button", { name: "测试文案模型" }));
+  assert.match(
+    screen.getByText(/固定短消息/).textContent ?? "",
+    /可能产生极少量模型调用费用/,
+  );
 
   await user.type(screen.getByLabelText("API Key"), fakeKey);
-  await user.click(screen.getByRole("button", { name: "测试连接" }));
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
 
   const alert = await screen.findByRole("alert");
   assert.equal(

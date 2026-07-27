@@ -90,6 +90,7 @@ export function ContentMatrixConfigPanel({
   onClear,
 }: ContentMatrixConfigPanelProps) {
   const apiKeyInput = useRef<HTMLInputElement>(null);
+  const usesApinebulaProbe = preset === "apinebula-codex";
 
   useEffect(() => {
     if (draft.apiKey === "" && apiKeyInput.current) {
@@ -212,8 +213,19 @@ export function ContentMatrixConfigPanel({
           onClick={onTest}
           type="button"
         >
-          {connection.kind === "testing" ? "正在测试…" : "测试连接"}
+          {connection.kind === "testing"
+            ? usesApinebulaProbe
+              ? "正在测试文案模型…"
+              : "正在测试…"
+            : usesApinebulaProbe
+              ? "测试文案模型"
+              : "测试连接"}
         </button>
+        {usesApinebulaProbe ? (
+          <small>
+            会发送一句固定短消息，可能产生极少量模型调用费用。
+          </small>
+        ) : null}
         <button
           className="primary"
           disabled={!canApply || connection.kind === "testing"}

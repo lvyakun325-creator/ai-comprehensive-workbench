@@ -122,6 +122,18 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
   return {
     async testConnection(input: unknown) {
       const config = validateConfig(input);
+      if (usesApinebulaDirectProbe(config)) {
+        const body = await fetchProviderJson(
+          fetchImpl,
+          timeoutMs,
+          buildApinebulaProbeRequest(config),
+        );
+        parseGeneratedMarkdown("openai-compatible", body);
+        return {
+          connected: true as const,
+          modelAvailable: true,
+        };
+      }
       const body = await fetchProviderJson(
         fetchImpl,
         timeoutMs,
@@ -154,6 +166,30 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
         markdown: safeMarkdown,
       };
     },
+  };
+}
+
+function usesApinebulaDirectProbe(config: ValidatedConfig): boolean {
+  if (config.protocol !== "openai-compatible") return false;
+  const hostname = new URL(config.baseUrl).hostname.toLowerCase();
+  return hostname === "apinebula.ai" || hostname === "api.yhlxj.ai";
+}
+
+function buildApinebulaProbeRequest(config: ValidatedConfig) {
+  return {
+    url: appendEndpoint(config.baseUrl, ["chat", "completions"]),
+    init: {
+      method: "POST",
+      headers: providerHeaders(config, true),
+      body: JSON.stringify({
+        model: config.model,
+        messages: [
+          { role: "system", content: "你是接口连通性测试助手。" },
+          { role: "user", content: "只回复：连接正常" },
+        ],
+        max_tokens: 32,
+      }),
+    } satisfies RequestInit,
   };
 }
 
