@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { ContentMatrixSessionConfig } from "./ContentMatrixConfigPanel";
+import { usesApinebulaDirectProbe } from "../lib/content-matrix-runtime";
 
 export type ContentMatrixStageResult = {
   stage: 2 | 3 | 4 | 5;
@@ -76,6 +77,9 @@ export function ContentMatrixRunner({
   const canRun = Boolean(config) && diagnosisReady && !isRunning && !isComplete;
   const isAdvanceRetry =
     error?.mode === "advance" && error.stage === nextStage;
+  const usesExtendedApinebulaWait = config
+    ? usesApinebulaDirectProbe(config.protocol, config.baseUrl)
+    : false;
 
   return (
     <section className="matrix-runner" aria-labelledby="matrix-runner-title">
@@ -109,7 +113,9 @@ export function ContentMatrixRunner({
         >
           <span>
             {RUNNING_BUTTON_LABELS[runningOperation.stage]}
-            长文生成最长约3分钟，可随时取消。
+            {usesExtendedApinebulaWait
+              ? "长文生成最长约3分钟，可随时取消。"
+              : "正在等待模型返回，可随时取消。"}
           </span>
           <button onClick={onCancel} type="button">取消本次生成</button>
         </div>

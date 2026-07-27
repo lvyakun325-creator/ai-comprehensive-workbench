@@ -568,6 +568,128 @@ test("running strategic analysis shows its bounded wait and can abort the provid
   assert.equal(storageAccesses, 0);
 });
 
+test("non-APINebula generation does not promise the APINebula three-minute deadline", async () => {
+  const user = userEvent.setup({ document });
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.action === "test") {
+      return new Response(JSON.stringify({
+        ok: true,
+        action: "test",
+        connected: true,
+        modelAvailable: true,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        reject(new DOMException("cancelled proxy request", "AbortError"));
+      }, { once: true });
+    });
+  };
+
+  await prepareRunnableMatrix(user);
+  await user.click(screen.getByRole("button", { name: "开始战略分析" }));
+  const progress = screen.getByRole("status", {
+    name: "内容矩阵生成状态",
+  }).textContent ?? "";
+  await user.click(screen.getByRole("button", { name: "取消本次生成" }));
+
+  assert.doesNotMatch(progress, /3分钟/);
+  assert.match(progress, /正在等待模型返回.*可随时取消/);
+  assert.equal(screen.queryByRole("alert"), null);
+  assert.equal(storageAccesses, 0);
+});
+
+test("APINebula keeps a 20-second probe and a separate 180-second generation deadline", async () => {
+  const user = userEvent.setup({ document });
+  const scheduledDeadlines: number[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((
+    handler: TimerHandler,
+    timeout?: number,
+    ...args: unknown[]
+  ) => {
+    if (typeof timeout === "number" && timeout >= 10_000) {
+      scheduledDeadlines.push(timeout);
+    }
+    return originalSetTimeout(handler, timeout, ...args);
+  }) as typeof setTimeout;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    const content = body.max_tokens === 32
+      ? "连接正常"
+      : "## 战略判断\n长文生成完成";
+    return new Response(JSON.stringify({
+      choices: [{ message: { content } }],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  try {
+    await openContentMatrixConfig(user);
+    await user.selectOptions(
+      screen.getByLabelText("服务商预设"),
+      "apinebula-codex",
+    );
+    await user.type(screen.getByLabelText("API Key"), "sk-deadline-fake");
+    await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+    await screen.findByText("连接测试成功，模型可用");
+    await user.click(screen.getByRole("button", { name: "应用到当前会话" }));
+    await user.click(screen.getByRole("button", { name: "Agent 对话" }));
+    await fillCompleteDiagnosis(user);
+    await user.click(screen.getByRole("button", { name: "开始战略分析" }));
+    assert.ok(await screen.findByText(/长文生成完成/));
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+
+  assert.deepEqual(scheduledDeadlines, [20_000, 180_000]);
+  assert.equal(storageAccesses, 0);
+});
+
+test("non-APINebula generation never schedules the APINebula 180-second deadline", async () => {
+  const user = userEvent.setup({ document });
+  const scheduledDeadlines: number[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((
+    handler: TimerHandler,
+    timeout?: number,
+    ...args: unknown[]
+  ) => {
+    if (typeof timeout === "number" && timeout >= 10_000) {
+      scheduledDeadlines.push(timeout);
+    }
+    return originalSetTimeout(handler, timeout, ...args);
+  }) as typeof setTimeout;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.action === "test") {
+      return new Response(JSON.stringify({
+        ok: true,
+        action: "test",
+        connected: true,
+        modelAvailable: true,
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify({
+      ok: true,
+      action: "run",
+      stage: 2,
+      markdown: "## 战略判断\n服务端代理生成完成",
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  try {
+    await prepareRunnableMatrix(user);
+    await user.click(screen.getByRole("button", { name: "开始战略分析" }));
+    assert.ok(await screen.findByText(/服务端代理生成完成/));
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+
+  assert.equal(scheduledDeadlines.includes(180_000), false);
+  assert.equal(storageAccesses, 0);
+});
+
 test("non-APINebula providers keep using the workbench server proxy", async () => {
   const user = userEvent.setup({ document });
   const urls: string[] = [];
