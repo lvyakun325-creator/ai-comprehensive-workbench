@@ -179,15 +179,108 @@ test("APINebula long-form generation uses the bounded output settings accepted b
     history: [],
     feedback: "",
   });
+  await runtime.runStage({
+    ...config("openai-compatible", "https://apinebula.ai/v1", "gpt-5.5"),
+    stage: 3,
+    diagnostic: "诊断资料",
+    history: [{ stage: 2, markdown: "## 战略判断\n已确认战略。" }],
+    feedback: "",
+    confirmed: true,
+    confirmedStage: 2,
+  });
   await runtime.runStage(validRunInput(2));
 
-  const apinebulaBody = JSON.parse(requests[0].init.body);
-  assert.equal(apinebulaBody.max_tokens, 3800);
-  assert.equal(apinebulaBody.temperature, 0.65);
+  const apinebulaStageTwoBody = JSON.parse(requests[0].init.body);
+  assert.equal(apinebulaStageTwoBody.max_tokens, 3800);
+  assert.equal(apinebulaStageTwoBody.temperature, 0.65);
+  const apinebulaStageThreeBody = JSON.parse(requests[1].init.body);
+  assert.equal(apinebulaStageThreeBody.max_tokens, 3800);
+  assert.equal(apinebulaStageThreeBody.temperature, 0.65);
 
-  const otherOpenAiBody = JSON.parse(requests[1].init.body);
+  const otherOpenAiBody = JSON.parse(requests[2].init.body);
   assert.equal("max_tokens" in otherOpenAiBody, false);
   assert.equal("temperature" in otherOpenAiBody, false);
+});
+
+test("APINebula stage 4 lowers its declared output budget when prior stage history is present", async () => {
+  let captured;
+  const runtime = createContentMatrixRuntime({
+    fetchImpl: async (url, init) => {
+      captured = { url: String(url), init };
+      return jsonResponse({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "## 执行 SOP\n第四阶段已完成",
+            },
+          },
+        ],
+      });
+    },
+  });
+
+  await runtime.runStage({
+    ...config("openai-compatible", "https://apinebula.ai/v1", "gpt-5.5"),
+    stage: 4,
+    diagnostic: "诊断资料",
+    history: [
+      { stage: 2, markdown: "## 战略判断\n品牌信任号负责建立信任。" },
+      { stage: 3, markdown: "## 账号配置\n问题解释号负责教育用户。" },
+    ],
+    feedback: "",
+    confirmed: true,
+    confirmedStage: 3,
+  });
+
+  const body = JSON.parse(captured.init.body);
+  assert.equal(captured.url, "https://apinebula.ai/v1/chat/completions");
+  assert.equal(body.max_tokens, 2000);
+  assert.equal(body.temperature, 0.65);
+  assert.match(body.messages[1].content, /品牌信任号负责建立信任/);
+  assert.match(body.messages[1].content, /问题解释号负责教育用户/);
+});
+
+test("APINebula stage 5 keeps complete history and uses the measured history-aware output budget", async () => {
+  let captured;
+  const runtime = createContentMatrixRuntime({
+    fetchImpl: async (url, init) => {
+      captured = { url: String(url), init };
+      return jsonResponse({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: VALID_FINAL_MARKDOWN,
+            },
+          },
+        ],
+      });
+    },
+  });
+  const history = [
+    { stage: 2, markdown: "## 战略判断\n差异化位置。" },
+    { stage: 3, markdown: "## 账号配置\n三类账号分工。" },
+    { stage: 4, markdown: "## 执行 SOP\n首周启动顺序。" },
+  ];
+
+  const result = await runtime.runStage({
+    ...config("openai-compatible", "https://apinebula.ai/v1", "gpt-5.5"),
+    stage: 5,
+    diagnostic: "诊断资料",
+    history,
+    feedback: "",
+    confirmed: true,
+    confirmedStage: 4,
+  });
+
+  const body = JSON.parse(captured.init.body);
+  assert.equal(body.max_tokens, 2000);
+  assert.equal(body.temperature, 0.65);
+  for (const entry of history) {
+    assert.match(body.messages[1].content, new RegExp(entry.markdown.split("\n")[1]));
+  }
+  assert.equal(result.markdown, VALID_FINAL_MARKDOWN);
 });
 
 test("APINebula probe matching rejects lookalike hosts and the wrong protocol", async () => {

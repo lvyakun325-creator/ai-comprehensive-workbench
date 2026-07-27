@@ -511,9 +511,11 @@ test("APINebula tests and runs content matrix stages directly in the browser wit
   const stageFourBody = JSON.parse(String(requests[3].init?.body));
   assert.match(stageFourBody.messages[0].content, /第四阶段/);
   assert.match(stageFourBody.messages[1].content, /浏览器直连第三阶段结果/);
+  assert.equal(stageFourBody.max_tokens, 2000);
   const stageFiveBody = JSON.parse(String(requests[4].init?.body));
   assert.match(stageFiveBody.messages[0].content, /第五阶段/);
   assert.match(stageFiveBody.messages[1].content, /浏览器直连第四阶段结果/);
+  assert.equal(stageFiveBody.max_tokens, 2000);
   assert.equal(
     new Headers(requests[0].init?.headers).get("authorization"),
     `Bearer ${fakeKey}`,

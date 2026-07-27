@@ -58,6 +58,8 @@ const MAX_FEEDBACK_LENGTH = 4_000;
 const MAX_HISTORY_ENTRIES = 3;
 const MAX_HISTORY_MARKDOWN_LENGTH = 30_000;
 const ANTHROPIC_VERSION = "2023-06-01";
+const APINEBULA_DEFAULT_MAX_TOKENS = 3_800;
+const APINEBULA_HISTORY_AWARE_MAX_TOKENS = 2_000;
 
 const SAFE_ERRORS = {
   INVALID_REQUEST: ["INVALID_REQUEST", "请求参数无效。", 400],
@@ -434,7 +436,10 @@ function buildGenerationRequest(
             { role: "user", content: prompt.user },
           ],
           ...(apinebulaGeneration
-            ? { temperature: 0.65, max_tokens: 3800 }
+            ? {
+                temperature: 0.65,
+                max_tokens: apinebulaMaxTokens(input),
+              }
             : {}),
         }),
       } satisfies RequestInit,
@@ -471,6 +476,12 @@ function buildGenerationRequest(
       }),
     } satisfies RequestInit,
   };
+}
+
+function apinebulaMaxTokens(input: ValidatedRunInput): number {
+  return input.history.length >= 2
+    ? APINEBULA_HISTORY_AWARE_MAX_TOKENS
+    : APINEBULA_DEFAULT_MAX_TOKENS;
 }
 
 function providerHeaders(
