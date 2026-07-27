@@ -283,6 +283,74 @@ test("APINebula stage 5 keeps complete history and uses the measured history-awa
   assert.equal(result.markdown, VALID_FINAL_MARKDOWN);
 });
 
+test("APINebula rejects explicitly unfinished stage 2 through 5 responses with a safe error", async () => {
+  const cases = [
+    [2, "length"],
+    [3, "content_filter"],
+    [4, "tool_calls"],
+    [5, "length"],
+  ];
+
+  for (const [stage, finishReason] of cases) {
+    const runtime = createContentMatrixRuntime({
+      fetchImpl: async () =>
+        jsonResponse({
+          provider_detail: `must not leak ${FAKE_KEY}`,
+          choices: [
+            {
+              finish_reason: finishReason,
+              message: {
+                content: stage === 5
+                  ? VALID_FINAL_MARKDOWN
+                  : `## 阶段 ${stage}\n看似完整但实际被截断 ${FAKE_KEY}`,
+              },
+            },
+          ],
+        }),
+    });
+
+    await assert.rejects(
+      runtime.runStage({
+        ...validRunInput(stage),
+        ...config("openai-compatible", "https://apinebula.ai/v1", "gpt-5.5"),
+      }),
+      (error) => {
+        assert.equal(error.code, "INVALID_STAGE_OUTPUT");
+        assert.doesNotMatch(
+          error.message,
+          /length|content_filter|tool_calls|provider_detail|sk-fake/,
+        );
+        return true;
+      },
+    );
+  }
+});
+
+test("APINebula accepts a normal stop finish reason and remains compatible when it is omitted", async () => {
+  for (const finishReason of ["stop", undefined]) {
+    const runtime = createContentMatrixRuntime({
+      fetchImpl: async () =>
+        jsonResponse({
+          choices: [
+            {
+              ...(finishReason === undefined
+                ? {}
+                : { finish_reason: finishReason }),
+              message: { content: "## 执行 SOP\n完整第四阶段结果" },
+            },
+          ],
+        }),
+    });
+
+    const result = await runtime.runStage({
+      ...validRunInput(4),
+      ...config("openai-compatible", "https://apinebula.ai/v1", "gpt-5.5"),
+    });
+
+    assert.equal(result.markdown, "## 执行 SOP\n完整第四阶段结果");
+  }
+});
+
 test("APINebula probe matching rejects lookalike hosts and the wrong protocol", async () => {
   const cases = [
     config(

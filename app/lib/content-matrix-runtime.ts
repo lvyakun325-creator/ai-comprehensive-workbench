@@ -167,6 +167,7 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
         buildGenerationRequest(runInput, prompt),
         callerSignal,
       );
+      validateApinebulaFinishReason(runInput, body);
       const markdown = parseGeneratedMarkdown(runInput.protocol, body);
       const safeMarkdown = redactSecret(markdown, runInput.apiKey);
       validateStageOutput(runInput.stage, safeMarkdown);
@@ -177,6 +178,21 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
       };
     },
   };
+}
+
+function validateApinebulaFinishReason(
+  input: ValidatedRunInput,
+  body: unknown,
+): void {
+  if (!usesApinebulaDirectProbe(input.protocol, input.baseUrl)) return;
+  const record = asProviderRecord(body);
+  const choice = firstRecord(record.choices);
+  if (
+    choice.finish_reason !== undefined
+    && choice.finish_reason !== "stop"
+  ) {
+    throw new ContentMatrixRuntimeError("INVALID_STAGE_OUTPUT");
+  }
 }
 
 export function usesApinebulaDirectProbe(

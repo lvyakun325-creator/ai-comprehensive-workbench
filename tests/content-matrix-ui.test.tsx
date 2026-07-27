@@ -524,6 +524,106 @@ test("APINebula tests and runs content matrix stages directly in the browser wit
   assert.equal(storageAccesses, 0);
 });
 
+test("APINebula does not save or download a truncated final stage and allows a safe retry", async () => {
+  const user = userEvent.setup({ document });
+  const fakeKey = "sk-truncated-provider-secret";
+  let stageFiveAttempts = 0;
+  const finalMarkdown = `# 最终矩阵方案
+结论：推荐先验证再复制。
+
+## 战略判断与矩阵总览
+先验证搜索内容。
+
+## 账号分层与战术配置
+品牌号负责承接。
+
+## 执行 SOP 与启动顺序
+首周按顺序启动。
+
+## 风险控制与止损标准
+发布前人工复核。`;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    const system = String(body.messages?.[0]?.content ?? "");
+    const isProbe = system === "你是接口连通性测试助手。";
+    const stage = /第五阶段/.test(system)
+      ? 5
+      : /第四阶段/.test(system)
+        ? 4
+        : /第三阶段/.test(system)
+          ? 3
+          : 2;
+    const truncatedFinal = stage === 5 && stageFiveAttempts++ === 0;
+    const content = isProbe
+      ? "连接正常"
+      : stage === 5
+        ? finalMarkdown
+        : stage === 4
+          ? "## 执行 SOP\n保留第四阶段"
+          : stage === 3
+            ? "## 账号配置\n保留第三阶段"
+            : "## 战略判断\n保留第二阶段";
+    return new Response(JSON.stringify({
+      provider_detail: `must not leak ${fakeKey}`,
+      choices: [
+        {
+          message: { content },
+          finish_reason: truncatedFinal ? "length" : "stop",
+        },
+      ],
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+
+  await openContentMatrixConfig(user);
+  await user.selectOptions(
+    screen.getByLabelText("服务商预设"),
+    "apinebula-codex",
+  );
+  await user.type(screen.getByLabelText("API Key"), fakeKey);
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await screen.findByText("连接测试成功，模型可用");
+  await user.click(screen.getByRole("button", { name: "应用到当前会话" }));
+  await user.click(screen.getByRole("button", { name: "Agent 对话" }));
+  await fillCompleteDiagnosis(user);
+  await user.click(screen.getByRole("button", { name: "开始战略分析" }));
+  await screen.findByText(/保留第二阶段/);
+  await user.click(
+    screen.getByRole("button", { name: "确认战略并进入账号设计" }),
+  );
+  await screen.findByText(/保留第三阶段/);
+  await user.click(
+    screen.getByRole("button", { name: "确认战术并进入执行 SOP" }),
+  );
+  await screen.findByText(/保留第四阶段/);
+  await user.click(
+    screen.getByRole("button", { name: "确认执行方案并生成正式成品" }),
+  );
+
+  const alert = await screen.findByRole("alert");
+  assert.match(alert.textContent ?? "", /正式方案要求/);
+  assert.doesNotMatch(
+    alert.textContent ?? "",
+    /length|provider_detail|must not leak|sk-truncated/,
+  );
+  assert.ok(screen.getByText(/保留第二阶段/));
+  assert.ok(screen.getByText(/保留第三阶段/));
+  assert.ok(screen.getByText(/保留第四阶段/));
+  assert.equal(
+    screen.queryByRole("heading", { name: "第五阶段 · 正式矩阵方案" }),
+    null,
+  );
+  assert.equal(screen.queryByRole("link", { name: "下载 Markdown" }), null);
+
+  await user.click(screen.getByRole("button", { name: "重试正式成品" }));
+  assert.ok(await screen.findByRole("heading", {
+    name: "第五阶段 · 正式矩阵方案",
+  }));
+  assert.ok(screen.getByRole("link", { name: "下载 Markdown" }));
+  assert.equal(stageFiveAttempts, 2);
+  assert.equal(document.documentElement.outerHTML.includes(fakeKey), false);
+  assert.equal(storageAccesses, 0);
+});
+
 test("running strategic analysis shows its bounded wait and can abort the provider request", async () => {
   const user = userEvent.setup({ document });
   const fakeKey = "sk-controlled-cancel";
