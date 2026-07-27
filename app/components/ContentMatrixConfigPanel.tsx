@@ -47,7 +47,7 @@ const PROVIDER_PRESETS = {
   "apinebula-codex": {
     label: "APINebula（CODEX）",
     protocol: "openai-compatible",
-    baseUrl: "https://api.yhlxj.ai/v1",
+    baseUrl: "https://apinebula.ai/v1",
     model: "gpt-5.5",
   },
 } as const;

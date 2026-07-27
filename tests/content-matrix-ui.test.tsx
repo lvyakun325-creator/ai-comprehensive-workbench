@@ -235,7 +235,7 @@ test("APINebula CODEX preset uses the recommended endpoint and adds a safe actio
   );
   assert.equal(
     (screen.getByLabelText("API 地址") as HTMLInputElement).value,
-    "https://api.yhlxj.ai/v1",
+    "https://apinebula.ai/v1",
   );
   assert.equal(
     (screen.getByLabelText("模型名称") as HTMLInputElement).value,
@@ -260,11 +260,11 @@ test("APINebula CODEX preset uses the recommended endpoint and adds a safe actio
     "上游服务暂时不可用；APINebula 请确认使用官方 API 地址、CODEX 分组令牌及控制台模型名。",
   );
   assert.equal(alert.textContent?.includes(fakeKey), false);
-  assert.equal(alert.textContent?.includes("api.yhlxj.ai"), false);
+  assert.equal(alert.textContent?.includes("apinebula.ai"), false);
   assert.deepEqual(requests[0], {
     action: "test",
     protocol: "openai-compatible",
-    baseUrl: "https://api.yhlxj.ai/v1",
+    baseUrl: "https://apinebula.ai/v1",
     apiKey: fakeKey,
     model: "gpt-5.5",
   });
