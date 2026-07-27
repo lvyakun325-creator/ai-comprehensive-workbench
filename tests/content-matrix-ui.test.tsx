@@ -207,6 +207,80 @@ test("only content matrix exposes temporary API configuration and requires a suc
   assert.equal(screen.queryByLabelText("API Key"), null);
 });
 
+test("APINebula CODEX preset uses the recommended endpoint and adds a safe actionable outage hint", async () => {
+  const user = userEvent.setup({ document });
+  const fakeKey = "sk-fake-apinebula-secret";
+  const requests: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_input, init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({
+      ok: false,
+      error: {
+        code: "PROVIDER_UNAVAILABLE",
+        message: `upstream https://api.yhlxj.ai/v1 failed with ${fakeKey}`,
+      },
+    }), { status: 502, headers: { "content-type": "application/json" } });
+  };
+
+  await openContentMatrixConfig(user);
+  await user.type(screen.getByLabelText("API Key"), "discarded-fake-key");
+  await user.selectOptions(
+    screen.getByLabelText("服务商预设"),
+    "apinebula-codex",
+  );
+
+  assert.equal(
+    (screen.getByLabelText("协议") as HTMLSelectElement).value,
+    "openai-compatible",
+  );
+  assert.equal(
+    (screen.getByLabelText("API 地址") as HTMLInputElement).value,
+    "https://api.yhlxj.ai/v1",
+  );
+  assert.equal(
+    (screen.getByLabelText("模型名称") as HTMLInputElement).value,
+    "gpt-5.5",
+  );
+  assert.equal(
+    (screen.getByLabelText("API Key") as HTMLInputElement).value,
+    "",
+  );
+
+  await user.type(screen.getByLabelText("API Key"), fakeKey);
+  await user.click(screen.getByRole("button", { name: "测试连接" }));
+
+  const alert = await screen.findByRole("alert");
+  assert.equal(
+    alert.textContent,
+    "上游服务暂时不可用；APINebula 请确认使用官方 API 地址、CODEX 分组令牌及控制台模型名。",
+  );
+  assert.equal(alert.textContent?.includes(fakeKey), false);
+  assert.equal(alert.textContent?.includes("api.yhlxj.ai"), false);
+  assert.deepEqual(requests[0], {
+    action: "test",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.yhlxj.ai/v1",
+    apiKey: fakeKey,
+    model: "gpt-5.5",
+  });
+  assert.equal(storageAccesses, 0);
+
+  await user.click(screen.getByRole("button", { name: "← 返回 Agent 项目" }));
+  const otherAgent = AGENT_PROJECTS.find(
+    (agent: { id: string }) => agent.id !== "content-matrix",
+  );
+  assert.ok(otherAgent);
+  await user.click(
+    screen.getByRole("button", { name: new RegExp(otherAgent.title) }),
+  );
+  await user.click(screen.getByRole("button", { name: "Agent 配置" }));
+  assert.equal(
+    screen.queryByRole("option", { name: "APINebula（CODEX）" }),
+    null,
+  );
+  assert.equal(screen.queryByLabelText("API Key"), null);
+});
+
 test("ignores a successful connection response that arrives after the draft configuration changes", async () => {
   const user = userEvent.setup({ document });
   let releaseResponse: (() => void) | undefined;

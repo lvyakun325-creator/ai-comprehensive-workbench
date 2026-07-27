@@ -41,6 +41,12 @@ const PROVIDER_PRESETS = {
     baseUrl: "https://api.deepseek.com/v1",
     model: "deepseek-chat",
   },
+  "apinebula-codex": {
+    label: "APINebula（CODEX）",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.yhlxj.ai/v1",
+    model: "gpt-5.5",
+  },
 } as const;
 
 export type ContentMatrixPreset = keyof typeof PROVIDER_PRESETS | "custom";

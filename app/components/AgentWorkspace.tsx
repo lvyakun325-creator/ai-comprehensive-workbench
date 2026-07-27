@@ -213,7 +213,11 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       ) {
         setMatrixConnection({
           kind: "error",
-          message: matrixSafeErrorMessage(payload, testedDraft.apiKey),
+          message: matrixSafeErrorMessage(
+            payload,
+            testedDraft.apiKey,
+            testedDraft.baseUrl,
+          ),
         });
         return;
       }
@@ -717,20 +721,39 @@ async function readMatrixResponse(
 function matrixSafeErrorMessage(
   payload: Record<string, unknown>,
   apiKey: string,
+  baseUrl = "",
 ): string {
   const error = payload.error;
   if (
     typeof error === "object"
     && error !== null
     && !Array.isArray(error)
-    && typeof (error as Record<string, unknown>).message === "string"
   ) {
+    const errorRecord = error as Record<string, unknown>;
+    if (
+      errorRecord.code === "PROVIDER_UNAVAILABLE"
+      && isApinebulaBaseUrl(baseUrl)
+    ) {
+      return "上游服务暂时不可用；APINebula 请确认使用官方 API 地址、CODEX 分组令牌及控制台模型名。";
+    }
+    if (typeof errorRecord.message !== "string") {
+      return "服务暂时不可用，请稍后重试。";
+    }
     return redactMatrixSecret(
-      (error as Record<string, unknown>).message as string,
+      errorRecord.message,
       apiKey,
     );
   }
   return "服务暂时不可用，请稍后重试。";
+}
+
+function isApinebulaBaseUrl(baseUrl: string): boolean {
+  try {
+    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    return hostname === "api.yhlxj.ai" || hostname === "apinebula.ai";
+  } catch {
+    return false;
+  }
 }
 
 function redactMatrixSecret(value: string, apiKey: string): string {
