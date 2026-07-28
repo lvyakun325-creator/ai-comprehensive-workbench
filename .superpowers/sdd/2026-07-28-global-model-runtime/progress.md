@@ -1,3 +1,5 @@
 # SDD ledger — plan: docs/superpowers/plans/2026-07-28-global-model-runtime.md
 
-Task 1: complete — implementation `51f097a1e74ab319b6f042188a7b72ba33570412`; fix round 1 `1c9046c15d4c269c9503b718b99ae6df0b782686`; report: `task-1-report.md`
+Task 1: fix round 1/5 (2 addressed, 0 open — short-Key masking; text config draft-save API; commits 9b69ed5..acb3ef1)
+Task 1: complete (commits b82be1d..acb3ef1, review clean)
+Task 2: complete with concerns (implementation `0fd43bf`; report: `task-2-report.md`)
