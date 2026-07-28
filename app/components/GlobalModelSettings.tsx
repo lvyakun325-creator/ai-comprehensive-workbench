@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import {
   connectionFingerprint,
+  settleConnectionStatus,
   type ChatModel,
 } from "../lib/model-registry.mjs";
 import { maskCredential } from "../lib/model-credential-store.mjs";
@@ -236,14 +237,18 @@ export function GlobalModelSettings({
     }
   }, [imageConfig]);
 
-  useEffect(() => () => {
-    mounted.current = false;
-    for (const probe of textProbes.current.values()) {
-      probe.controller.abort();
-    }
-    textProbes.current.clear();
-    imageProbe.current?.controller.abort();
-    imageProbe.current = null;
+  useEffect(() => {
+    mounted.current = true;
+    const activeTextProbes = textProbes.current;
+    return () => {
+      mounted.current = false;
+      for (const probe of activeTextProbes.values()) {
+        probe.controller.abort();
+      }
+      activeTextProbes.clear();
+      imageProbe.current?.controller.abort();
+      imageProbe.current = null;
+    };
   }, []);
 
   const abortTextProbe = (modelId: string) => {
@@ -407,7 +412,6 @@ export function GlobalModelSettings({
       baseUrl: config.baseUrl,
       modelId: config.model,
       connectionStatus: "testing",
-      testedFingerprint: "",
     });
 
     try {
@@ -504,7 +508,6 @@ export function GlobalModelSettings({
       baseUrl: config.baseUrl,
       modelId: config.model,
       connectionStatus: "testing",
-      testedFingerprint: "",
     });
 
     try {
@@ -553,6 +556,8 @@ export function GlobalModelSettings({
 
   const saveSettings = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const interruptedTextProbeIds = new Set(textProbes.current.keys());
+    const interruptedImageProbe = imageProbe.current !== null;
     abortAllProbes();
     const visibleModels = models.filter((model) => !pendingDeletedIds.has(model.id));
     for (const model of visibleModels) {
@@ -577,6 +582,18 @@ export function GlobalModelSettings({
       );
       savedCredentialRevisions.current[model.id] = savedRevision;
       delete textDraftRevisions.current[model.id];
+      const hasCredential = !draft.clearCredential
+        && Boolean(draft.apiKeyDraft.trim() || getCredential(model.id));
+      const connectionStatus = settleConnectionStatus(
+        interruptedTextProbeIds.has(model.id)
+          ? "testing"
+          : model.connectionStatus,
+        model.testedFingerprint,
+        draft.baseUrl,
+        draft.modelId,
+        savedRevision,
+        hasCredential,
+      );
       saveModelConfig(model.id, {
         provider: draft.provider,
         displayName: draft.displayName,
@@ -584,6 +601,7 @@ export function GlobalModelSettings({
         modelId: draft.modelId,
         enabled: draft.enabled,
         isDefault: draft.isDefault,
+        connectionStatus,
       });
       dirtyModelIds.current.delete(model.id);
     }
@@ -615,10 +633,21 @@ export function GlobalModelSettings({
     );
     savedImageCredentialRevision.current = savedImageRevision;
     imageDraftRevision.current = "";
+    const hasImageCredential = !currentImageDraft.clearCredential
+      && Boolean(currentImageDraft.apiKeyDraft.trim() || imageCredential);
+    const imageConnectionStatus = settleConnectionStatus(
+      interruptedImageProbe ? "testing" : imageConfig.connectionStatus,
+      imageConfig.testedFingerprint,
+      currentImageDraft.baseUrl,
+      currentImageDraft.modelId,
+      savedImageRevision,
+      hasImageCredential,
+    );
     saveImageConfig({
       baseUrl: currentImageDraft.baseUrl,
       modelId: currentImageDraft.modelId,
       enabled: currentImageDraft.enabled,
+      connectionStatus: imageConnectionStatus,
     });
     imageDirty.current = false;
     const nextDrafts = Object.fromEntries(visibleModels.map((model) => [

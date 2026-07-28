@@ -171,11 +171,26 @@ function RegistryHarness() {
         onClick={() =>
           saveModelConfig("openai-gpt-5-6", {
             connectionStatus: "connected",
-            testedFingerprint: "[\"https://changed-models.example.test/v1\",\"gpt-changed\",\"\"]",
+            testedFingerprint: JSON.stringify([
+              "https://changed-models.example.test/v1",
+              "gpt-changed",
+              getCredentialRevision("openai-gpt-5-6"),
+            ]),
           })
         }
       >
         保存模型测试结果
+      </button>
+      <button
+        onClick={() =>
+          saveModelConfig("openai-gpt-5-6", {
+            connectionStatus: "connected",
+            testedFingerprint:
+              "[\"https://models.example.test/v1\",\"gpt-5.6\",\"revision-stale\"]",
+          })
+        }
+      >
+        保存过期模型测试结果
       </button>
       <button
         onClick={() =>
@@ -190,6 +205,17 @@ function RegistryHarness() {
       </button>
       <button onClick={() => saveImageCredential("sk-image-fake-4321", false)}>
         保存生图密钥
+      </button>
+      <button
+        onClick={() =>
+          saveImageConfig({
+            connectionStatus: "connected",
+            testedFingerprint:
+              "[\"https://images.example.test/v1\",\"image-model\",\"revision-stale\"]",
+          })
+        }
+      >
+        保存过期生图测试结果
       </button>
     </section>
   );
@@ -327,6 +353,303 @@ test("persists opaque credential revisions and changes them only for replacement
   });
 });
 
+test("replacing a credential immediately removes a previously connected model from availability", async () => {
+  window.localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify([
+      {
+        id: "openai-gpt-5-6",
+        provider: "OpenAI",
+        displayName: "GPT-5.6",
+        modelId: "gpt-5.6",
+        baseUrl: "https://models.example.test/v1",
+        enabled: true,
+        isDefault: true,
+        connectionStatus: "connected",
+        testedFingerprint:
+          "[\"https://models.example.test/v1\",\"gpt-5.6\",\"revision-original\"]",
+      },
+    ]),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_STORAGE_KEY,
+    JSON.stringify({ "openai-gpt-5-6": "sk-original-text" }),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_REVISION_STORAGE_KEY,
+    JSON.stringify({ "openai-gpt-5-6": "revision-original" }),
+  );
+  const user = userEvent.setup({ document });
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await waitFor(() => {
+    assert.equal(screen.getByLabelText("已连接模型数量").textContent, "1");
+  });
+  await user.click(screen.getByRole("button", { name: "替换第一密钥" }));
+
+  await waitFor(() => {
+    assert.equal(screen.getByLabelText("已连接模型数量").textContent, "0");
+    const model = JSON.parse(
+      screen.getByLabelText("默认模型配置").textContent ?? "null",
+    );
+    assert.equal(model.connectionStatus, "changed");
+  });
+});
+
+test("rejects a connected text result bound to a stale credential revision", async () => {
+  window.localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify([
+      {
+        id: "openai-gpt-5-6",
+        provider: "OpenAI",
+        displayName: "GPT-5.6",
+        modelId: "gpt-5.6",
+        baseUrl: "https://models.example.test/v1",
+        enabled: true,
+        isDefault: true,
+        connectionStatus: "changed",
+        testedFingerprint: "",
+      },
+    ]),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_STORAGE_KEY,
+    JSON.stringify({ "openai-gpt-5-6": "sk-current-text" }),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_REVISION_STORAGE_KEY,
+    JSON.stringify({ "openai-gpt-5-6": "revision-current" }),
+  );
+  const user = userEvent.setup({ document });
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await user.click(
+    screen.getByRole("button", { name: "保存过期模型测试结果" }),
+  );
+
+  await waitFor(() => {
+    assert.equal(screen.getByLabelText("已连接模型数量").textContent, "0");
+    const model = JSON.parse(
+      screen.getByLabelText("默认模型配置").textContent ?? "null",
+    );
+    assert.equal(model.connectionStatus, "changed");
+  });
+});
+
+test("rejects a connected image result bound to a stale credential revision", async () => {
+  window.localStorage.setItem(
+    IMAGE_CONFIG_STORAGE_KEY,
+    JSON.stringify({
+      baseUrl: "https://images.example.test/v1",
+      modelId: "image-model",
+      enabled: true,
+      connectionStatus: "changed",
+      testedFingerprint: "",
+    }),
+  );
+  window.localStorage.setItem(
+    IMAGE_CREDENTIAL_STORAGE_KEY,
+    "sk-current-image",
+  );
+  window.localStorage.setItem(
+    IMAGE_CREDENTIAL_REVISION_STORAGE_KEY,
+    "revision-current",
+  );
+  const user = userEvent.setup({ document });
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await user.click(
+    screen.getByRole("button", { name: "保存过期生图测试结果" }),
+  );
+
+  await waitFor(() => {
+    const config = JSON.parse(
+      screen.getByLabelText("生图配置").textContent ?? "null",
+    );
+    assert.equal(config.connectionStatus, "changed");
+  });
+});
+
+test("downgrades a stored connected text model when its credential revision mismatches", async () => {
+  window.localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify([
+      {
+        id: "openai-gpt-5-6",
+        provider: "OpenAI",
+        displayName: "GPT-5.6",
+        modelId: "gpt-5.6",
+        baseUrl: "https://models.example.test/v1",
+        enabled: true,
+        isDefault: true,
+        connectionStatus: "connected",
+        testedFingerprint:
+          "[\"https://models.example.test/v1\",\"gpt-5.6\",\"revision-old\"]",
+      },
+    ]),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_STORAGE_KEY,
+    JSON.stringify({ "openai-gpt-5-6": "sk-current-text" }),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_REVISION_STORAGE_KEY,
+    JSON.stringify({ "openai-gpt-5-6": "revision-current" }),
+  );
+
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await waitFor(() => {
+    assert.equal(screen.getByLabelText("已连接模型数量").textContent, "0");
+    const model = JSON.parse(
+      screen.getByLabelText("默认模型配置").textContent ?? "null",
+    );
+    assert.equal(model.connectionStatus, "changed");
+    assert.equal(
+      JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "[]")[0]
+        ?.connectionStatus,
+      "changed",
+    );
+  });
+});
+
+test("downgrades stored testing metadata without a current credential revision to untested", async () => {
+  window.localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify([
+      {
+        id: "openai-gpt-5-6",
+        provider: "OpenAI",
+        displayName: "GPT-5.6",
+        modelId: "gpt-5.6",
+        baseUrl: "https://models.example.test/v1",
+        enabled: true,
+        isDefault: true,
+        connectionStatus: "testing",
+        testedFingerprint: "",
+      },
+    ]),
+  );
+
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await waitFor(() => {
+    const model = JSON.parse(
+      screen.getByLabelText("默认模型配置").textContent ?? "null",
+    );
+    assert.equal(model.connectionStatus, "untested");
+    assert.equal(
+      JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "[]")[0]
+        ?.connectionStatus,
+      "untested",
+    );
+  });
+});
+
+test("legacy credential revision migration invalidates its old connected fingerprint", async () => {
+  window.localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify([
+      {
+        id: "openai-gpt-5-6",
+        provider: "OpenAI",
+        displayName: "GPT-5.6",
+        modelId: "gpt-5.6",
+        baseUrl: "https://models.example.test/v1",
+        enabled: true,
+        isDefault: true,
+        connectionStatus: "connected",
+        testedFingerprint:
+          "[\"https://models.example.test/v1\",\"gpt-5.6\",\"\"]",
+      },
+    ]),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_STORAGE_KEY,
+    JSON.stringify({ "openai-gpt-5-6": "sk-legacy-text" }),
+  );
+
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await waitFor(() => {
+    const migratedRevision =
+      screen.getByLabelText("默认模型密钥版本").textContent ?? "";
+    assert.notEqual(migratedRevision, "none");
+    assert.doesNotMatch(migratedRevision, /legacy|sk-/i);
+    const model = JSON.parse(
+      screen.getByLabelText("默认模型配置").textContent ?? "null",
+    );
+    assert.equal(model.connectionStatus, "changed");
+    assert.equal(screen.getByLabelText("已连接模型数量").textContent, "0");
+  });
+});
+
+test("downgrades a connected image model when its credential revision mismatches", async () => {
+  window.localStorage.setItem(
+    IMAGE_CONFIG_STORAGE_KEY,
+    JSON.stringify({
+      baseUrl: "https://images.example.test/v1",
+      modelId: "image-model",
+      enabled: true,
+      connectionStatus: "connected",
+      testedFingerprint:
+        "[\"https://images.example.test/v1\",\"image-model\",\"revision-old\"]",
+    }),
+  );
+  window.localStorage.setItem(
+    IMAGE_CREDENTIAL_STORAGE_KEY,
+    "sk-current-image",
+  );
+  window.localStorage.setItem(
+    IMAGE_CREDENTIAL_REVISION_STORAGE_KEY,
+    "revision-current",
+  );
+
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await waitFor(() => {
+    const config = JSON.parse(
+      screen.getByLabelText("生图配置").textContent ?? "null",
+    );
+    assert.equal(config.connectionStatus, "changed");
+    assert.equal(
+      JSON.parse(
+        window.localStorage.getItem(IMAGE_CONFIG_STORAGE_KEY) ?? "null",
+      ).connectionStatus,
+      "changed",
+    );
+  });
+});
+
 test("migrates browser v1 model metadata into the v2 store without credentials", async () => {
   window.localStorage.setItem(
     LEGACY_MODEL_STORAGE_KEY,
@@ -395,9 +718,18 @@ test("saves text connection metadata and invalidates a changed successful config
         enabled: true,
         isDefault: true,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://old-models.example.test/v1\",\"gpt-tested\",\"\"]",
+        testedFingerprint:
+          "[\"https://old-models.example.test/v1\",\"gpt-tested\",\"revision-provider-save\"]",
       },
     ]),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_STORAGE_KEY,
+    JSON.stringify({ "openai-gpt-5-6": "sk-provider-save" }),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_REVISION_STORAGE_KEY,
+    JSON.stringify({ "openai-gpt-5-6": "revision-provider-save" }),
   );
   const user = userEvent.setup({ document });
   render(
@@ -436,7 +768,7 @@ test("saves text connection metadata and invalidates a changed successful config
     assert.equal(persisted.connectionStatus, "connected");
     assert.equal(
       persisted.testedFingerprint,
-      "[\"https://changed-models.example.test/v1\",\"gpt-changed\",\"\"]",
+      "[\"https://changed-models.example.test/v1\",\"gpt-changed\",\"revision-provider-save\"]",
     );
   });
 });
@@ -487,7 +819,8 @@ test("hydrates the enabled stored default instead of keeping the demo selection"
         enabled: true,
         isDefault: false,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://models.example.test/v1\",\"gpt-5.6\",\"\"]",
+        testedFingerprint:
+          "[\"https://models.example.test/v1\",\"gpt-5.6\",\"revision-default-openai\"]",
       },
       {
         id: "anthropic-claude-stored",
@@ -498,9 +831,24 @@ test("hydrates the enabled stored default instead of keeping the demo selection"
         enabled: true,
         isDefault: true,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://models.example.test/v1\",\"claude-stored\",\"\"]",
+        testedFingerprint:
+          "[\"https://models.example.test/v1\",\"claude-stored\",\"revision-default-claude\"]",
       },
     ]),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_STORAGE_KEY,
+    JSON.stringify({
+      "openai-gpt-5-6": "sk-default-openai",
+      "anthropic-claude-stored": "sk-default-claude",
+    }),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_REVISION_STORAGE_KEY,
+    JSON.stringify({
+      "openai-gpt-5-6": "revision-default-openai",
+      "anthropic-claude-stored": "revision-default-claude",
+    }),
   );
 
   render(
@@ -534,7 +882,8 @@ test("persists independent chat and per-Agent selections and reconciles each fal
         enabled: true,
         isDefault: true,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://models.example.test/v1\",\"gpt-5.6\",\"\"]",
+        testedFingerprint:
+          "[\"https://models.example.test/v1\",\"gpt-5.6\",\"revision-selection-openai\"]",
       },
       {
         id: ADDED_MODEL_ID,
@@ -545,7 +894,8 @@ test("persists independent chat and per-Agent selections and reconciles each fal
         enabled: true,
         isDefault: false,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://models.example.test/v1\",\"claude-test\",\"\"]",
+        testedFingerprint:
+          "[\"https://models.example.test/v1\",\"claude-test\",\"revision-selection-claude\"]",
       },
       {
         id: SECOND_MODEL_ID,
@@ -556,9 +906,26 @@ test("persists independent chat and per-Agent selections and reconciles each fal
         enabled: true,
         isDefault: false,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://models.example.test/v1\",\"gemini-test\",\"\"]",
+        testedFingerprint:
+          "[\"https://models.example.test/v1\",\"gemini-test\",\"revision-selection-gemini\"]",
       },
     ]),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_STORAGE_KEY,
+    JSON.stringify({
+      "openai-gpt-5-6": "sk-selection-openai",
+      [ADDED_MODEL_ID]: "sk-selection-claude",
+      [SECOND_MODEL_ID]: "sk-selection-gemini",
+    }),
+  );
+  window.localStorage.setItem(
+    CREDENTIAL_REVISION_STORAGE_KEY,
+    JSON.stringify({
+      "openai-gpt-5-6": "revision-selection-openai",
+      [ADDED_MODEL_ID]: "revision-selection-claude",
+      [SECOND_MODEL_ID]: "revision-selection-gemini",
+    }),
   );
   const user = userEvent.setup({ document });
   const firstRender = render(

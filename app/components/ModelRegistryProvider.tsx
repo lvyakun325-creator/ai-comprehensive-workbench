@@ -5,6 +5,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -14,8 +15,10 @@ import {
   getConnectedModels,
   normalizeModels,
   parseStoredModels,
+  reconcileModelCredentialRevisions,
   removeModel as removeRegisteredModel,
   resolveSelectedModelId,
+  settleConnectionStatus,
   setDefaultModel as setRegisteredDefaultModel,
   setModelEnabled as setRegisteredModelEnabled,
   type ChatModel,
@@ -231,6 +234,22 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
   const [imageCredential, setImageCredential] = useState<string | null>(null);
   const [imageCredentialRevision, setImageCredentialRevision] = useState("");
   const [hydrated, setHydrated] = useState(false);
+  const credentialsRef = useRef(credentials);
+  const credentialRevisionsRef = useRef(credentialRevisions);
+  const imageCredentialRef = useRef(imageCredential);
+  const imageCredentialRevisionRef = useRef(imageCredentialRevision);
+
+  useEffect(() => {
+    credentialsRef.current = credentials;
+    credentialRevisionsRef.current = credentialRevisions;
+    imageCredentialRef.current = imageCredential;
+    imageCredentialRevisionRef.current = imageCredentialRevision;
+  }, [
+    credentialRevisions,
+    credentials,
+    imageCredential,
+    imageCredentialRevision,
+  ]);
 
   useEffect(() => {
     let storedModels = DEFAULT_MODELS;
@@ -248,10 +267,6 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
       storedChatSelection = window.localStorage.getItem(
         CHAT_SELECTION_STORAGE_KEY,
       );
-      storedAgentSelections = parseStoredAgentSelections(
-        window.localStorage.getItem(AGENT_SELECTIONS_STORAGE_KEY),
-        getConnectedModels(storedModels),
-      );
       storedCredentials = parseStoredCredentials(
         window.localStorage.getItem(CREDENTIAL_STORAGE_KEY),
       );
@@ -263,6 +278,18 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
           storedCredentialRevisions[id] = createCredentialRevision();
         }
       }
+      storedModels = reconcileModelCredentialRevisions(
+        storedModels,
+        Object.fromEntries(
+          Object.keys(storedCredentials)
+            .filter((id) => storedCredentialRevisions[id])
+            .map((id) => [id, storedCredentialRevisions[id]]),
+        ),
+      );
+      storedAgentSelections = parseStoredAgentSelections(
+        window.localStorage.getItem(AGENT_SELECTIONS_STORAGE_KEY),
+        getConnectedModels(storedModels),
+      );
       storedImageConfig = parseStoredImageConfig(
         window.localStorage.getItem(IMAGE_CONFIG_STORAGE_KEY),
       );
@@ -275,6 +302,17 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
       if (storedImageCredential && !storedImageCredentialRevision) {
         storedImageCredentialRevision = createCredentialRevision();
       }
+      storedImageConfig = {
+        ...storedImageConfig,
+        connectionStatus: settleConnectionStatus(
+          storedImageConfig.connectionStatus,
+          storedImageConfig.testedFingerprint,
+          storedImageConfig.baseUrl,
+          storedImageConfig.modelId,
+          storedImageCredentialRevision,
+          Boolean(storedImageCredential),
+        ),
+      };
     } catch {
       // Keep the server-safe defaults if browser storage is unavailable.
     }
@@ -447,14 +485,39 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
         const revision = requestedRevision === null
           ? ""
           : validCredentialRevision(requestedRevision) || createCredentialRevision();
-        setCredentials((currentCredentials) =>
-          updateCredential(currentCredentials, targetId, draftValue, clearRequested),
+        const nextCredentials = updateCredential(
+          credentialsRef.current,
+          targetId,
+          draftValue,
+          clearRequested,
         );
-        setCredentialRevisions((current) => {
-          if (revision) return { ...current, [targetId]: revision };
-          const next = { ...current };
+        credentialsRef.current = nextCredentials;
+        setCredentials(nextCredentials);
+        const nextCredentialRevisions = (() => {
+          if (revision) {
+            return {
+              ...credentialRevisionsRef.current,
+              [targetId]: revision,
+            };
+          }
+          const next = { ...credentialRevisionsRef.current };
           delete next[targetId];
           return next;
+        })();
+        credentialRevisionsRef.current = nextCredentialRevisions;
+        setCredentialRevisions(nextCredentialRevisions);
+        setModels((currentModels) => {
+          const nextModels = normalizeModels(currentModels.map((model) =>
+            model.id === targetId
+              ? {
+                  ...model,
+                  connectionStatus: "changed",
+                  testedFingerprint: "",
+                }
+              : model,
+          ));
+          reconcileSelections(nextModels);
+          return nextModels;
         });
         return revision;
       },
@@ -474,7 +537,7 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
           if (!provider || !displayName || !modelId) return currentModels;
 
           const connectionChanged = baseUrl !== current.baseUrl || modelId !== current.modelId;
-          const connectionStatus = connectionChanged && current.connectionStatus === "connected"
+          let connectionStatus = connectionChanged && current.connectionStatus === "connected"
             ? "changed"
             : draft.connectionStatus === undefined
               ? current.connectionStatus
@@ -486,6 +549,16 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
             : draft.testedFingerprint === undefined
               ? current.testedFingerprint
               : text(draft.testedFingerprint);
+          if (connectionStatus === "connected") {
+            connectionStatus = settleConnectionStatus(
+              connectionStatus,
+              testedFingerprint,
+              baseUrl,
+              modelId,
+              credentialRevisionsRef.current[targetId],
+              Boolean(credentialsRef.current[targetId]),
+            );
+          }
           const enabled = draft.enabled === undefined
             ? current.enabled
             : draft.enabled === true && connectionStatus === "connected";
@@ -542,13 +615,28 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
           const baseUrl = draft.baseUrl === undefined ? current.baseUrl : text(draft.baseUrl);
           const modelId = draft.modelId === undefined ? current.modelId : text(draft.modelId);
           const connectionChanged = baseUrl !== current.baseUrl || modelId !== current.modelId;
-          const connectionStatus = connectionChanged && current.connectionStatus !== "untested"
+          let connectionStatus = connectionChanged && current.connectionStatus !== "untested"
             ? "changed"
             : draft.connectionStatus === undefined
               ? current.connectionStatus
               : IMAGE_CONNECTION_STATUSES.has(draft.connectionStatus)
                 ? draft.connectionStatus
                 : "untested";
+          const testedFingerprint = connectionChanged
+            ? ""
+            : draft.testedFingerprint === undefined
+              ? current.testedFingerprint
+              : text(draft.testedFingerprint);
+          if (connectionStatus === "connected") {
+            connectionStatus = settleConnectionStatus(
+              connectionStatus,
+              testedFingerprint,
+              baseUrl,
+              modelId,
+              imageCredentialRevisionRef.current,
+              Boolean(imageCredentialRef.current),
+            );
+          }
           return {
             ...current,
             baseUrl,
@@ -557,11 +645,7 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
               ? current.enabled
               : draft.enabled === true && connectionStatus === "connected",
             connectionStatus,
-            testedFingerprint: connectionChanged
-              ? ""
-              : draft.testedFingerprint === undefined
-                ? current.testedFingerprint
-                : text(draft.testedFingerprint),
+            testedFingerprint,
           };
         });
       },
@@ -573,11 +657,21 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
         const revision = requestedRevision === null
           ? ""
           : validCredentialRevision(requestedRevision) || createCredentialRevision();
-        setImageCredential((current) =>
-          updateCredential({ image: current ?? "" }, "image", draftValue, clearRequested).image
-            ?? null,
-        );
+        const nextImageCredential = updateCredential(
+          { image: imageCredentialRef.current ?? "" },
+          "image",
+          draftValue,
+          clearRequested,
+        ).image ?? null;
+        imageCredentialRef.current = nextImageCredential;
+        setImageCredential(nextImageCredential);
+        imageCredentialRevisionRef.current = revision;
         setImageCredentialRevision(revision);
+        setImageConfig((current) => ({
+          ...current,
+          connectionStatus: "changed",
+          testedFingerprint: "",
+        }));
         return revision;
       },
       invalidateImageConnection: () => {

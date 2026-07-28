@@ -42,7 +42,7 @@ Object.assign(navigator, {
 const { cleanup, render, screen, waitFor } = await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 const { within } = await import("@testing-library/dom");
-const { useState } = await import("react");
+const { StrictMode, useState } = await import("react");
 const { AGENT_PROJECTS } = await import("../app/lib/agent-catalog.mjs");
 const { AgentResultFiles } = await import("../app/components/AgentResultFiles");
 const { AgentTaskList } = await import("../app/components/AgentTaskList");
@@ -822,13 +822,18 @@ test("global model settings mask saved credentials and preserve or explicitly cl
         enabled: true,
         isDefault: true,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://api.openai.com/v1\",\"gpt-5.6\",\"\"]",
+        testedFingerprint:
+          "[\"https://api.openai.com/v1\",\"gpt-5.6\",\"revision-saved-key\"]",
       },
     ]),
   );
   window.localStorage.setItem(
     "ai-workbench:model-credentials:v1",
     JSON.stringify({ "openai-gpt-5-6": "sk-fake-saved-key-1234" }),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credential-revisions:v1",
+    JSON.stringify({ "openai-gpt-5-6": "revision-saved-key" }),
   );
   window.localStorage.setItem(
     "ai-workbench:image-model-config:v1",
@@ -1255,6 +1260,78 @@ test("leaving model settings aborts a text probe before its stale success", asyn
   assert.equal(requestSignal?.aborted, true);
 });
 
+test("saving during a text probe aborts it and persists a settled non-testing state", async () => {
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("文案模型 API Key"), "sk-save-race-text");
+  await user.type(
+    screen.getByLabelText("文案接口地址"),
+    "https://api.openai.com/v1",
+  );
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+  await waitFor(() => {
+    assert.equal(requestSignal?.aborted, true);
+    assert.equal(
+      screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+      "未测试",
+    );
+    const stored = JSON.parse(
+      window.localStorage.getItem("ai-workbench:model-registry:v2") ?? "[]",
+    );
+    assert.equal(stored[0]?.connectionStatus, "untested");
+  });
+
+  pending.resolve(Response.json({ ok: true }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+      "未测试",
+    );
+    assert.equal(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:model-registry:v2") ?? "[]",
+      )[0]?.connectionStatus,
+      "untested",
+    );
+  });
+});
+
+test("StrictMode effect replay keeps a current text probe eligible to complete", async () => {
+  globalThis.fetch = (async () => Response.json({ ok: true })) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(
+    <StrictMode>
+      <Home />
+    </StrictMode>,
+  );
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("文案模型 API Key"), "sk-strict-mode-text");
+  await user.type(
+    screen.getByLabelText("文案接口地址"),
+    "https://api.openai.com/v1",
+  );
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+});
+
 test("global image model test checks the model list without generating an image", async () => {
   const requestedUrls: string[] = [];
   globalThis.fetch = (async (input) => {
@@ -1287,6 +1364,56 @@ test("global image model test checks the model list without generating an image"
   assert.deepEqual(requestedUrls, ["/api/models/test-image"]);
   assert.equal(requestedUrls.some((url) => url.includes("/images/generations")), false);
   assert.equal((enabled as HTMLInputElement).disabled, false);
+});
+
+test("saving during an image probe aborts it and persists a settled non-testing state", async () => {
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("生图模型 API Key"), "sk-save-race-image");
+  await user.type(
+    screen.getByLabelText("生图接口地址"),
+    "https://api.openai.com/v1",
+  );
+  await user.type(screen.getByLabelText("生图模型名称"), "image-save-race");
+  await user.click(screen.getByRole("button", { name: "测试生图模型" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+  await waitFor(() => {
+    assert.equal(requestSignal?.aborted, true);
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "未测试",
+    );
+    assert.equal(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:image-model-config:v1") ?? "null",
+      ).connectionStatus,
+      "untested",
+    );
+  });
+
+  pending.resolve(Response.json({ ok: true }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "未测试",
+    );
+    assert.equal(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:image-model-config:v1") ?? "null",
+      ).connectionStatus,
+      "untested",
+    );
+  });
 });
 
 test("editing or canceling an image draft aborts and ignores stale image probes", async () => {
@@ -1451,7 +1578,8 @@ test("saving global settings applies the final default model after all card draf
         enabled: true,
         isDefault: true,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://api.openai.com/v1\",\"gpt-5.6\",\"\"]",
+        testedFingerprint:
+          "[\"https://api.openai.com/v1\",\"gpt-5.6\",\"revision-default-primary\"]",
       },
       {
         id: "openai-gpt-secondary",
@@ -1462,9 +1590,24 @@ test("saving global settings applies the final default model after all card draf
         enabled: true,
         isDefault: false,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://api.openai.com/v1\",\"gpt-secondary\",\"\"]",
+        testedFingerprint:
+          "[\"https://api.openai.com/v1\",\"gpt-secondary\",\"revision-default-secondary\"]",
       },
     ]),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credentials:v1",
+    JSON.stringify({
+      "openai-gpt-5-6": "sk-default-primary",
+      "openai-gpt-secondary": "sk-default-secondary",
+    }),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credential-revisions:v1",
+    JSON.stringify({
+      "openai-gpt-5-6": "revision-default-primary",
+      "openai-gpt-secondary": "revision-default-secondary",
+    }),
   );
   const user = userEvent.setup({ document });
   render(<Home />);
@@ -1498,9 +1641,18 @@ test("keeps content matrix configuration separate while other Agents select enab
         enabled: true,
         isDefault: true,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://api.openai.com/v1\",\"gpt-5.6\",\"\"]",
+        testedFingerprint:
+          "[\"https://api.openai.com/v1\",\"gpt-5.6\",\"revision-agent-config\"]",
       },
     ]),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credentials:v1",
+    JSON.stringify({ "openai-gpt-5-6": "sk-agent-config" }),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credential-revisions:v1",
+    JSON.stringify({ "openai-gpt-5-6": "revision-agent-config" }),
   );
   const user = userEvent.setup({ document });
   render(<Home />);
@@ -1548,7 +1700,8 @@ test("home chat and Agent A and B keep independent model selections", async () =
         enabled: true,
         isDefault: true,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://api.openai.com/v1\",\"gpt-5.6\",\"\"]",
+        testedFingerprint:
+          "[\"https://api.openai.com/v1\",\"gpt-5.6\",\"revision-chat-openai\"]",
       },
       {
         id: "anthropic-claude",
@@ -1559,7 +1712,8 @@ test("home chat and Agent A and B keep independent model selections", async () =
         enabled: true,
         isDefault: false,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://api.openai.com/v1\",\"claude-sonnet\",\"\"]",
+        testedFingerprint:
+          "[\"https://api.openai.com/v1\",\"claude-sonnet\",\"revision-chat-claude\"]",
       },
       {
         id: "google-gemini",
@@ -1570,9 +1724,26 @@ test("home chat and Agent A and B keep independent model selections", async () =
         enabled: true,
         isDefault: false,
         connectionStatus: "connected",
-        testedFingerprint: "[\"https://api.openai.com/v1\",\"gemini-pro\",\"\"]",
+        testedFingerprint:
+          "[\"https://api.openai.com/v1\",\"gemini-pro\",\"revision-chat-gemini\"]",
       },
     ]),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credentials:v1",
+    JSON.stringify({
+      "openai-gpt-5-6": "sk-chat-openai",
+      "anthropic-claude": "sk-chat-claude",
+      "google-gemini": "sk-chat-gemini",
+    }),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credential-revisions:v1",
+    JSON.stringify({
+      "openai-gpt-5-6": "revision-chat-openai",
+      "anthropic-claude": "revision-chat-claude",
+      "google-gemini": "revision-chat-gemini",
+    }),
   );
   const user = userEvent.setup({ document });
   render(<Home />);

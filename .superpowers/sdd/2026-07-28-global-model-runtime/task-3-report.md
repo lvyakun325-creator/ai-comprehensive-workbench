@@ -123,3 +123,63 @@ Result: passed.
 
 - Credential storage remains origin-readable browser storage, not hardware-backed encryption; the existing UI disclosure remains accurate.
 - The opaque revision is a connection-validity token, not an encryption key or credential hash.
+
+---
+
+## Fix round 2 — revision-bound availability and interrupted-save settling
+
+### Status
+
+DONE
+
+### Fix summary
+
+- Provider hydration now reconciles every text and image connection against the complete stored fingerprint: Base URL, model ID, and the current opaque credential revision.
+- Connected or orphaned testing metadata without a usable credential/revision becomes `untested` when it has no fingerprint, or `changed` when an old/mismatched fingerprint exists. A fully matching interrupted testing record settles back to `connected`.
+- Legacy credentials still receive a newly generated opaque revision, but their former empty-revision fingerprint is invalidated instead of being trusted.
+- Replacing or clearing a credential immediately invalidates the prior text/image connection. Provider save APIs also reject a `connected` result whose fingerprint carries a stale revision.
+- Saving while a text or image probe is active now captures the interrupted request, aborts it, and persists a settled non-testing state. The aborted response cannot later overwrite the saved state.
+- Probe startup retains a prior valid fingerprint so an interrupted retest of unchanged configuration can settle back to `connected`.
+- The mount effect now explicitly restores `mounted.current = true`; a StrictMode replay test verifies that a current probe can still finish after effect setup/cleanup replay.
+- Existing connected test fixtures now include matching credential and revision storage, reflecting states that can actually be available.
+
+### RED / GREEN evidence
+
+| Cycle | RED evidence | GREEN evidence |
+| --- | --- | --- |
+| Hydration revision reconciliation | Four focused Provider tests failed 4/4: text mismatch stayed connected, missing-revision testing stayed testing, legacy migration stayed connected, and image mismatch stayed connected. | The same four tests passed after full revision reconciliation for text and image hydration. |
+| Immediate credential replacement | The focused Provider test failed because replacing the Key left the model in the connected set. | It passed after replacement/clear synchronously invalidated connection metadata. |
+| Stale result rejection | Two focused Provider tests failed because text and image save APIs accepted `connected` fingerprints carrying an old revision. | Both passed after Provider writes validated connected results against synchronous credential/revision refs. |
+| Save during probe | Deferred text and image tests failed because saving aborted the signal but left page/storage as `testing` or `changed` without applying the required fingerprint-based settling rule. | Both passed after save captured active probes and settled exact matches to `connected`, mismatches to `changed`, and empty fingerprints to `untested`. |
+| StrictMode effect replay | The focused test failed with the text model stuck at “测试中” because the first cleanup left `mounted.current` false. | It passed after each mount setup restores the flag before registering cleanup. |
+
+### Final verification
+
+```bash
+npx tsx --test tests/model-registry.test.mjs tests/model-registry-provider.test.tsx tests/workbench-ui.test.tsx
+```
+
+Result: 65 tests passed, 0 failed.
+
+```bash
+npm test
+```
+
+Result: production build completed and all 187 tests passed with 0 failures.
+
+```bash
+npm run lint
+```
+
+Result: 0 errors. The same three existing unused-variable warnings remain in `tests/model-registry.test.mjs`.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+### Remaining concerns
+
+- Revision reconciliation protects connection eligibility and stale-result writes; it does not encrypt browser storage.
+- A migrated legacy credential must be tested once after upgrade because its newly generated revision intentionally invalidates the old empty-revision fingerprint.

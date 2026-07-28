@@ -29,23 +29,85 @@ function text(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function matchesConnectionFingerprint(fingerprint, baseUrl, modelId) {
+function parseConnectionFingerprint(fingerprint) {
   try {
     const parsed = JSON.parse(fingerprint);
     return (
       Array.isArray(parsed)
       && parsed.length === 3
       && parsed.every((value) => typeof value === "string")
-      && parsed[0] === text(baseUrl)
-      && parsed[1] === text(modelId)
-    );
+    )
+      ? parsed
+      : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function matchesConnectionConfig(fingerprint, baseUrl, modelId) {
+  const parsed = parseConnectionFingerprint(fingerprint);
+  return Boolean(
+    parsed
+    && parsed[0] === text(baseUrl)
+    && parsed[1] === text(modelId),
+  );
 }
 
 export function connectionFingerprint(baseUrl, modelId, keyRevision) {
   return JSON.stringify([text(baseUrl), text(modelId), text(keyRevision)]);
+}
+
+export function matchesConnectionFingerprint(
+  fingerprint,
+  baseUrl,
+  modelId,
+  keyRevision,
+) {
+  const parsed = parseConnectionFingerprint(fingerprint);
+  return Boolean(
+    parsed
+    && parsed[0] === text(baseUrl)
+    && parsed[1] === text(modelId)
+    && parsed[2] === text(keyRevision),
+  );
+}
+
+export function settleConnectionStatus(
+  status,
+  fingerprint,
+  baseUrl,
+  modelId,
+  credentialRevision,
+  hasCredential,
+) {
+  if (status !== "connected" && status !== "testing") return status;
+  if (
+    hasCredential === true
+    && text(credentialRevision)
+    && matchesConnectionFingerprint(
+      fingerprint,
+      baseUrl,
+      modelId,
+      credentialRevision,
+    )
+  ) {
+    return "connected";
+  }
+  return text(fingerprint) ? "changed" : "untested";
+}
+
+export function reconcileModelCredentialRevisions(models, credentialRevisions) {
+  return normalizeModels(models).map((model) => ({
+    ...model,
+    connectionStatus: settleConnectionStatus(
+      model.connectionStatus,
+      model.testedFingerprint,
+      model.baseUrl,
+      model.modelId,
+      credentialRevisions?.[model.id],
+      Boolean(credentialRevisions?.[model.id]),
+    ),
+  }));
 }
 
 function isModel(value) {
@@ -81,7 +143,7 @@ function normalizeModel(value) {
   if (!model.id || !model.provider || !model.displayName || !model.modelId) return null;
   if (
     model.connectionStatus === "connected"
-    && !matchesConnectionFingerprint(
+    && !matchesConnectionConfig(
       model.testedFingerprint,
       model.baseUrl,
       model.modelId,
