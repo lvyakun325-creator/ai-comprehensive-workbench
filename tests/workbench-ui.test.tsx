@@ -37,6 +37,7 @@ const { default: Home } = await import("../app/page");
 afterEach(() => {
   cleanup();
   document.body.innerHTML = "";
+  window.localStorage.clear();
 });
 
 test("opens all nine Agent cards and keeps Agent project navigation active", async () => {
@@ -76,7 +77,7 @@ test("switches primary views and keeps system settings in the mobile navigation"
     ["成果资产库", "成果资产库"],
     ["数据概览", "数据概览"],
     ["模型配置", "全局可用模型"],
-    ["总控台", "今天想推进什么经营目标？"],
+    ["AI 对话", "今天想聊什么，或推进什么任务？"],
     ["Agent 项目", "9 个独立 Agent 项目"],
   ] as const;
 
@@ -125,6 +126,43 @@ test("model configuration adds an enabled model and rejects duplicate provider m
   await user.click(screen.getByRole("button", { name: "删除 Claude Sonnet" }));
   assert.equal(screen.queryByText("Claude Sonnet"), null);
   assert.equal(screen.queryByLabelText(/api key|token|password|credential/i), null);
+});
+
+test("chat agent selects only enabled models and requires configuration when none remain", async () => {
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("服务商"), "Anthropic");
+  await user.type(screen.getByLabelText("模型显示名称"), "Claude Sonnet");
+  await user.type(screen.getByLabelText("模型 ID"), "claude-sonnet");
+  await user.click(screen.getByRole("checkbox", { name: "添加后启用" }));
+  await user.click(screen.getByRole("button", { name: "添加模型" }));
+
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+  const modelPicker = screen.getByRole("button", {
+    name: "选择模型，当前 GPT-5.6",
+  });
+  await user.click(modelPicker);
+  assert.equal(modelPicker.getAttribute("aria-expanded"), "true");
+  await user.click(screen.getByRole("button", { name: /Claude Sonnet/ }));
+  assert.equal(
+    screen.getByRole("button", { name: "选择模型，当前 Claude Sonnet" }).getAttribute(
+      "aria-expanded",
+    ),
+    "false",
+  );
+  assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.click(screen.getByRole("button", { name: "停用 GPT-5.6" }));
+  await user.click(screen.getByRole("button", { name: "停用 Claude Sonnet" }));
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+
+  assert.ok(screen.getByRole("button", { name: "请先添加模型" }));
+  assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, true);
+  await user.click(screen.getByRole("button", { name: "请先添加模型" }));
+  assert.ok(screen.getByRole("heading", { name: "全局可用模型" }));
 });
 
 test("keeps content matrix configuration separate while other Agents select enabled global models", async () => {

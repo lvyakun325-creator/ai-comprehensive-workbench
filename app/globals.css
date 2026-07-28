@@ -391,19 +391,7 @@ button {
   font-size: 15px;
 }
 
-.capacity-badge {
-  width: fit-content;
-  margin-top: 22px;
-  padding: 9px 12px;
-  border: 1px solid #d7e2ff;
-  border-radius: 999px;
-  background: #f4f7ff;
-  color: var(--blue-dark);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.dispatch-button {
+.chat-send-button {
   height: 40px;
   padding: 0 18px;
   border: 0;
@@ -414,6 +402,12 @@ button {
   font-weight: 700;
   cursor: pointer;
   box-shadow: 0 10px 22px rgba(47, 102, 246, 0.28);
+}
+
+.chat-send-button:disabled {
+  background: #aeb8ca;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 
 .hero {
@@ -592,6 +586,18 @@ button {
 
 .model-select {
   position: relative;
+}
+
+.empty-model-action {
+  height: 38px;
+  padding: 0 12px;
+  border: 1px dashed #b7c4db;
+  border-radius: 12px;
+  background: #f8f9fb;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 .model-trigger {

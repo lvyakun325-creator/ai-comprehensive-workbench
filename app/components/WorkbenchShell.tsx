@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { WorkbenchState, WorkbenchView } from "../lib/workbench-state.mjs";
 
 const NAV_ITEMS = [
-  ["control", "总控台", "⌂"],
+  ["control", "AI 对话", "⌂"],
   ["agents", "Agent 项目", "▦"],
   ["tasks", "任务中心", "◷"],
   ["assets", "成果资产库", "◇"],
@@ -27,7 +27,7 @@ export function WorkbenchShell({
   return (
     <main className="app-shell">
       <aside className="side-rail" aria-label="主导航">
-        <button className="brand-mark" aria-label="返回总控台" onClick={() => onNavigate("control")}>
+        <button className="brand-mark" aria-label="返回 AI 对话" onClick={() => onNavigate("control")}>
           <span>A</span>
         </button>
         <nav className="rail-nav" aria-label="主导航">
@@ -57,7 +57,7 @@ export function WorkbenchShell({
           <div className="wordmark">
             <div>
               <strong>AI 综合工作台</strong>
-              <span>多 Agent 经营协作中心</span>
+              <span>经营与内容 AI 工作台</span>
             </div>
           </div>
           <div className="top-actions">

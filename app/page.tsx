@@ -62,7 +62,10 @@ function WorkbenchHome() {
     if (state.view === "control") {
       return (
         <>
-          <ControlDesk onPreview={showPreview} />
+          <ControlDesk
+            onOpenModels={() => setState(navigateTo(state, "models"))}
+            onPreview={showPreview}
+          />
           <AgentDirectory onOpenAgent={(agentId) => setState(openAgent(state, agentId))} />
         </>
       );

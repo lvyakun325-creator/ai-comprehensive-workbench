@@ -1,38 +1,114 @@
-import { PREVIEW_TASK_SCHEDULE } from "../lib/workbench-preview.mjs";
+import { useState } from "react";
+import { useModelRegistry } from "./ModelRegistryProvider";
 
 type ControlDeskProps = {
+  onOpenModels: () => void;
   onPreview: (message: string) => void;
 };
 
-export function ControlDesk({ onPreview }: ControlDeskProps) {
+export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
+  const {
+    enabledModels,
+    selectedModel,
+    setSelectedModelId,
+  } = useModelRegistry();
+  const [isModelPickerOpen, setModelPickerOpen] = useState(false);
+
   return (
     <section className="control-desk">
       <div className="control-hero">
-        <span className="eyebrow">TOTAL CONTROL AGENT</span>
-        <h1>今天想推进什么经营目标？</h1>
-        <p>总控 Agent 只负责拆解、调度和汇总，不直接生产专业内容。</p>
-        <div className="capacity-badge">1 个总控台 · 最大并发 3 个子 Agent</div>
+        <span className="eyebrow">CHAT AGENT</span>
+        <h1>今天想聊什么，或推进什么任务？</h1>
+        <p>选择一个已启用模型，开始普通对话或处理具体工作。</p>
       </div>
 
       <div className="chat-card">
         <div className="chat-label">
           <span className="ai-dot">✦</span>
           <div>
-            <strong>总控 Agent</strong>
-            <small>描述目标后预览任务拆解、依赖顺序和项目分配</small>
+            <strong>聊天智能体</strong>
+            <small>选择模型后，直接描述你想完成的事情</small>
           </div>
         </div>
         <textarea
-          aria-label="经营目标输入框"
-          placeholder="例如：为新品制定 30 天内容矩阵，并完成图文、口播和复盘方案…"
+          aria-label="聊天消息输入框"
+          placeholder="例如：帮我复盘上周经营数据，先找出最影响利润的三个问题…"
         />
         <div className="chat-toolbar">
-          <span className="model-trigger">✦ GPT-5.6⌄</span>
+          <div className="model-select">
+            {enabledModels.length === 0 ? (
+              <button
+                className="empty-model-action"
+                onClick={onOpenModels}
+                type="button"
+              >
+                请先添加模型
+              </button>
+            ) : (
+              <>
+                <button
+                  aria-expanded={isModelPickerOpen}
+                  aria-haspopup="menu"
+                  aria-label={`选择模型，当前 ${selectedModel?.displayName ?? "未选择"}`}
+                  className="model-trigger"
+                  onClick={() => setModelPickerOpen((isOpen) => !isOpen)}
+                  type="button"
+                >
+                  <span className="model-orb">✦</span>
+                  {selectedModel?.displayName ?? "选择模型"}
+                  <em>⌄</em>
+                </button>
+                {isModelPickerOpen ? (
+                  <div aria-label="已启用模型" className="model-menu" role="menu">
+                    <div className="model-menu-head">
+                      <div>
+                        <strong>选择模型</strong>
+                        <small>仅显示全局已启用模型</small>
+                      </div>
+                      <button
+                        aria-label="关闭模型选择"
+                        onClick={() => setModelPickerOpen(false)}
+                        type="button"
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <div className="model-group">
+                      <span>可用模型</span>
+                      {enabledModels.map((model) => (
+                        <button
+                          className={selectedModel?.id === model.id ? "selected" : ""}
+                          key={model.id}
+                          onClick={() => {
+                            setSelectedModelId(model.id);
+                            setModelPickerOpen(false);
+                          }}
+                          type="button"
+                        >
+                          <strong>{model.displayName}</strong>
+                          <small>{model.provider} · {model.modelId}</small>
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      className="configure-row"
+                      onClick={onOpenModels}
+                      type="button"
+                    >
+                      管理模型配置
+                    </button>
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
           <button
-            className="dispatch-button"
-            onClick={() => onPreview("当前为设计预览，尚未运行真实 Agent")}
+            className="chat-send-button"
+            disabled={!selectedModel}
+            onClick={() => onPreview("当前为界面预览，真实聊天模型尚未接入")}
+            type="button"
           >
-            拆解并分配
+            发送
           </button>
         </div>
       </div>
@@ -48,24 +124,6 @@ export function ControlDesk({ onPreview }: ControlDeskProps) {
         <button onClick={() => onPreview("已选择：复盘上周数据（设计预览）")}>
           复盘上周数据
         </button>
-      </div>
-
-      <div className="control-summaries" aria-label="任务与成果预览摘要">
-        <article>
-          <span>任务调度预览</span>
-          <strong>{PREVIEW_TASK_SCHEDULE.summaryLabel}</strong>
-          <small>待人工确认后才会进入执行阶段</small>
-        </article>
-        <article>
-          <span>成果交接预览</span>
-          <strong>公共资产只读</strong>
-          <small>跨 Agent 成果仅提供只读副本</small>
-        </article>
-        <article>
-          <span>经营数据预览</span>
-          <strong>内容产能 · Agent 调用量</strong>
-          <small>全部为模拟数据，不读取真实经营数据</small>
-        </article>
       </div>
     </section>
   );

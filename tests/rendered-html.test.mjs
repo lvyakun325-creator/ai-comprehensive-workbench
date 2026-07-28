@@ -32,10 +32,10 @@ test("server-renders the AI workspace interface", async () => {
   assert.match(html, /<html lang="zh-CN">/i);
   assert.match(html, /<title>AI 综合工作台<\/title>/i);
   assert.match(html, /GPT-5\.6/);
-  assert.match(html, /总控 Agent/);
-  assert.match(html, /拆解并分配/);
-  assert.match(html, /最大并发 3/);
-  assert.match(html, /总控台/);
+  assert.match(html, /聊天智能体/);
+  assert.match(html, /选择模型后，直接描述你想完成的事情/);
+  assert.match(html, /发送/);
+  assert.match(html, /AI 对话/);
   assert.match(html, /Agent 项目/);
   assert.match(html, /任务中心/);
   assert.match(html, /成果资产库/);
@@ -49,19 +49,16 @@ test("server-renders the AI workspace interface", async () => {
   assert.match(html, /项目隔离已开启/);
   assert.match(html, /只会操作本项目资料/);
   assert.match(html, /进入独立项目/);
-  assert.match(html, /运行中 3/);
-  assert.match(html, /排队中 2/);
-  assert.match(html, /待人工确认/);
-  assert.match(html, /公共资产只读/);
-  assert.match(html, /只读副本/);
-  assert.match(html, /内容产能/);
-  assert.match(html, /Agent 调用量/);
+  assert.doesNotMatch(
+    html,
+    /总控 Agent|拆解并分配|最大并发|子 Agent|任务调度预览|成果交接预览/,
+  );
   assert.doesNotMatch(html, /全局可用模型|Agent 默认模型|密钥仅在后续接口阶段通过服务端保存/);
   assert.doesNotMatch(html, /api[_-]?key\s*[:=]/i);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape/i);
 });
 
-test("keeps the shell focused on the total-control preview", async () => {
+test("keeps the shell focused on the single chat agent", async () => {
   const page = await readFile(
     new URL("../app/page.tsx", import.meta.url),
     "utf8",
