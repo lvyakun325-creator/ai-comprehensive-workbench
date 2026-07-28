@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { afterEach, test } from "node:test";
 import { JSDOM } from "jsdom";
 
@@ -31,13 +32,65 @@ Object.defineProperty(dom.window, "setTimeout", {
 
 const { cleanup, render, screen } = await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
+const { useState } = await import("react");
 const { AGENT_PROJECTS } = await import("../app/lib/agent-catalog.mjs");
+const { AgentTaskList } = await import("../app/components/AgentTaskList");
 const { default: Home } = await import("../app/page");
+
+function TaskHistoryHarness() {
+  const [filter, setFilter] = useState("all");
+
+  return (
+    <AgentTaskList
+      agentId="content-matrix"
+      filter={filter}
+      onFilterChange={setFilter}
+      onOpenResult={() => undefined}
+    />
+  );
+}
 
 afterEach(() => {
   cleanup();
   document.body.innerHTML = "";
   window.localStorage.clear();
+});
+
+test("task history renders progress and filters completed results", async () => {
+  const user = userEvent.setup({ document });
+  render(<TaskHistoryHarness />);
+
+  assert.ok(screen.getByRole("heading", { name: "任务列表" }));
+  assert.ok(screen.getAllByText("进行中").length > 0);
+  assert.ok(screen.getAllByText(/当前步骤：/).length > 0);
+  assert.ok(screen.getByRole("progressbar"));
+  assert.ok(screen.getByRole("button", { name: "查看成果" }));
+
+  await user.click(screen.getByRole("button", { name: "已完成" }));
+
+  assert.equal(screen.queryByText("7 月健康内容矩阵规划"), null);
+  assert.ok(screen.getByText("慢病管理内容矩阵初版"));
+});
+
+test("task history mobile CSS keeps voice input visible without toolbar overflow", () => {
+  const css = readFileSync(
+    new URL("../app/globals.css", import.meta.url),
+    "utf8",
+  );
+  const mobileStyles = css.slice(css.indexOf("@media (max-width: 720px)"));
+
+  assert.doesNotMatch(
+    mobileStyles,
+    /[^{}]*\.voice-button[^{}]*\{[^{}]*display:\s*none/,
+  );
+  assert.match(
+    mobileStyles,
+    /\.chat-toolbar\s*\{[^}]*flex-wrap:\s*wrap[^}]*\}/,
+  );
+  assert.match(
+    mobileStyles,
+    /\.send-actions\s*\{[^}]*min-width:\s*0[^}]*\}/,
+  );
 });
 
 test("opens all nine Agent cards and keeps Agent project navigation active", async () => {
