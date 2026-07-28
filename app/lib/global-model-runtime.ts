@@ -35,6 +35,12 @@ const MAX_CHAT_TURNS = 40;
 const MAX_TURN_LENGTH = 12_000;
 const MAX_TOTAL_CHAT_LENGTH = 48_000;
 const MAX_ROUTE_BODY_BYTES = 64 * 1024;
+const MAX_PROVIDER_RESPONSE_BYTES = 256 * 1024;
+const MAX_PROVIDER_MODELS = 1_000;
+const MAX_PROVIDER_MODEL_ID_LENGTH = 200;
+const MAX_CHAT_REPLY_LENGTH = 24_000;
+const CHAT_MAX_TOKENS = 2_048;
+const TRUSTED_PROXY_HOSTNAMES = new Set(["api.openai.com"]);
 
 const SAFE_ERRORS = {
   INVALID_REQUEST: ["INVALID_REQUEST", "请求参数无效。", 400],
@@ -68,6 +74,11 @@ const SAFE_ERRORS = {
   INVALID_PROVIDER_RESPONSE: [
     "INVALID_PROVIDER_RESPONSE",
     "模型服务返回格式异常，请稍后重试。",
+    502,
+  ],
+  PROVIDER_RESPONSE_TOO_LARGE: [
+    "PROVIDER_RESPONSE_TOO_LARGE",
+    "模型服务返回内容过大，请缩小请求后重试。",
     502,
   ],
 } as const;
@@ -153,6 +164,7 @@ export async function generateChatReply(
       body: JSON.stringify({
         model: validConfig.model,
         messages: validTurns,
+        max_tokens: CHAT_MAX_TOKENS,
       }),
     }),
     options,
@@ -334,11 +346,13 @@ function validatePublicBaseUrl(value: string): string {
   }
   if (
     url.protocol !== "https:"
+    || url.port !== ""
     || url.username !== ""
     || url.password !== ""
     || url.search !== ""
     || url.hash !== ""
     || !url.hostname
+    || !TRUSTED_PROXY_HOSTNAMES.has(url.hostname.toLowerCase())
     || isBlockedHostname(url.hostname)
   ) {
     throw new SafeModelError("UNSAFE_URL");
@@ -504,8 +518,9 @@ async function fetchProviderJson(
     }
 
     try {
-      return await response.json();
+      return await readBoundedProviderJson(response, controller.signal);
     } catch (error) {
+      if (error instanceof SafeModelError) throw error;
       if (callerSignal?.aborted) {
         throw new SafeModelError("REQUEST_CANCELLED");
       }
@@ -529,6 +544,62 @@ async function fetchProviderJson(
   }
 }
 
+async function readBoundedProviderJson(
+  response: Response,
+  signal: AbortSignal,
+): Promise<unknown> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (
+    Number.isFinite(declaredLength)
+    && declaredLength > MAX_PROVIDER_RESPONSE_BYTES
+  ) {
+    await response.body?.cancel();
+    throw new SafeModelError("PROVIDER_RESPONSE_TOO_LARGE");
+  }
+  if (!response.body) {
+    throw new SafeModelError("INVALID_PROVIDER_RESPONSE");
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  let aborted = false;
+  const abortRead = () => {
+    aborted = true;
+    void reader.cancel();
+  };
+  signal.addEventListener("abort", abortRead, { once: true });
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (aborted) throw new DOMException("Aborted", "AbortError");
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_PROVIDER_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new SafeModelError("PROVIDER_RESPONSE_TOO_LARGE");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    signal.removeEventListener("abort", abortRead);
+    reader.releaseLock();
+  }
+
+  const bodyBytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bodyBytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bodyBytes));
+  } catch {
+    throw new SafeModelError("INVALID_PROVIDER_RESPONSE");
+  }
+}
+
 function isAbortError(error: unknown, signal: AbortSignal): boolean {
   return (
     signal.aborted
@@ -540,9 +611,15 @@ function parseModelIds(body: unknown): string[] {
   if (!isRecord(body) || !Array.isArray(body.data)) {
     throw new SafeModelError("INVALID_PROVIDER_RESPONSE");
   }
+  if (body.data.length > MAX_PROVIDER_MODELS) {
+    throw new SafeModelError("PROVIDER_RESPONSE_TOO_LARGE");
+  }
   return body.data.map((entry) => {
     if (!isRecord(entry) || typeof entry.id !== "string" || !entry.id) {
       throw new SafeModelError("INVALID_PROVIDER_RESPONSE");
+    }
+    if (entry.id.length > MAX_PROVIDER_MODEL_ID_LENGTH) {
+      throw new SafeModelError("PROVIDER_RESPONSE_TOO_LARGE");
     }
     return entry.id;
   });
@@ -559,6 +636,9 @@ function parseChatText(body: unknown): string {
   const content = choice.message.content;
   if (typeof content !== "string" || !content.trim()) {
     throw new SafeModelError("INVALID_PROVIDER_RESPONSE");
+  }
+  if (content.length > MAX_CHAT_REPLY_LENGTH) {
+    throw new SafeModelError("PROVIDER_RESPONSE_TOO_LARGE");
   }
   return content;
 }

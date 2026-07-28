@@ -14,7 +14,7 @@ const FAKE_KEY = "sk-runtime-fake";
 
 function textConfig(overrides = {}) {
   return {
-    baseUrl: "https://api.example.com/v1",
+    baseUrl: "https://api.openai.com/v1",
     apiKey: FAKE_KEY,
     model: "gpt-example",
     ...overrides,
@@ -23,6 +23,30 @@ function textConfig(overrides = {}) {
 
 function jsonResponse(value, init) {
   return Response.json(value, init);
+}
+
+function streamedJsonResponse(value, chunkSize = 128 * 1024) {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let offset = 0;
+  let canceled = false;
+  const response = new Response(
+    new ReadableStream({
+      pull(controller) {
+        if (offset >= bytes.byteLength) {
+          controller.close();
+          return;
+        }
+        const end = Math.min(offset + chunkSize, bytes.byteLength);
+        controller.enqueue(bytes.slice(offset, end));
+        offset = end;
+      },
+      cancel() {
+        canceled = true;
+      },
+    }),
+    { headers: { "content-type": "application/json" } },
+  );
+  return { response, wasCanceled: () => canceled };
 }
 
 test("APINebula direct routing requires the exact HTTPS hostname", () => {
@@ -38,12 +62,24 @@ test("APINebula direct routing requires the exact HTTPS hostname", () => {
 
 test("runtime rejects non-public URLs and control characters before fetching", async () => {
   const unsafeUrls = [
-    "http://api.example.com/v1",
+    "http://api.openai.com/v1",
     "https://localhost/v1",
+    "https://service.local/v1",
+    "https://internal/v1",
     "https://127.0.0.1/v1",
     "https://10.2.3.4/v1",
+    "https://172.16.2.3/v1",
+    "https://169.254.2.3/v1",
     "https://192.168.1.10/v1",
     "https://[::1]/v1",
+    "https://[fc00::1]/v1",
+    "https://[fe80::1]/v1",
+    "https://[ff00::1]/v1",
+    "https://[::ffff:192.168.1.10]/v1",
+    "https://public-then-private.rebind.test/v1",
+    "https://api.openai.com.evil.test/v1",
+    "https://api.openai.com:8443/v1",
+    "https://apinebula.ai/v1",
   ];
   let calls = 0;
   const fetchImpl = async () => {
@@ -68,7 +104,7 @@ test("runtime rejects non-public URLs and control characters before fetching", a
 
 test("text connection uses a safely appended chat endpoint and a fixed bounded probe", async () => {
   let captured;
-  await testTextConnection(textConfig({ baseUrl: "https://api.example.com/v1/" }), {
+  await testTextConnection(textConfig({ baseUrl: "https://api.openai.com/v1/" }), {
     fetchImpl: async (url, init) => {
       captured = { url: String(url), init };
       return jsonResponse({
@@ -77,7 +113,7 @@ test("text connection uses a safely appended chat endpoint and a fixed bounded p
     },
   });
 
-  assert.equal(captured.url, "https://api.example.com/v1/chat/completions");
+  assert.equal(captured.url, "https://api.openai.com/v1/chat/completions");
   assert.equal(captured.init.method, "POST");
   assert.equal(captured.init.redirect, "error");
   assert.equal(
@@ -107,12 +143,12 @@ test("image connection checks exact model membership in a normalized models payl
 
   await testImageConnection(
     textConfig({
-      baseUrl: "https://images.example.com/openai/v1/",
+      baseUrl: "https://api.openai.com/openai/v1/",
       model: "image-beta",
     }),
     { fetchImpl },
   );
-  assert.equal(requests[0].url, "https://images.example.com/openai/v1/models");
+  assert.equal(requests[0].url, "https://api.openai.com/openai/v1/models");
   assert.equal(requests[0].init.method, "GET");
   assert.equal(requests[0].init.redirect, "error");
 
@@ -176,7 +212,7 @@ test("chat forwards bounded turns and parses only assistant text", async () => {
     },
   );
 
-  assert.equal(captured.url, "https://api.example.com/v1/chat/completions");
+  assert.equal(captured.url, "https://api.openai.com/v1/chat/completions");
   assert.equal(captured.init.redirect, "error");
   assert.deepEqual(JSON.parse(captured.init.body), {
     model: "gpt-example",
@@ -185,8 +221,86 @@ test("chat forwards bounded turns and parses only assistant text", async () => {
       { role: "assistant", content: "你好，有什么可以帮你？" },
       { role: "user", content: "一句话回答" },
     ],
+    max_tokens: 2048,
   });
   assert.equal(reply, "安全回答；不能泄露 [REDACTED]");
+});
+
+test("runtime cancels an upstream JSON body that exceeds the byte budget", async () => {
+  const upstream = streamedJsonResponse({
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: `oversized provider body ${FAKE_KEY} ${"x".repeat(600 * 1024)}`,
+        },
+      },
+    ],
+  });
+
+  await assert.rejects(
+    generateChatReply(textConfig(), [{ role: "user", content: "hello" }], {
+      fetchImpl: async () => upstream.response,
+    }),
+    (error) => {
+      assert.equal(error.code, "PROVIDER_RESPONSE_TOO_LARGE");
+      assert.doesNotMatch(error.message, /oversized provider body|sk-runtime/);
+      return true;
+    },
+  );
+  assert.equal(upstream.wasCanceled(), true);
+});
+
+test("model lists reject more than 1000 entries", async () => {
+  const data = [
+    { id: "gpt-example", object: "model" },
+    ...Array.from({ length: 1_000 }, (_, index) => ({
+      id: `model-${index}`,
+      object: "model",
+    })),
+  ];
+  await assert.rejects(
+    testImageConnection(textConfig(), {
+      fetchImpl: async () => jsonResponse({ object: "list", data }),
+    }),
+    (error) => error.code === "PROVIDER_RESPONSE_TOO_LARGE",
+  );
+});
+
+test("model lists reject oversized model ID fields", async () => {
+  await assert.rejects(
+    testImageConnection(textConfig(), {
+      fetchImpl: async () =>
+        jsonResponse({
+          object: "list",
+          data: [{ id: "m".repeat(201), object: "model" }],
+        }),
+    }),
+    (error) => error.code === "PROVIDER_RESPONSE_TOO_LARGE",
+  );
+});
+
+test("chat rejects replies longer than 24000 characters", async () => {
+  await assert.rejects(
+    generateChatReply(textConfig(), [{ role: "user", content: "hello" }], {
+      fetchImpl: async () =>
+        jsonResponse({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: `reply ${FAKE_KEY} ${"x".repeat(24_001)}`,
+              },
+            },
+          ],
+        }),
+    }),
+    (error) => {
+      assert.equal(error.code, "PROVIDER_RESPONSE_TOO_LARGE");
+      assert.doesNotMatch(error.message, /reply|sk-runtime/);
+      return true;
+    },
+  );
 });
 
 test("provider redirects are blocked without exposing the Key or provider detail", async () => {

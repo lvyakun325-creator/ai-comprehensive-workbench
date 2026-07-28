@@ -18,7 +18,7 @@ const FAKE_KEY = "sk-route-fake";
 
 function config(overrides = {}) {
   return {
-    baseUrl: "https://api.example.com/v1",
+    baseUrl: "https://api.openai.com/v1",
     apiKey: FAKE_KEY,
     model: "gpt-example",
     ...overrides,
@@ -37,6 +37,30 @@ function request(path, body, init = {}) {
 function assertSafeJsonResponse(response) {
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.match(response.headers.get("content-type") ?? "", /^application\/json\b/);
+}
+
+function streamedJsonResponse(value, chunkSize = 128 * 1024) {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let offset = 0;
+  let canceled = false;
+  const response = new Response(
+    new ReadableStream({
+      pull(controller) {
+        if (offset >= bytes.byteLength) {
+          controller.close();
+          return;
+        }
+        const end = Math.min(offset + chunkSize, bytes.byteLength);
+        controller.enqueue(bytes.slice(offset, end));
+        offset = end;
+      },
+      cancel() {
+        canceled = true;
+      },
+    }),
+    { headers: { "content-type": "application/json" } },
+  );
+  return { response, wasCanceled: () => canceled };
 }
 
 test("all three routes forward Bearer credentials with redirects blocked and return minimal no-store success", async () => {
@@ -96,7 +120,7 @@ test("default POST exports reject unsafe URLs before contacting a provider", asy
     [
       textPOST,
       request("/api/models/test-text", {
-        config: config({ baseUrl: "http://api.example.com/v1" }),
+        config: config({ baseUrl: "http://api.openai.com/v1" }),
       }),
     ],
     [
@@ -262,6 +286,42 @@ test("image route reports a missing exact model without returning the model list
   assert.doesNotMatch(JSON.stringify(body), /image-alpha|provider-|sk-route/);
 });
 
+test("route cancels an oversized provider response and returns only a safe error", async () => {
+  const upstream = streamedJsonResponse({
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: `raw provider reply ${FAKE_KEY} ${"x".repeat(600 * 1024)}`,
+        },
+      },
+    ],
+  });
+  const handler = createChatRoute({
+    fetchImpl: async () => upstream.response,
+  });
+  const response = await handler(
+    request("/api/models/chat", {
+      config: config(),
+      turns: [{ role: "user", content: "hello" }],
+    }),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 502);
+  assertSafeJsonResponse(response);
+  assert.deepEqual(body, {
+    ok: false,
+    code: "PROVIDER_RESPONSE_TOO_LARGE",
+    message: "模型服务返回内容过大，请缩小请求后重试。",
+  });
+  assert.equal(upstream.wasCanceled(), true);
+  assert.doesNotMatch(
+    JSON.stringify(body),
+    /raw provider reply|sk-route|api\.openai/,
+  );
+});
+
 test("no error response exposes a Key, provider body, endpoint, or test reply", async () => {
   const cases = [
     [
@@ -300,7 +360,7 @@ test("no error response exposes a Key, provider body, endpoint, or test reply", 
     assertSafeJsonResponse(response);
     assert.doesNotMatch(
       serialized,
-      /sk-route|provider transport|unauthorized detail|providerBody|api\.example/,
+      /sk-route|provider transport|unauthorized detail|providerBody|api\.openai/,
     );
     assert.doesNotMatch(serialized, /reply/);
   }
