@@ -1,5 +1,8 @@
 import type { AgentProject } from "../lib/agent-catalog.mjs";
+import type { TaskStatusFilter } from "../lib/agent-project-records.mjs";
 import { useEffect, useRef, useState } from "react";
+import { AgentResultFiles } from "./AgentResultFiles";
+import { AgentTaskList } from "./AgentTaskList";
 import {
   ContentMatrixConfigPanel,
   createDefaultContentMatrixConfig,
@@ -23,10 +26,7 @@ const PROJECT_TABS = [
   "项目总览",
   "Agent 对话",
   "任务列表",
-  "项目资料",
-  "执行过程",
   "成果文件",
-  "成果交接",
   "Agent 配置",
 ];
 
@@ -118,6 +118,8 @@ type AgentWorkspaceProps = {
 
 export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps) {
   const [activeTab, setActiveTab] = useState(PROJECT_TABS[0]);
+  const [resultTaskId, setResultTaskId] = useState<string | null>(null);
+  const [taskFilter, setTaskFilter] = useState<TaskStatusFilter>("all");
   const [matrixDiagnosis, setMatrixDiagnosis] = useState<MatrixDiagnosisValues>({});
   const [matrixSubmitAttempted, setMatrixSubmitAttempted] = useState(false);
   const [matrixReady, setMatrixReady] = useState(false);
@@ -482,7 +484,7 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
 
       <div className="isolation-banner">
         <span>✓</span>
-        <p>当前位于「{agent.title}」。它只会操作本项目资料，不会修改其他 Agent 项目。</p>
+        <p>当前位于「{agent.title}」。它只会操作当前项目，不会修改其他 Agent 项目。</p>
       </div>
 
       <div className="agent-project-header">
@@ -495,18 +497,14 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       </div>
 
       <nav className="project-tabs" aria-label={`${agent.title} 项目导航`}>
-        {PROJECT_TABS.map((tab, index) => (
+        {PROJECT_TABS.map((tab) => (
           <button
             className={activeTab === tab ? "active" : ""}
             aria-current={activeTab === tab ? "page" : undefined}
             key={tab}
             onClick={() => {
               setActiveTab(tab);
-              if (
-                index > 0
-                && tab !== "Agent 配置"
-                && !(isContentMatrix && tab === "Agent 对话")
-              ) {
+              if (tab === "Agent 对话" && !isContentMatrix) {
                 onPreview(`${tab}将在真实 Agent 接入后启用`);
               }
             }}
@@ -516,7 +514,23 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         ))}
       </nav>
 
-      {activeTab === "Agent 配置" && isContentMatrix ? (
+      {activeTab === "任务列表" ? (
+        <AgentTaskList
+          agentId={agent.id}
+          filter={taskFilter}
+          onFilterChange={setTaskFilter}
+          onOpenResult={(taskId) => {
+            setResultTaskId(taskId);
+            setActiveTab("成果文件");
+          }}
+        />
+      ) : activeTab === "成果文件" ? (
+        <AgentResultFiles
+          agentId={agent.id}
+          initialTaskId={resultTaskId}
+          onPreview={onPreview}
+        />
+      ) : activeTab === "Agent 配置" && isContentMatrix ? (
         <ContentMatrixConfigPanel
           activeConfig={matrixActiveConfig}
           canApply={matrixTestedConfig !== null}
@@ -748,7 +762,7 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
           <article className="project-panel matrix-output-panel">
             <span className="panel-label">本项目输出</span>
             <strong>{agent.output}</strong>
-            <p>成果会在确认后以只读副本交接给其他项目。</p>
+            <p>已完成的 Markdown 文档会保存在成果文件中。</p>
             <div
               className="compliance-status requires-review"
               role="status"
@@ -770,7 +784,7 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
           <article className="project-panel">
             <span className="panel-label">本项目输出</span>
             <strong>{agent.output}</strong>
-            <p>成果会在确认后以只读副本交接给其他项目。</p>
+            <p>已完成的 Markdown 文档会保存在成果文件中。</p>
             <div
               className={`compliance-status ${agent.complianceRequired ? "requires-review" : "data-review"}`}
               role="status"

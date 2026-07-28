@@ -188,6 +188,77 @@ test("Markdown result lists only MD files and opens a read-only preview", async 
   assert.equal(screen.queryByRole("dialog"), null);
 });
 
+test("five project tabs connect task history to its Markdown result and preserve the filter", async () => {
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(
+    screen.getByRole("button", { name: /内容矩阵 Agent/ }),
+  );
+
+  const navigation = screen.getByRole("navigation", {
+    name: "内容矩阵 Agent 项目导航",
+  });
+  assert.ok(
+    screen.getByText("已完成的 Markdown 文档会保存在成果文件中。"),
+  );
+  const tabNames = Array.from(
+    navigation.querySelectorAll("button"),
+    (button) => button.textContent,
+  );
+
+  assert.deepEqual(tabNames, [
+    "项目总览",
+    "Agent 对话",
+    "任务列表",
+    "成果文件",
+    "Agent 配置",
+  ]);
+  for (const removedTab of ["项目资料", "执行过程", "成果交接"]) {
+    assert.equal(tabNames.includes(removedTab), false);
+  }
+
+  await user.click(screen.getByRole("button", { name: "任务列表" }));
+  assert.equal(
+    screen.queryByText("任务列表将在真实 Agent 接入后启用"),
+    null,
+  );
+  await user.click(screen.getByRole("button", { name: "已完成" }));
+  assert.equal(screen.queryByText("7 月健康内容矩阵规划"), null);
+  assert.ok(screen.getByText("慢病管理内容矩阵初版"));
+
+  await user.click(screen.getByRole("button", { name: "查看成果" }));
+
+  assert.equal(
+    screen.getByRole("button", { name: "成果文件" }).getAttribute("aria-current"),
+    "page",
+  );
+  const dialog = screen.getByRole("dialog", {
+    name: "慢病管理内容矩阵初版.md",
+  });
+  assert.match(dialog.textContent ?? "", /# 内容矩阵方案/);
+  assert.equal(
+    screen.queryByText("成果文件将在真实 Agent 接入后启用"),
+    null,
+  );
+
+  await user.click(screen.getByRole("button", { name: "关闭预览" }));
+  await user.click(screen.getByRole("button", { name: "任务列表" }));
+
+  assert.equal(
+    screen.getByRole("button", { name: "已完成" }).getAttribute("aria-pressed"),
+    "true",
+  );
+  assert.equal(screen.queryByText("7 月健康内容矩阵规划"), null);
+  assert.ok(screen.getByText("慢病管理内容矩阵初版"));
+
+  await user.click(screen.getByRole("button", { name: "成果文件" }));
+  assert.equal(
+    screen.queryByText("成果文件将在真实 Agent 接入后启用"),
+    null,
+  );
+});
+
 test("task history renders progress and filters completed results", async () => {
   const user = userEvent.setup({ document });
   let openedTaskId: string | null = null;
@@ -271,7 +342,7 @@ test("opens all nine Agent cards and keeps Agent project navigation active", asy
     assert.ok(screen.getByRole("heading", { name: agent.title }));
     assert.match(
       screen.getByText(new RegExp(`当前位于「${agent.title}」`)).textContent ?? "",
-      /只会操作本项目资料，不会修改其他 Agent 项目/,
+      /只会操作当前项目，不会修改其他 Agent 项目/,
     );
     assert.ok(
       screen.getByRole("navigation", { name: `${agent.title} 项目导航` }),

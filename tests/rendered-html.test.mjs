@@ -109,6 +109,21 @@ test("keeps the shell focused on the single chat agent", async () => {
     agentWorkspace,
     /activeTab === "Agent 配置" \?\s*\(\s*<ModelConfigPanel scope="agent" agentTitle=\{agent\.title\} onPreview=\{onPreview\} \/>/,
   );
+  const projectTabs = agentWorkspace
+    .match(/const PROJECT_TABS = \[([\s\S]*?)\];/)?.[1]
+    .match(/"[^"]+"/g)
+    ?.map((tab) => tab.slice(1, -1)) ?? [];
+  assert.deepEqual(projectTabs, [
+    "项目总览",
+    "Agent 对话",
+    "任务列表",
+    "成果文件",
+    "Agent 配置",
+  ]);
+  assert.doesNotMatch(
+    projectTabs.join("\n"),
+    /项目资料|执行过程|成果交接/,
+  );
   assert.match(modelConfigPanel, /scope: "global" \| "agent";/);
   assert.match(modelConfigPanel, /agentTitle\?: string;/);
   assert.match(modelConfigPanel, /onPreview: \(message: string\) => void;/);
