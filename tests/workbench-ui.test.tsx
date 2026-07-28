@@ -35,10 +35,23 @@ Object.defineProperty(dom.window, "setTimeout", {
   value: () => 1,
 });
 
+Object.assign(navigator, {
+  clipboard: { writeText: async (value: string) => value },
+});
+Object.defineProperty(URL, "createObjectURL", {
+  configurable: true,
+  value: () => "blob:test",
+});
+Object.defineProperty(URL, "revokeObjectURL", {
+  configurable: true,
+  value: () => undefined,
+});
+
 const { cleanup, render, screen } = await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 const { useState } = await import("react");
 const { AGENT_PROJECTS } = await import("../app/lib/agent-catalog.mjs");
+const { AgentResultFiles } = await import("../app/components/AgentResultFiles");
 const { AgentTaskList } = await import("../app/components/AgentTaskList");
 const { default: Home } = await import("../app/page");
 
@@ -115,10 +128,64 @@ const taskStateFixtures: readonly ProjectTask[] = [
   },
 ];
 
+const resultFileFixtures: readonly ProjectResult[] = [
+  {
+    id: "fixture-markdown-result",
+    agentId: "content-matrix",
+    taskId: "fixture-completed",
+    filename: "内容矩阵成果.md",
+    completedAt: "2026-07-28T05:00:00.000Z",
+    sizeBytes: 52,
+    markdown: "# 内容矩阵成果\n\n这是只读的 Markdown 成果。",
+  },
+  {
+    id: "fixture-text-result",
+    agentId: "content-matrix",
+    taskId: "fixture-completed",
+    filename: "内部过程.txt",
+    completedAt: "2026-07-28T04:59:00.000Z",
+    sizeBytes: 18,
+    markdown: "这个非 Markdown 文件不应出现。",
+  },
+];
+
 afterEach(() => {
   cleanup();
   document.body.innerHTML = "";
   window.localStorage.clear();
+});
+
+test("Markdown result lists only MD files and opens a read-only preview", async () => {
+  const user = userEvent.setup({ document });
+  const previewMessages: string[] = [];
+
+  render(
+    <AgentResultFiles
+      agentId="content-matrix"
+      getAgentResults={() => resultFileFixtures}
+      initialTaskId={null}
+      onPreview={(message) => previewMessages.push(message)}
+    />,
+  );
+
+  assert.ok(screen.getByText("内容矩阵成果.md"));
+  assert.equal(screen.queryByText("内部过程.txt"), null);
+
+  await user.click(screen.getByRole("button", { name: /查看内容矩阵成果\.md/ }));
+
+  const dialog = screen.getByRole("dialog", { name: "内容矩阵成果.md" });
+  assert.match(dialog.textContent ?? "", /这是只读的 Markdown 成果/);
+  assert.equal(screen.queryByRole("textbox"), null);
+  assert.equal(dialog.querySelector("[contenteditable]"), null);
+  assert.equal(screen.queryByRole("button", { name: /编辑/ }), null);
+  assert.ok(screen.getByRole("button", { name: "复制内容" }));
+  assert.ok(screen.getByRole("button", { name: "下载 MD" }));
+
+  await user.click(screen.getByRole("button", { name: "复制内容" }));
+  assert.deepEqual(previewMessages, ["Markdown 内容已复制"]);
+
+  await user.click(screen.getByRole("button", { name: "关闭预览" }));
+  assert.equal(screen.queryByRole("dialog"), null);
 });
 
 test("task history renders progress and filters completed results", async () => {
