@@ -1,13 +1,20 @@
 import {
-  getAgentTasks,
-  getTaskResults,
+  getAgentTasks as queryAgentTasks,
+  getTaskResults as queryTaskResults,
   type TaskStatus,
   type TaskStatusFilter,
 } from "../lib/agent-project-records.mjs";
 
+type AgentTaskQuery = (
+  agentId: string,
+  filter: TaskStatusFilter,
+) => ReturnType<typeof queryAgentTasks>;
+
 type AgentTaskListProps = {
   agentId: string;
   filter: TaskStatusFilter;
+  getAgentTasks?: AgentTaskQuery;
+  getTaskResults?: typeof queryTaskResults;
   onFilterChange: (filter: TaskStatusFilter) => void;
   onOpenResult: (taskId: string) => void;
 };
@@ -47,6 +54,8 @@ const formatTimestamp = (timestamp: string) =>
 export function AgentTaskList({
   agentId,
   filter,
+  getAgentTasks = queryAgentTasks,
+  getTaskResults = queryTaskResults,
   onFilterChange,
   onOpenResult,
 }: AgentTaskListProps) {

@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { afterEach, test } from "node:test";
 import { JSDOM } from "jsdom";
+import type {
+  ProjectResult,
+  ProjectTask,
+  TaskStatusFilter,
+} from "../app/lib/agent-project-records.mjs";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost/",
@@ -37,18 +42,78 @@ const { AGENT_PROJECTS } = await import("../app/lib/agent-catalog.mjs");
 const { AgentTaskList } = await import("../app/components/AgentTaskList");
 const { default: Home } = await import("../app/page");
 
-function TaskHistoryHarness() {
-  const [filter, setFilter] = useState("all");
+type TaskHistoryHarnessProps = {
+  onOpenResult?: (taskId: string) => void;
+  taskQuery?: (
+    agentId: string,
+    filter: TaskStatusFilter,
+  ) => readonly ProjectTask[];
+  resultQuery?: (taskId: string) => readonly ProjectResult[];
+};
+
+function TaskHistoryHarness({
+  onOpenResult = () => undefined,
+  taskQuery,
+  resultQuery,
+}: TaskHistoryHarnessProps = {}) {
+  const [filter, setFilter] = useState<TaskStatusFilter>("all");
 
   return (
     <AgentTaskList
       agentId="content-matrix"
       filter={filter}
+      getAgentTasks={taskQuery}
+      getTaskResults={resultQuery}
       onFilterChange={setFilter}
-      onOpenResult={() => undefined}
+      onOpenResult={onOpenResult}
     />
   );
 }
+
+const taskStateFixtures: readonly ProjectTask[] = [
+  {
+    id: "fixture-waiting",
+    agentId: "content-matrix",
+    title: "等待执行任务",
+    status: "waiting",
+    progress: 0,
+    currentStep: "等待可用执行槽位",
+    model: "gpt-5.6",
+    createdAt: "2026-07-28T04:00:00.000Z",
+    updatedAt: "2026-07-28T04:00:00.000Z",
+    completedAt: null,
+    stoppedAt: null,
+    errorSummary: null,
+  },
+  {
+    id: "fixture-failed",
+    agentId: "content-matrix",
+    title: "执行失败任务",
+    status: "failed",
+    progress: 42,
+    currentStep: "生成平台内容策略",
+    model: "gpt-5.6",
+    createdAt: "2026-07-28T03:00:00.000Z",
+    updatedAt: "2026-07-28T03:30:00.000Z",
+    completedAt: null,
+    stoppedAt: null,
+    errorSummary: "模型连接超时，请检查配置后重试",
+  },
+  {
+    id: "fixture-stopped",
+    agentId: "content-matrix",
+    title: "已停止任务",
+    status: "stopped",
+    progress: 26,
+    currentStep: "已由用户停止",
+    model: "gpt-5.6",
+    createdAt: "2026-07-28T02:00:00.000Z",
+    updatedAt: "2026-07-28T02:20:00.000Z",
+    completedAt: null,
+    stoppedAt: "2026-07-28T02:20:00.000Z",
+    errorSummary: null,
+  },
+];
 
 afterEach(() => {
   cleanup();
@@ -58,18 +123,54 @@ afterEach(() => {
 
 test("task history renders progress and filters completed results", async () => {
   const user = userEvent.setup({ document });
-  render(<TaskHistoryHarness />);
+  let openedTaskId: string | null = null;
+  render(
+    <TaskHistoryHarness
+      onOpenResult={(taskId) => {
+        openedTaskId = taskId;
+      }}
+    />,
+  );
 
   assert.ok(screen.getByRole("heading", { name: "任务列表" }));
   assert.ok(screen.getAllByText("进行中").length > 0);
   assert.ok(screen.getAllByText(/当前步骤：/).length > 0);
-  assert.ok(screen.getByRole("progressbar"));
-  assert.ok(screen.getByRole("button", { name: "查看成果" }));
+  const progressbar = screen.getByRole("progressbar");
+  assert.equal(progressbar.getAttribute("aria-valuemin"), "0");
+  assert.equal(progressbar.getAttribute("aria-valuemax"), "100");
+  assert.equal(progressbar.getAttribute("aria-valuenow"), "68");
+  await user.click(screen.getByRole("button", { name: "查看成果" }));
+  assert.equal(openedTaskId, "matrix-completed");
 
   await user.click(screen.getByRole("button", { name: "已完成" }));
 
   assert.equal(screen.queryByText("7 月健康内容矩阵规划"), null);
   assert.ok(screen.getByText("慢病管理内容矩阵初版"));
+});
+
+test("task history renders waiting failed and stopped cards with an error summary", () => {
+  const taskQuery = (_agentId: string, filter: TaskStatusFilter) =>
+    taskStateFixtures.filter(
+      (task) => filter === "all" || task.status === filter,
+    );
+
+  render(
+    <TaskHistoryHarness
+      resultQuery={() => []}
+      taskQuery={taskQuery}
+    />,
+  );
+
+  assert.ok(screen.getByRole("heading", { name: "等待执行任务" }));
+  assert.ok(screen.getByRole("heading", { name: "执行失败任务" }));
+  assert.ok(screen.getByRole("heading", { name: "已停止任务" }));
+  assert.ok(screen.getAllByText("等待中").length > 0);
+  assert.ok(screen.getAllByText("失败").length > 0);
+  assert.ok(screen.getAllByText("已停止").length > 0);
+  assert.match(
+    screen.getByText(/错误摘要：/).parentElement?.textContent ?? "",
+    /模型连接超时，请检查配置后重试/,
+  );
 });
 
 test("task history mobile CSS keeps voice input visible without toolbar overflow", () => {
