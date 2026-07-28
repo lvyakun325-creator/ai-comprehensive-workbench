@@ -561,6 +561,35 @@ export function GlobalModelSettings({
     abortAllProbes();
     const visibleModels = models.filter((model) => !pendingDeletedIds.has(model.id));
     for (const model of visibleModels) {
+      if (!interruptedTextProbeIds.has(model.id)) continue;
+      const draft = draftsRef.current[model.id];
+      saveModelConfig(model.id, {
+        connectionStatus: settleConnectionStatus(
+          "testing",
+          model.testedFingerprint,
+          draft.baseUrl,
+          draft.modelId,
+          textRevisionForDraft(model.id, draft),
+          !draft.clearCredential
+            && Boolean(draft.apiKeyDraft.trim() || getCredential(model.id)),
+        ),
+      });
+    }
+    if (interruptedImageProbe) {
+      const draft = imageDraftRef.current;
+      saveImageConfig({
+        connectionStatus: settleConnectionStatus(
+          "testing",
+          imageConfig.testedFingerprint,
+          draft.baseUrl,
+          draft.modelId,
+          imageRevisionForDraft(draft),
+          !draft.clearCredential
+            && Boolean(draft.apiKeyDraft.trim() || imageCredential),
+        ),
+      });
+    }
+    for (const model of visibleModels) {
       const draft = draftsRef.current[model.id];
       if (!draft.provider.trim() || !draft.displayName.trim() || !draft.modelId.trim()) {
         setValidationError("请填写每个文案模型的服务商、显示名称和模型名称。");

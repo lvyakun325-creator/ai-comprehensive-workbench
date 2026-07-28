@@ -183,3 +183,55 @@ Result: passed.
 
 - Revision reconciliation protects connection eligibility and stale-result writes; it does not encrypt browser storage.
 - A migrated legacy credential must be tested once after upgrade because its newly generated revision intentionally invalidates the old empty-revision fingerprint.
+
+---
+
+## Fix round 3 — validation-failure probe settling
+
+### Status
+
+DONE
+
+### Fix summary
+
+- Saving now settles every captured text/image probe immediately after aborting it and before any form-validation return.
+- A validation failure therefore cannot leave Provider state or local storage at `testing`.
+- Settling continues to use the last verified fingerprint and current credential revision: an unverified text draft without a fingerprint becomes `untested`, while an unchanged valid image retest returns to `connected`.
+- Validation failure does not save draft credentials or invalid metadata, and the aborted request token still prevents its late response from writing success/failure state.
+
+### RED / GREEN evidence
+
+| Cycle | RED evidence | GREEN evidence |
+| --- | --- | --- |
+| Text validation failure | The deferred test failed because clearing the service provider and saving aborted the signal but left the text status at “测试中”. | It passed after captured probes were settled before the validation loop; page/storage became `untested`, the draft Key was not persisted, and the late success was ignored. |
+| Image validation failure | The deferred connected-image retest failed because unrelated invalid text metadata caused save to return while image state remained “测试中”. | It passed after the same pre-validation settling path restored the exact matching image fingerprint to `connected` and ignored the late response. |
+
+### Final verification
+
+```bash
+npx tsx --test tests/model-registry-provider.test.tsx tests/workbench-ui.test.tsx
+```
+
+Result: 56 tests passed, 0 failed.
+
+```bash
+npm test
+```
+
+Result: production build completed and all 189 tests passed with 0 failures.
+
+```bash
+npm run lint
+```
+
+Result: 0 errors. The same three existing unused-variable warnings remain in `tests/model-registry.test.mjs`.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+### Remaining concerns
+
+- The deferred `model-registry.d.mts` export synchronization remains intentionally outside this fix-round gate, per controller direction.

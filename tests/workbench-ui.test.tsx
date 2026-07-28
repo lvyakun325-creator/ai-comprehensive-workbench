@@ -1307,6 +1307,57 @@ test("saving during a text probe aborts it and persists a settled non-testing st
   });
 });
 
+test("text save validation failure settles its aborted probe and ignores the stale response", async () => {
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(
+    screen.getByLabelText("文案模型 API Key"),
+    "sk-validation-race-text",
+  );
+  await user.type(
+    screen.getByLabelText("文案接口地址"),
+    "https://api.openai.com/v1",
+  );
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.clear(screen.getByLabelText("服务商"));
+  await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+  await waitFor(() => {
+    assert.equal(requestSignal?.aborted, true);
+    assert.equal(
+      screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+      "未测试",
+    );
+    assert.equal(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:model-registry:v2") ?? "[]",
+      )[0]?.connectionStatus,
+      "untested",
+    );
+  });
+
+  pending.resolve(Response.json({ ok: true }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+      "未测试",
+    );
+    assert.doesNotMatch(
+      window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "",
+      /sk-validation-race-text/,
+    );
+  });
+});
+
 test("StrictMode effect replay keeps a current text probe eligible to complete", async () => {
   globalThis.fetch = (async () => Response.json({ ok: true })) as typeof fetch;
   const user = userEvent.setup({ document });
@@ -1412,6 +1463,74 @@ test("saving during an image probe aborts it and persists a settled non-testing 
         window.localStorage.getItem("ai-workbench:image-model-config:v1") ?? "null",
       ).connectionStatus,
       "untested",
+    );
+  });
+});
+
+test("text validation failure settles an aborted image retest and ignores the stale response", async () => {
+  window.localStorage.setItem(
+    "ai-workbench:image-model-config:v1",
+    JSON.stringify({
+      baseUrl: "https://api.openai.com/v1",
+      modelId: "image-validation-race",
+      enabled: true,
+      connectionStatus: "connected",
+      testedFingerprint:
+        "[\"https://api.openai.com/v1\",\"image-validation-race\",\"revision-image-validation\"]",
+    }),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:image-model-credential:v1",
+    "sk-validation-race-image",
+  );
+  window.localStorage.setItem(
+    "ai-workbench:image-model-credential-revision:v1",
+    "revision-image-validation",
+  );
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+  await user.click(screen.getByRole("button", { name: "测试生图模型" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.clear(screen.getByLabelText("服务商"));
+  await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+  await waitFor(() => {
+    assert.equal(requestSignal?.aborted, true);
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "连接成功",
+    );
+    assert.equal(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:image-model-config:v1") ?? "null",
+      ).connectionStatus,
+      "connected",
+    );
+  });
+
+  pending.resolve(Response.json({ ok: true }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "连接成功",
+    );
+    assert.equal(
+      window.localStorage.getItem("ai-workbench:image-model-credential:v1"),
+      "sk-validation-race-image",
     );
   });
 });
