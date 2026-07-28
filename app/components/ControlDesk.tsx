@@ -118,8 +118,8 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
         <button onClick={() => onPreview("已选择：规划本月内容（设计预览）")}>
           规划本月内容
         </button>
-        <button onClick={() => onPreview("已选择：拆解竞品账号（设计预览）")}>
-          拆解竞品账号
+        <button onClick={() => onPreview("已选择：分析竞品账号（设计预览）")}>
+          分析竞品账号
         </button>
         <button onClick={() => onPreview("已选择：复盘上周数据（设计预览）")}>
           复盘上周数据

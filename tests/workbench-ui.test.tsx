@@ -132,6 +132,12 @@ test("chat agent selects only enabled models and requires configuration when non
   const user = userEvent.setup({ document });
   render(<Home />);
 
+  await user.click(screen.getByRole("button", { name: "分析竞品账号" }));
+  assert.match(
+    screen.getByRole("status", { name: "设计预览提示" }).textContent ?? "",
+    /已选择：分析竞品账号/,
+  );
+
   await user.click(screen.getByRole("button", { name: "模型配置" }));
   await user.type(screen.getByLabelText("服务商"), "Anthropic");
   await user.type(screen.getByLabelText("模型显示名称"), "Claude Sonnet");

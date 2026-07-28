@@ -43,7 +43,7 @@ test("server-renders the AI workspace interface", async () => {
   assert.match(html, /模型配置/);
   assert.match(html, /快捷开始/);
   assert.match(html, /规划本月内容/);
-  assert.match(html, /拆解竞品账号/);
+  assert.match(html, /分析竞品账号/);
   assert.match(html, /复盘上周数据/);
   assert.match(html, /9 个独立 Agent 项目/);
   assert.match(html, /项目隔离已开启/);
@@ -51,7 +51,7 @@ test("server-renders the AI workspace interface", async () => {
   assert.match(html, /进入独立项目/);
   assert.doesNotMatch(
     html,
-    /总控 Agent|拆解并分配|最大并发|子 Agent|任务调度预览|成果交接预览/,
+    /总控 Agent|拆解并分配|拆解竞品账号|最大并发|子 Agent|任务调度预览|成果交接预览/,
   );
   assert.doesNotMatch(html, /全局可用模型|Agent 默认模型|密钥仅在后续接口阶段通过服务端保存/);
   assert.doesNotMatch(html, /api[_-]?key\s*[:=]/i);
@@ -95,6 +95,7 @@ test("keeps the shell focused on the single chat agent", async () => {
   assert.match(shell, /const NAV_ITEMS/);
   assert.match(shell, /系统设置/);
   assert.match(controlDesk, /onClick=\{\(\) => onPreview\(/);
+  assert.doesNotMatch(controlDesk, /总控|调度|拆解|并发|子 Agent/);
   assert.match(styles, /\.agent-directory\s*\{/);
   assert.match(styles, /grid-template-columns:\s*repeat\(3/);
   assert.match(styles, /\.isolation-banner\s*\{/);
