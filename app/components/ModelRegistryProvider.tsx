@@ -42,7 +42,14 @@ const SELECTABLE_AGENT_IDS = new Set(
 type AgentModelSelections = Record<string, string>;
 type TextModelConfigDraft = Partial<Pick<
   ChatModel,
-  "baseUrl" | "modelId" | "connectionStatus" | "testedFingerprint"
+  | "provider"
+  | "displayName"
+  | "baseUrl"
+  | "modelId"
+  | "enabled"
+  | "isDefault"
+  | "connectionStatus"
+  | "testedFingerprint"
 >>;
 type ImageConfig = {
   baseUrl: string;
@@ -84,10 +91,12 @@ type ModelRegistry = {
   getMaskedCredential: (id: string) => string;
   saveCredential: (id: string, draftValue: string, clearRequested: boolean) => void;
   saveModelConfig: (id: string, draft: TextModelConfigDraft) => void;
+  invalidateModelConnection: (id: string) => void;
   imageConfig: ImageConfig;
   imageCredential: string | null;
   saveImageConfig: (draft: Partial<ImageConfig>) => void;
   saveImageCredential: (draftValue: string, clearRequested: boolean) => void;
+  invalidateImageConnection: () => void;
 };
 
 const ModelRegistryContext = createContext<ModelRegistry | null>(null);
@@ -357,9 +366,13 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
           const current = currentModels.find((model) => model.id === targetId);
           if (!current) return currentModels;
 
+          const provider = draft.provider === undefined ? current.provider : text(draft.provider);
+          const displayName = draft.displayName === undefined
+            ? current.displayName
+            : text(draft.displayName);
           const baseUrl = draft.baseUrl === undefined ? current.baseUrl : text(draft.baseUrl);
           const modelId = draft.modelId === undefined ? current.modelId : text(draft.modelId);
-          if (!baseUrl || !modelId) return currentModels;
+          if (!provider || !displayName || !modelId) return currentModels;
 
           const connectionChanged = baseUrl !== current.baseUrl || modelId !== current.modelId;
           const connectionStatus = connectionChanged && current.connectionStatus === "connected"
@@ -374,12 +387,22 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
             : draft.testedFingerprint === undefined
               ? current.testedFingerprint
               : text(draft.testedFingerprint);
+          const enabled = draft.enabled === undefined
+            ? current.enabled
+            : draft.enabled === true && connectionStatus === "connected";
+          const isDefault = enabled && (
+            draft.isDefault === undefined ? current.isDefault : draft.isDefault === true
+          );
           const nextModels = normalizeModels(currentModels.map((model) =>
             model.id === targetId
               ? {
                   ...model,
+                  provider,
+                  displayName,
                   baseUrl,
                   modelId,
+                  enabled,
+                  isDefault,
                   connectionStatus,
                   testedFingerprint,
                 }
@@ -395,29 +418,50 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
           return nextModels;
         });
       },
+      invalidateModelConnection: (id) => {
+        const targetId = text(id);
+        if (!targetId) return;
+        setModels((currentModels) => {
+          const nextModels = normalizeModels(currentModels.map((model) =>
+            model.id === targetId
+              ? {
+                  ...model,
+                  connectionStatus: "changed",
+                  testedFingerprint: "",
+                }
+              : model,
+          ));
+          reconcileSelections(nextModels);
+          return nextModels;
+        });
+      },
       imageConfig,
       imageCredential,
       saveImageConfig: (draft) => {
         setImageConfig((current) => {
           const baseUrl = draft.baseUrl === undefined ? current.baseUrl : text(draft.baseUrl);
           const modelId = draft.modelId === undefined ? current.modelId : text(draft.modelId);
-          const connectionChanged = current.connectionStatus === "connected"
-            && (baseUrl !== current.baseUrl || modelId !== current.modelId);
+          const connectionChanged = baseUrl !== current.baseUrl || modelId !== current.modelId;
+          const connectionStatus = connectionChanged && current.connectionStatus !== "untested"
+            ? "changed"
+            : draft.connectionStatus === undefined
+              ? current.connectionStatus
+              : IMAGE_CONNECTION_STATUSES.has(draft.connectionStatus)
+                ? draft.connectionStatus
+                : "untested";
           return {
             ...current,
             baseUrl,
             modelId,
-            enabled: draft.enabled === undefined ? current.enabled : draft.enabled === true,
-            connectionStatus: connectionChanged
-              ? "changed"
-              : draft.connectionStatus === undefined
-                ? current.connectionStatus
-                : IMAGE_CONNECTION_STATUSES.has(draft.connectionStatus)
-                  ? draft.connectionStatus
-                  : "untested",
-            testedFingerprint: draft.testedFingerprint === undefined
-              ? current.testedFingerprint
-              : text(draft.testedFingerprint),
+            enabled: draft.enabled === undefined
+              ? current.enabled
+              : draft.enabled === true && connectionStatus === "connected",
+            connectionStatus,
+            testedFingerprint: connectionChanged
+              ? ""
+              : draft.testedFingerprint === undefined
+                ? current.testedFingerprint
+                : text(draft.testedFingerprint),
           };
         });
       },
@@ -425,6 +469,15 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
         setImageCredential((current) =>
           updateCredential({ image: current ?? "" }, "image", draftValue, clearRequested).image
             ?? null,
+        );
+      },
+      invalidateImageConnection: () => {
+        setImageConfig((current) =>
+          ({
+            ...current,
+            connectionStatus: "changed",
+            testedFingerprint: "",
+          }),
         );
       },
     };

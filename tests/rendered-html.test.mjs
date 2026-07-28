@@ -31,9 +31,9 @@ test("server-renders the AI workspace interface", async () => {
   const html = await response.text();
   assert.match(html, /<html lang="zh-CN">/i);
   assert.match(html, /<title>AI 综合工作台<\/title>/i);
-  assert.match(html, /GPT-5\.6/);
   assert.match(html, /聊天智能体/);
   assert.match(html, /选择模型后，直接描述你想完成的事情/);
+  assert.match(html, /请先添加模型/);
   assert.match(html, /发送/);
   assert.match(html, /AI 对话/);
   assert.match(html, /Agent 项目/);
@@ -83,6 +83,10 @@ test("keeps the shell focused on the single chat agent", async () => {
     new URL("../app/components/ModelConfigPanel.tsx", import.meta.url),
     "utf8",
   );
+  const globalModelSettings = await readFile(
+    new URL("../app/components/GlobalModelSettings.tsx", import.meta.url),
+    "utf8",
+  );
 
   assert.match(page, /createInitialState/);
   assert.match(page, /navigateTo/);
@@ -130,15 +134,38 @@ test("keeps the shell focused on the single chat agent", async () => {
   assert.match(modelConfigPanel, /agentTitle: string;/);
   assert.match(modelConfigPanel, /onPreview: \(message: string\) => void;/);
   assert.match(modelConfigPanel, /useModelRegistry/);
-  assert.match(modelConfigPanel, /<h2>全局可用模型<\/h2>/);
   assert.match(modelConfigPanel, /agentTitle\} · Agent 默认模型/);
-  assert.match(modelConfigPanel, /className="model-config-form"/);
-  assert.match(modelConfigPanel, /className="configured-model-list"/);
-  assert.match(modelConfigPanel, /添加后启用/);
-  assert.match(modelConfigPanel, /role="alert"/);
-  assert.match(styles, /\.model-config-form\s*\{/);
-  assert.match(styles, /\.configured-model-list\s*\{/);
-  assert.match(styles, /\.configured-model-row\s*\{/);
-  assert.match(styles, /\.model-state-actions\s*\{/);
-  assert.doesNotMatch(modelConfigPanel, /api[_-]?key|token|password|credential/i);
+  assert.match(modelConfigPanel, /return <GlobalModelSettings onPreview=\{onPreview\} \/>;/);
+  assert.match(globalModelSettings, /<h1>模型设置<\/h1>/);
+  assert.match(
+    globalModelSettings,
+    /分别填写文案模型和生图模型的 API Key、Base URL、模型名称。/,
+  );
+  assert.match(
+    globalModelSettings,
+    /浏览器本机保存不是硬件级加密，同源脚本可读取。/,
+  );
+  assert.match(globalModelSettings, /getMaskedCredential/);
+  assert.match(globalModelSettings, /usesBrowserDirectModelRoute/);
+  assert.doesNotMatch(globalModelSettings, /images\/generations/);
+  for (const className of [
+    "global-model-settings",
+    "model-settings-header",
+    "model-settings-card",
+    "credential-saved-line",
+    "connection-status",
+    "model-settings-actions",
+    "model-settings-footer",
+  ]) {
+    assert.match(styles, new RegExp(`\\.${className}\\s*\\{`));
+  }
+  const mobileStyles = styles.slice(styles.indexOf("@media (max-width: 720px)"));
+  assert.match(
+    mobileStyles,
+    /\.model-settings-connection-fields\s*\{[^}]*grid-template-columns:\s*1fr/,
+  );
+  assert.match(
+    mobileStyles,
+    /\.model-settings-footer\s*\{[^}]*flex-direction:\s*column/,
+  );
 });

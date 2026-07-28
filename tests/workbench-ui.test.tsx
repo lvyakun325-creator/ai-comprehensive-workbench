@@ -39,7 +39,7 @@ Object.assign(navigator, {
   clipboard: { writeText: async (value: string) => value },
 });
 
-const { cleanup, render, screen } = await import("@testing-library/react");
+const { cleanup, render, screen, waitFor } = await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 const { within } = await import("@testing-library/dom");
 const { useState } = await import("react");
@@ -47,6 +47,7 @@ const { AGENT_PROJECTS } = await import("../app/lib/agent-catalog.mjs");
 const { AgentResultFiles } = await import("../app/components/AgentResultFiles");
 const { AgentTaskList } = await import("../app/components/AgentTaskList");
 const { default: Home } = await import("../app/page");
+const originalFetch = globalThis.fetch;
 
 const createdMarkdownBlobs: Array<{ blob: Blob; url: string }> = [];
 const revokedMarkdownUrls: string[] = [];
@@ -211,6 +212,7 @@ afterEach(() => {
   createdMarkdownBlobs.length = 0;
   revokedMarkdownUrls.length = 0;
   clickedDownloadAnchors.length = 0;
+  globalThis.fetch = originalFetch;
 });
 
 test("Markdown result lists only MD files and opens a read-only preview", async () => {
@@ -773,7 +775,7 @@ test("switches primary views and keeps system settings in the mobile navigation"
     ["任务中心", "任务中心"],
     ["成果资产库", "成果资产库"],
     ["数据概览", "数据概览"],
-    ["模型配置", "全局可用模型"],
+    ["模型配置", "模型设置"],
     ["AI 对话", "今天想聊什么，或推进什么任务？"],
     ["Agent 项目", "9 个独立 Agent 项目"],
   ] as const;
@@ -781,6 +783,13 @@ test("switches primary views and keeps system settings in the mobile navigation"
   for (const [navigationLabel, heading] of views) {
     await user.click(screen.getByRole("button", { name: navigationLabel }));
     assert.ok(screen.getByRole("heading", { name: heading }));
+    if (navigationLabel === "模型配置") {
+      assert.ok(screen.getByLabelText("文案模型 API Key"));
+      assert.ok(screen.getByLabelText("生图模型 API Key"));
+      assert.ok(screen.getByRole("button", { name: "测试文案模型" }));
+      assert.ok(screen.getByRole("button", { name: "测试生图模型" }));
+      assert.ok(screen.getByRole("button", { name: "保存设置" }));
+    }
   }
 
   const primaryNavigation = screen.getByRole("navigation", { name: "主导航" });
@@ -790,113 +799,312 @@ test("switches primary views and keeps system settings in the mobile navigation"
   assert.ok(screen.getByRole("heading", { name: "系统设置" }));
 });
 
-test("model configuration adds an enabled model and rejects duplicate provider model IDs", async () => {
-  const user = userEvent.setup({ document });
-  render(<Home />);
-
-  await user.click(screen.getByRole("button", { name: "模型配置" }));
-  await user.type(screen.getByLabelText("服务商"), "Anthropic");
-  await user.type(screen.getByLabelText("模型显示名称"), "Claude Sonnet");
-  await user.type(screen.getByLabelText("模型 ID"), "claude-sonnet");
-  await user.click(screen.getByRole("checkbox", { name: "添加后启用" }));
-  await user.click(screen.getByRole("button", { name: "添加模型" }));
-  assert.ok(screen.getByText("Claude Sonnet"));
-  assert.ok(
-    screen.getByRole("button", {
-      name: "设为默认 Claude Sonnet（Anthropic · claude-sonnet）",
+test("global model settings mask saved credentials and preserve or explicitly clear them", async () => {
+  window.localStorage.setItem(
+    "ai-workbench:model-registry:v2",
+    JSON.stringify([
+      {
+        id: "openai-gpt-5-6",
+        provider: "OpenAI",
+        displayName: "GPT-5.6",
+        modelId: "gpt-5.6",
+        baseUrl: "https://api.openai.com/v1",
+        enabled: true,
+        isDefault: true,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://api.openai.com/v1\",\"gpt-5.6\",\"\"]",
+      },
+    ]),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credentials:v1",
+    JSON.stringify({ "openai-gpt-5-6": "sk-fake-saved-key-1234" }),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:image-model-config:v1",
+    JSON.stringify({
+      baseUrl: "https://api.openai.com/v1",
+      modelId: "image-test",
+      enabled: false,
+      connectionStatus: "untested",
+      testedFingerprint: "",
     }),
   );
-
-  await user.type(screen.getByLabelText("服务商"), "Anthropic");
-  await user.type(screen.getByLabelText("模型显示名称"), "Claude Sonnet 副本");
-  await user.type(screen.getByLabelText("模型 ID"), "claude-sonnet");
-  await user.click(screen.getByRole("button", { name: "添加模型" }));
-  assert.match(screen.getByRole("alert").textContent ?? "", /已存在/);
-
-  await user.click(screen.getByRole("button", { name: "停用 Claude Sonnet" }));
-  assert.match(
-    screen.getByRole("list", { name: "已配置模型" }).textContent ?? "",
-    /Claude Sonnet.*已停用/,
+  window.localStorage.setItem(
+    "ai-workbench:image-model-credential:v1",
+    "sk-fake-image-saved-5678",
   );
-
-  await user.click(screen.getByRole("button", { name: "Agent 项目" }));
-  await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
-  await user.click(screen.getByRole("button", { name: "Agent 配置" }));
-  assert.equal(screen.queryByRole("radio", { name: /Claude Sonnet/ }), null);
-
-  await user.click(screen.getByRole("button", { name: "模型配置" }));
-  await user.click(screen.getByRole("button", { name: "删除 Claude Sonnet" }));
-  assert.equal(screen.queryByText("Claude Sonnet"), null);
-  assert.equal(screen.queryByLabelText(/api key|token|password|credential/i), null);
-});
-
-test("chat agent selects only enabled models and requires configuration when none remain", async () => {
   const user = userEvent.setup({ document });
   render(<Home />);
 
-  for (const [controlName, previewMessage] of [
-    ["添加附件", "附件功能尚未接入"],
-    ["工具", "工具功能尚未接入"],
-    ["语音输入", "语音输入尚未接入"],
-  ] as const) {
-    await user.click(screen.getByRole("button", { name: controlName }));
-    assert.equal(
-      screen.getByRole("status", { name: "设计预览提示" }).textContent,
-      previewMessage,
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  assert.ok(screen.getByRole("heading", { name: "模型设置" }));
+  assert.ok(
+    screen.getByText("分别填写文案模型和生图模型的 API Key、Base URL、模型名称。"),
+  );
+  assert.ok(screen.getByRole("heading", { name: "文案模型" }));
+  assert.ok(screen.getByRole("heading", { name: "生图模型" }));
+  assert.ok(screen.getByText("浏览器本机保存不是硬件级加密，同源脚本可读取。"));
+  const savedKeyLines = screen.getAllByText(/已保存 Key：/);
+  assert.equal(savedKeyLines.some((line) => /sk-…1234/.test(line.textContent ?? "")), true);
+  assert.equal(savedKeyLines.some((line) => /sk-…5678/.test(line.textContent ?? "")), true);
+  assert.equal(document.body.textContent?.includes("sk-fake-saved-key-1234"), false);
+  assert.equal(document.body.textContent?.includes("sk-fake-image-saved-5678"), false);
+  assert.equal((screen.getByLabelText("文案模型 API Key") as HTMLInputElement).value, "");
+
+  await user.clear(screen.getByLabelText("文案接口地址"));
+  await user.type(screen.getByLabelText("文案接口地址"), "https://api.openai.com/changed");
+  assert.equal(
+    screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+    "配置已变更",
+  );
+  await user.click(screen.getByRole("button", { name: "取消" }));
+  assert.equal(
+    (screen.getByLabelText("文案接口地址") as HTMLInputElement).value,
+    "https://api.openai.com/v1",
+  );
+
+  await user.click(screen.getByRole("button", { name: "保存设置" }));
+  await waitFor(() => {
+    assert.match(
+      window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "",
+      /sk-fake-saved-key-1234/,
     );
-  }
-
-  await user.click(screen.getByRole("button", { name: "发送" }));
-  assert.equal(
-    screen.getByRole("status", { name: "设计预览提示" }).textContent,
-    "当前为界面预览，真实聊天模型尚未接入",
-  );
-
-  await user.click(screen.getByRole("button", { name: "分析竞品账号" }));
-  assert.match(
-    screen.getByRole("status", { name: "设计预览提示" }).textContent ?? "",
-    /已选择：分析竞品账号/,
-  );
-
-  await user.click(screen.getByRole("button", { name: "模型配置" }));
-  await user.type(screen.getByLabelText("服务商"), "Anthropic");
-  await user.type(screen.getByLabelText("模型显示名称"), "Claude Sonnet");
-  await user.type(screen.getByLabelText("模型 ID"), "claude-sonnet");
-  await user.click(screen.getByRole("checkbox", { name: "添加后启用" }));
-  await user.click(screen.getByRole("button", { name: "添加模型" }));
-
-  await user.click(screen.getByRole("button", { name: "AI 对话" }));
-  const modelPicker = screen.getByRole("button", {
-    name: "选择模型，当前 GPT-5.6",
   });
-  await user.click(modelPicker);
-  assert.equal(modelPicker.getAttribute("aria-expanded"), "true");
-  assert.equal(modelPicker.hasAttribute("aria-haspopup"), false);
-  const modelPickerPopup = screen.getByRole("group", { name: "已启用模型" });
-  assert.equal(modelPickerPopup.id, "enabled-model-picker");
-  assert.equal(modelPicker.getAttribute("aria-controls"), modelPickerPopup.id);
-  assert.equal(screen.queryByRole("menu"), null);
-  await user.click(screen.getByRole("button", { name: /Claude Sonnet/ }));
-  assert.equal(
-    screen.getByRole("button", { name: "选择模型，当前 Claude Sonnet" }).getAttribute(
-      "aria-expanded",
-    ),
-    "false",
+
+  await user.click(
+    screen.getByRole("checkbox", { name: "清空已保存的文案 API Key" }),
   );
-  assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, false);
+  await user.click(screen.getByRole("button", { name: "保存设置" }));
+  await waitFor(() => {
+    assert.deepEqual(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "null",
+      ),
+      {},
+    );
+  });
+});
+
+test("global text model test uses the safe proxy and only connected drafts can be enabled", async () => {
+  const requests: Array<{ url: string; body: unknown }> = [];
+  let probeAttempt = 0;
+  globalThis.fetch = (async (input, init) => {
+    probeAttempt += 1;
+    requests.push({
+      url: typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    if (probeAttempt === 1) {
+      return Response.json(
+        { ok: false, message: "API Key 无效" },
+        { status: 401 },
+      );
+    }
+    return Response.json({ ok: true });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
 
   await user.click(screen.getByRole("button", { name: "模型配置" }));
-  await user.click(screen.getByRole("button", { name: "停用 GPT-5.6" }));
-  await user.click(screen.getByRole("button", { name: "停用 Claude Sonnet" }));
-  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+  const enabled = screen.getByRole("checkbox", { name: "启用 GPT-5.6" });
+  assert.equal((enabled as HTMLInputElement).disabled, true);
+  await user.clear(screen.getByLabelText("文案接口地址"));
+  await user.type(screen.getByLabelText("文案接口地址"), "https://api.openai.com/v1");
+  await user.type(screen.getByLabelText("文案模型 API Key"), "sk-fake-proxy-key");
+  assert.equal(
+    screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+    "配置已变更",
+  );
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+      "连接失败",
+    );
+  });
+  assert.equal((enabled as HTMLInputElement).disabled, true);
 
-  assert.ok(screen.getByRole("button", { name: "请先添加模型" }));
-  assert.equal((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled, true);
-  await user.click(screen.getByRole("button", { name: "请先添加模型" }));
-  assert.ok(screen.getByRole("heading", { name: "全局可用模型" }));
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+  assert.equal(requests[0]?.url, "/api/models/test-text");
+  assert.equal(requests[1]?.url, "/api/models/test-text");
+  assert.deepEqual(requests[0]?.body, {
+    config: {
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-fake-proxy-key",
+      model: "gpt-5.6",
+    },
+  });
+  assert.equal((enabled as HTMLInputElement).disabled, false);
+});
+
+test("global image model test checks the model list without generating an image", async () => {
+  const requestedUrls: string[] = [];
+  globalThis.fetch = (async (input) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url;
+    requestedUrls.push(url);
+    return Response.json({ ok: true });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("生图模型 API Key"), "sk-fake-image-key");
+  await user.type(screen.getByLabelText("生图接口地址"), "https://api.openai.com/v1");
+  await user.type(screen.getByLabelText("生图模型名称"), "flux-test");
+  const enabled = screen.getByRole("checkbox", { name: "启用生图模型" });
+  assert.equal((enabled as HTMLInputElement).disabled, true);
+
+  await user.click(screen.getByRole("button", { name: "测试生图模型" }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+  assert.deepEqual(requestedUrls, ["/api/models/test-image"]);
+  assert.equal(requestedUrls.some((url) => url.includes("/images/generations")), false);
+  assert.equal((enabled as HTMLInputElement).disabled, false);
+});
+
+test("APINebula text testing uses the exact browser-direct chat probe", async () => {
+  const requests: Array<{ url: string; body: unknown }> = [];
+  globalThis.fetch = (async (input, init) => {
+    requests.push({
+      url: typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    return Response.json({
+      choices: [{ message: { content: "连接正常" } }],
+    });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("文案模型 API Key"), "sk-fake-direct-text");
+  await user.type(screen.getByLabelText("文案接口地址"), "https://apinebula.ai/v1");
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+  assert.equal(requests[0]?.url, "https://apinebula.ai/v1/chat/completions");
+  assert.equal(
+    (requests[0]?.body as { model?: string } | null)?.model,
+    "gpt-5.6",
+  );
+  assert.equal(
+    JSON.stringify(requests[0]?.body).includes("egressMode"),
+    false,
+  );
+});
+
+test("APINebula image testing uses the exact browser-direct models probe", async () => {
+  const requestedUrls: string[] = [];
+  globalThis.fetch = (async (input) => {
+    requestedUrls.push(
+      typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+    );
+    return Response.json({ data: [{ id: "flux-direct" }] });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("生图模型 API Key"), "sk-fake-direct-image");
+  await user.type(screen.getByLabelText("生图接口地址"), "https://apinebula.ai/v1");
+  await user.type(screen.getByLabelText("生图模型名称"), "flux-direct");
+  await user.click(screen.getByRole("button", { name: "测试生图模型" }));
+
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+  assert.deepEqual(requestedUrls, ["https://apinebula.ai/v1/models"]);
+  assert.equal(requestedUrls.some((url) => url.includes("/images/generations")), false);
+});
+
+test("saving global settings applies the final default model after all card drafts", async () => {
+  window.localStorage.setItem(
+    "ai-workbench:model-registry:v2",
+    JSON.stringify([
+      {
+        id: "openai-gpt-5-6",
+        provider: "OpenAI",
+        displayName: "GPT-5.6",
+        modelId: "gpt-5.6",
+        baseUrl: "https://api.openai.com/v1",
+        enabled: true,
+        isDefault: true,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://api.openai.com/v1\",\"gpt-5.6\",\"\"]",
+      },
+      {
+        id: "openai-gpt-secondary",
+        provider: "OpenAI",
+        displayName: "GPT Secondary",
+        modelId: "gpt-secondary",
+        baseUrl: "https://api.openai.com/v1",
+        enabled: true,
+        isDefault: false,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://api.openai.com/v1\",\"gpt-secondary\",\"\"]",
+      },
+    ]),
+  );
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  const defaultRadios = screen.getAllByRole("radio", { name: "设为默认" });
+  await user.click(defaultRadios[1]);
+  await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+  await waitFor(() => {
+    const stored = JSON.parse(
+      window.localStorage.getItem("ai-workbench:model-registry:v2") ?? "[]",
+    );
+    assert.equal(
+      stored.find((model: { isDefault?: boolean }) => model.isDefault)?.id,
+      "openai-gpt-secondary",
+    );
+  });
 });
 
 test("keeps content matrix configuration separate while other Agents select enabled global models", async () => {
+  window.localStorage.setItem(
+    "ai-workbench:model-registry:v2",
+    JSON.stringify([
+      {
+        id: "openai-gpt-5-6",
+        provider: "OpenAI",
+        displayName: "GPT-5.6",
+        modelId: "gpt-5.6",
+        baseUrl: "https://api.openai.com/v1",
+        enabled: true,
+        isDefault: true,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://api.openai.com/v1\",\"gpt-5.6\",\"\"]",
+      },
+    ]),
+  );
   const user = userEvent.setup({ document });
   render(<Home />);
 
@@ -931,22 +1139,50 @@ test("keeps content matrix configuration separate while other Agents select enab
 });
 
 test("home chat and Agent A and B keep independent model selections", async () => {
+  window.localStorage.setItem(
+    "ai-workbench:model-registry:v2",
+    JSON.stringify([
+      {
+        id: "openai-gpt-5-6",
+        provider: "OpenAI",
+        displayName: "GPT-5.6",
+        modelId: "gpt-5.6",
+        baseUrl: "https://api.openai.com/v1",
+        enabled: true,
+        isDefault: true,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://api.openai.com/v1\",\"gpt-5.6\",\"\"]",
+      },
+      {
+        id: "anthropic-claude",
+        provider: "Anthropic",
+        displayName: "Claude Sonnet",
+        modelId: "claude-sonnet",
+        baseUrl: "https://api.openai.com/v1",
+        enabled: true,
+        isDefault: false,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://api.openai.com/v1\",\"claude-sonnet\",\"\"]",
+      },
+      {
+        id: "google-gemini",
+        provider: "Google",
+        displayName: "Gemini Pro",
+        modelId: "gemini-pro",
+        baseUrl: "https://api.openai.com/v1",
+        enabled: true,
+        isDefault: false,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://api.openai.com/v1\",\"gemini-pro\",\"\"]",
+      },
+    ]),
+  );
   const user = userEvent.setup({ document });
   render(<Home />);
 
-  await user.click(screen.getByRole("button", { name: "模型配置" }));
-  for (const [provider, displayName, modelId] of [
-    ["Anthropic", "Claude Sonnet", "claude-sonnet"],
-    ["Google", "Gemini Pro", "gemini-pro"],
-  ] as const) {
-    await user.type(screen.getByLabelText("服务商"), provider);
-    await user.type(screen.getByLabelText("模型显示名称"), displayName);
-    await user.type(screen.getByLabelText("模型 ID"), modelId);
-    await user.click(screen.getByRole("checkbox", { name: "添加后启用" }));
-    await user.click(screen.getByRole("button", { name: "添加模型" }));
-  }
-
-  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+  await waitFor(() => {
+    assert.ok(screen.getByRole("button", { name: /选择模型，当前 GPT-5\.6/ }));
+  });
   await user.click(screen.getByRole("button", { name: /选择模型，当前 GPT-5\.6/ }));
   await user.click(screen.getByRole("button", { name: /Claude Sonnet/ }));
 
