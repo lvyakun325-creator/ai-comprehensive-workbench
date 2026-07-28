@@ -206,6 +206,7 @@ const lookupFixtureTask = (taskId: string) =>
 afterEach(() => {
   cleanup();
   document.body.innerHTML = "";
+  document.body.style.overflow = "";
   window.localStorage.clear();
   createdMarkdownBlobs.length = 0;
   revokedMarkdownUrls.length = 0;
@@ -377,6 +378,88 @@ test("task-opened Markdown preview restores focus to the matching result trigger
   await user.keyboard("{Escape}");
   assert.equal(screen.queryByRole("dialog"), null);
   assert.equal(document.activeElement, matchingResultTrigger);
+});
+
+test("an injected initial result cannot expose Markdown outside the current completed Agent task", () => {
+  const injectedMarkdown = "# 不应暴露\n\n跨 Agent 注入内容";
+  const injectedTask: ProjectTask = {
+    ...taskStateFixtures[2],
+    id: "foreign-completed",
+    agentId: "competitor-insight",
+  };
+  const injectedResult: ProjectResult = {
+    ...resultFileFixtures[0],
+    id: "foreign-result",
+    agentId: "competitor-insight",
+    taskId: injectedTask.id,
+    filename: "跨 Agent 成果.md",
+    markdown: injectedMarkdown,
+  };
+
+  render(
+    <AgentResultFiles
+      agentId="content-matrix"
+      getAgentResults={() => [injectedResult]}
+      getTaskById={(taskId) => taskId === injectedTask.id ? injectedTask : undefined}
+      initialTaskId={injectedTask.id}
+      onPreview={() => undefined}
+    />,
+  );
+
+  assert.equal(screen.queryByRole("dialog") === null, true);
+  assert.equal(document.body.textContent?.includes(injectedMarkdown), false);
+  assert.equal(screen.queryByRole("button", { name: "复制内容" }) === null, true);
+  assert.equal(screen.queryByRole("button", { name: "下载 MD" }) === null, true);
+  assert.equal(createdMarkdownBlobs.length, 0);
+  assert.equal(
+    (screen.getByRole("button", {
+      name: "跨 Agent 成果.md 来源任务异常，无法打开",
+    }) as HTMLButtonElement).disabled,
+    true,
+  );
+});
+
+test("Markdown preview locks body scrolling and restores the exact prior value", async () => {
+  const user = userEvent.setup({ document });
+  document.body.style.overflow = "clip";
+  const view = render(
+    <AgentResultFiles
+      agentId="content-matrix"
+      getAgentResults={() => resultFileFixtures}
+      getTaskById={lookupFixtureTask}
+      initialTaskId={null}
+      onPreview={() => undefined}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: /查看内容矩阵成果\.md/ }));
+  assert.equal(document.body.style.overflow, "hidden");
+  await user.click(screen.getByRole("button", { name: "关闭预览" }));
+  assert.equal(document.body.style.overflow, "clip");
+
+  document.body.style.overflow = "scroll";
+  await user.click(screen.getByRole("button", { name: /查看内容矩阵成果\.md/ }));
+  assert.equal(document.body.style.overflow, "hidden");
+  view.unmount();
+  assert.equal(document.body.style.overflow, "scroll");
+});
+
+test("Markdown preview CSS contains scroll chaining and mobile dynamic viewport height", () => {
+  const css = readFileSync(
+    new URL("../app/globals.css", import.meta.url),
+    "utf8",
+  );
+  const backdropRule =
+    css.match(/\.result-preview-backdrop\s*\{[^}]*\}/)?.[0] ?? "";
+  const mobileStyles = css.slice(
+    css.indexOf("@media (max-width: 720px)"),
+    css.indexOf("@media (prefers-reduced-motion: reduce)"),
+  );
+  const mobileDialogRule =
+    mobileStyles.match(/\.result-preview-dialog\s*\{[^}]*\}/)?.[0] ?? "";
+
+  assert.match(backdropRule, /overscroll-behavior:\s*contain/);
+  assert.match(mobileDialogRule, /max-height:\s*calc\(100dvh - 20px\)/);
 });
 
 test("task and result views distinguish empty filters, empty Agents, and unavailable Markdown", async () => {
@@ -845,6 +928,60 @@ test("keeps content matrix configuration separate while other Agents select enab
     true,
   );
   assert.equal(screen.queryByRole("radio", { name: /Claude/ }), null);
+});
+
+test("home chat and Agent A and B keep independent model selections", async () => {
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  for (const [provider, displayName, modelId] of [
+    ["Anthropic", "Claude Sonnet", "claude-sonnet"],
+    ["Google", "Gemini Pro", "gemini-pro"],
+  ] as const) {
+    await user.type(screen.getByLabelText("服务商"), provider);
+    await user.type(screen.getByLabelText("模型显示名称"), displayName);
+    await user.type(screen.getByLabelText("模型 ID"), modelId);
+    await user.click(screen.getByRole("checkbox", { name: "添加后启用" }));
+    await user.click(screen.getByRole("button", { name: "添加模型" }));
+  }
+
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+  await user.click(screen.getByRole("button", { name: /选择模型，当前 GPT-5\.6/ }));
+  await user.click(screen.getByRole("button", { name: /Claude Sonnet/ }));
+
+  await user.click(screen.getByRole("button", { name: "Agent 项目" }));
+  await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
+  await user.click(screen.getByRole("button", { name: "Agent 配置" }));
+  assert.equal(
+    (screen.getByRole("radio", { name: /GPT-5\.6 OpenAI/ }) as HTMLInputElement)
+      .checked,
+    true,
+  );
+  await user.click(screen.getByRole("radio", { name: /Gemini Pro Google/ }));
+
+  await user.click(screen.getByRole("button", { name: "← 返回 Agent 项目" }));
+  await user.click(screen.getByRole("button", { name: /选题策划 Agent/ }));
+  await user.click(screen.getByRole("button", { name: "Agent 配置" }));
+  assert.equal(
+    (screen.getByRole("radio", { name: /GPT-5\.6 OpenAI/ }) as HTMLInputElement)
+      .checked,
+    true,
+  );
+
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+  assert.ok(
+    screen.getByRole("button", { name: "选择模型，当前 Claude Sonnet" }),
+  );
+
+  await user.click(screen.getByRole("button", { name: "Agent 项目" }));
+  await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
+  await user.click(screen.getByRole("button", { name: "Agent 配置" }));
+  assert.equal(
+    (screen.getByRole("radio", { name: /Gemini Pro Google/ }) as HTMLInputElement)
+      .checked,
+    true,
+  );
 });
 
 test("content matrix Agent collects intake details before marking diagnostic materials ready", async () => {

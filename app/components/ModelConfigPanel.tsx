@@ -3,11 +3,17 @@
 import { useState, type FormEvent } from "react";
 import { useModelRegistry } from "./ModelRegistryProvider";
 
-type ModelConfigPanelProps = {
-  scope: "global" | "agent";
-  agentTitle?: string;
-  onPreview: (message: string) => void;
-};
+type ModelConfigPanelProps =
+  | {
+      scope: "global";
+      onPreview: (message: string) => void;
+    }
+  | {
+      scope: "agent";
+      agentId: string;
+      agentTitle: string;
+      onPreview: (message: string) => void;
+    };
 
 type ModelDraftForm = {
   provider: string;
@@ -27,20 +33,17 @@ function modelKey(provider: string, modelId: string) {
   return `${provider.trim().toLocaleLowerCase()}\u0000${modelId.trim().toLocaleLowerCase()}`;
 }
 
-export function ModelConfigPanel({
-  scope,
-  agentTitle,
-  onPreview,
-}: ModelConfigPanelProps) {
+export function ModelConfigPanel(props: ModelConfigPanelProps) {
+  const { scope, onPreview } = props;
   const {
     models,
     enabledModels,
-    selectedModelId,
     addModel,
+    getAgentSelectedModelId,
     removeModel,
+    setAgentSelectedModelId,
     setDefaultModel,
     setModelEnabled,
-    setSelectedModelId,
   } = useModelRegistry();
   const [draft, setDraft] = useState<ModelDraftForm>(EMPTY_DRAFT);
   const [error, setError] = useState("");
@@ -68,6 +71,9 @@ export function ModelConfigPanel({
   };
 
   if (scope === "agent") {
+    const { agentId, agentTitle } = props;
+    const selectedModelId = getAgentSelectedModelId(agentId);
+
     return (
       <section className="design-preview" aria-label="agent 模型配置">
         <span className="eyebrow">AGENT MODEL</span>
@@ -83,9 +89,9 @@ export function ModelConfigPanel({
               <label key={model.id}>
                 <input
                   checked={selectedModelId === model.id}
-                  name="agent-model"
+                  name={`agent-model-${agentId}`}
                   onChange={() => {
-                    setSelectedModelId(model.id);
+                    setAgentSelectedModelId(agentId, model.id);
                     onPreview(`已为${agentTitle}选择 ${model.displayName}`);
                   }}
                   type="radio"

@@ -34,6 +34,28 @@ const formatFileSize = (sizeBytes: number) =>
     ? `${sizeBytes} B`
     : `${(sizeBytes / 1024).toFixed(1)} KB`;
 
+function resolveResultAccess(
+  result: ProjectResult,
+  agentId: string,
+  getTaskById: typeof queryTaskById,
+) {
+  const sourceTask = getTaskById(result.taskId);
+  const isMarkdown = result.filename.toLowerCase().endsWith(".md");
+  const isAccessible =
+    isMarkdown &&
+    sourceTask?.id === result.taskId &&
+    sourceTask.status === "completed" &&
+    sourceTask.agentId === result.agentId &&
+    result.agentId === agentId;
+
+  return {
+    result,
+    sourceTask,
+    isMarkdown,
+    isAccessible,
+  };
+}
+
 export function AgentResultFiles({
   agentId,
   initialTaskId = null,
@@ -41,12 +63,24 @@ export function AgentResultFiles({
   getTaskById = queryTaskById,
   onPreview,
 }: AgentResultFilesProps) {
-  const results = getAgentResults(agentId).filter((result) =>
-    result.filename.toLowerCase().endsWith(".md"),
+  const resultAccesses = getAgentResults(agentId).map((result) =>
+    resolveResultAccess(result, agentId, getTaskById),
   );
-  const [selectedResult, setSelectedResult] = useState<ProjectResult | null>(
-    () => results.find((result) => result.taskId === initialTaskId) ?? null,
+  const markdownResultAccesses = resultAccesses.filter(
+    (access) => access.isMarkdown,
   );
+  const [selectedResultId, setSelectedResultId] = useState<string | null>(
+    () =>
+      resultAccesses.find(
+        (access) =>
+          access.isAccessible && access.result.taskId === initialTaskId,
+      )?.result.id ?? null,
+  );
+  const selectedResult =
+    resultAccesses.find(
+      (access) =>
+        access.isAccessible && access.result.id === selectedResultId,
+    )?.result ?? null;
   const [actionStatus, setActionStatus] = useState("");
   const backdropRef = useRef<HTMLDivElement | null>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
@@ -58,6 +92,8 @@ export function AgentResultFiles({
     const backdrop = backdropRef.current;
     if (!selectedResult || !backdrop) return;
 
+    const previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     const backgroundStates = Array.from(document.body.children)
       .filter((element) => element !== backdrop)
       .map((element) => {
@@ -81,7 +117,7 @@ export function AgentResultFiles({
     const handleDialogKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        setSelectedResult(null);
+        setSelectedResultId(null);
         return;
       }
 
@@ -117,6 +153,7 @@ export function AgentResultFiles({
 
     return () => {
       document.removeEventListener("keydown", handleDialogKeyDown);
+      document.body.style.overflow = previousBodyOverflow;
       for (const state of backgroundStates) {
         state.element.inert = state.hadInert;
         if (state.hadInert) {
@@ -142,7 +179,17 @@ export function AgentResultFiles({
     onPreview(message);
   };
 
-  const copyResult = async (result: ProjectResult) => {
+  const findAccessibleResult = (resultId: string) =>
+    resultAccesses.find(
+      (access) => access.isAccessible && access.result.id === resultId,
+    )?.result ?? null;
+
+  const copyResult = async (resultId: string) => {
+    const result = findAccessibleResult(resultId);
+    if (!result) {
+      setSelectedResultId(null);
+      return;
+    }
     if (result.markdown === null) {
       showActionStatus("Markdown 内容暂时不可用，请稍后重试");
       return;
@@ -155,7 +202,12 @@ export function AgentResultFiles({
     }
   };
 
-  const downloadResult = (result: ProjectResult) => {
+  const downloadResult = (resultId: string) => {
+    const result = findAccessibleResult(resultId);
+    if (!result) {
+      setSelectedResultId(null);
+      return;
+    }
     if (result.markdown === null) {
       const message = "Markdown 内容暂时不可用，请稍后重试";
       showActionStatus(message);
@@ -186,26 +238,22 @@ export function AgentResultFiles({
           <span className="eyebrow">RESULT FILES</span>
           <h2 id="agent-result-files-heading">Markdown 成果</h2>
         </div>
-        <span>{results.length} 个文件</span>
+        <span>{markdownResultAccesses.length} 个文件</span>
       </div>
 
-      {results.length === 0 ? (
+      {markdownResultAccesses.length === 0 ? (
         <p className="agent-results-empty">
           任务完成后，Markdown 成果会出现在这里
         </p>
       ) : (
         <div aria-label="Markdown 成果文件" className="agent-result-list">
-          {results.map((result) => {
-            const sourceTask = getTaskById(result.taskId);
-            const sourceIsValid =
-              sourceTask?.status === "completed" &&
-              sourceTask.agentId === result.agentId &&
-              result.agentId === agentId;
+          {markdownResultAccesses.map((access) => {
+            const { result, sourceTask, isAccessible } = access;
 
             return (
               <article
                 className={`result-file-card ${
-                  sourceIsValid ? "" : "result-source-abnormal"
+                  isAccessible ? "" : "result-source-abnormal"
                 }`}
                 key={result.id}
               >
@@ -217,11 +265,11 @@ export function AgentResultFiles({
                     <h3>{result.filename}</h3>
                     <p
                       className={
-                        sourceIsValid ? "result-source-task" : "result-source-error"
+                        isAccessible ? "result-source-task" : "result-source-error"
                       }
                     >
                       来源任务：
-                      {sourceIsValid ? sourceTask.title : "关联任务异常"}
+                      {isAccessible ? sourceTask?.title : "关联任务异常"}
                     </p>
                     <p>
                       {formatFileSize(result.sizeBytes)}
@@ -233,16 +281,16 @@ export function AgentResultFiles({
                 </div>
                 <button
                   aria-label={
-                    sourceIsValid
+                    isAccessible
                       ? `查看${result.filename}`
                       : `${result.filename} 来源任务异常，无法打开`
                   }
-                  disabled={!sourceIsValid}
+                  disabled={!isAccessible}
                   onClick={(event) => {
-                    if (!sourceIsValid) return;
+                    if (!isAccessible) return;
                     resultTriggerRef.current = event.currentTarget;
                     setActionStatus("");
-                    setSelectedResult(result);
+                    setSelectedResultId(result.id);
                   }}
                   ref={(element) => {
                     if (element) {
@@ -253,7 +301,7 @@ export function AgentResultFiles({
                   }}
                   type="button"
                 >
-                  {sourceIsValid ? "查看成果" : "成果不可用"}
+                  {isAccessible ? "查看成果" : "成果不可用"}
                 </button>
               </article>
             );
@@ -282,7 +330,7 @@ export function AgentResultFiles({
                   <button
                     aria-label="关闭预览"
                     className="result-preview-close"
-                    onClick={() => setSelectedResult(null)}
+                    onClick={() => setSelectedResultId(null)}
                     ref={closeButtonRef}
                     type="button"
                   >
@@ -315,14 +363,14 @@ export function AgentResultFiles({
                   <button
                     className="result-preview-secondary"
                     disabled={selectedResult.markdown === null}
-                    onClick={() => void copyResult(selectedResult)}
+                    onClick={() => void copyResult(selectedResult.id)}
                     type="button"
                   >
                     复制内容
                   </button>
                   <button
                     className="result-preview-primary"
-                    onClick={() => downloadResult(selectedResult)}
+                    onClick={() => downloadResult(selectedResult.id)}
                     type="button"
                   >
                     {selectedResult.markdown === null ? "重试下载" : "下载 MD"}

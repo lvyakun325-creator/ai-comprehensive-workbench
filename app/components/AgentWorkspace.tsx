@@ -547,7 +547,12 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
           preset={matrixConfigPreset}
         />
       ) : activeTab === "Agent 配置" ? (
-        <ModelConfigPanel scope="agent" agentTitle={agent.title} onPreview={onPreview} />
+        <ModelConfigPanel
+          scope="agent"
+          agentId={agent.id}
+          agentTitle={agent.title}
+          onPreview={onPreview}
+        />
       ) : isContentMatrix && activeTab === "Agent 对话" ? (
         <section className="matrix-diagnosis" aria-labelledby="matrix-diagnosis-title">
           <div className="matrix-diagnosis-heading">

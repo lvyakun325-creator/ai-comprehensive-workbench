@@ -9,8 +9,8 @@ type ControlDeskProps = {
 export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
   const {
     enabledModels,
-    selectedModel,
-    setSelectedModelId,
+    chatSelectedModel,
+    setChatSelectedModelId,
   } = useModelRegistry();
   const [isModelPickerOpen, setModelPickerOpen] = useState(false);
 
@@ -74,13 +74,13 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
                   <button
                     aria-controls="enabled-model-picker"
                     aria-expanded={isModelPickerOpen}
-                    aria-label={`选择模型，当前 ${selectedModel?.displayName ?? "未选择"}`}
+                    aria-label={`选择模型，当前 ${chatSelectedModel?.displayName ?? "未选择"}`}
                     className="model-trigger"
                     onClick={() => setModelPickerOpen((isOpen) => !isOpen)}
                     type="button"
                   >
                     <span className="model-orb">✦</span>
-                    {selectedModel?.displayName ?? "选择模型"}
+                    {chatSelectedModel?.displayName ?? "选择模型"}
                     <em>⌄</em>
                   </button>
                   {isModelPickerOpen ? (
@@ -107,10 +107,10 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
                         <span>可用模型</span>
                         {enabledModels.map((model) => (
                           <button
-                            className={selectedModel?.id === model.id ? "selected" : ""}
+                            className={chatSelectedModel?.id === model.id ? "selected" : ""}
                             key={model.id}
                             onClick={() => {
-                              setSelectedModelId(model.id);
+                              setChatSelectedModelId(model.id);
                               setModelPickerOpen(false);
                             }}
                             type="button"
@@ -134,7 +134,7 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
             </div>
             <button
               className="chat-send-button"
-              disabled={!selectedModel}
+              disabled={!chatSelectedModel}
               onClick={() => onPreview("当前为界面预览，真实聊天模型尚未接入")}
               type="button"
             >

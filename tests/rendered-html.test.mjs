@@ -107,7 +107,7 @@ test("keeps the shell focused on the single chat agent", async () => {
   assert.match(styles, /prefers-reduced-motion/);
   assert.match(
     agentWorkspace,
-    /activeTab === "Agent 配置" \?\s*\(\s*<ModelConfigPanel scope="agent" agentTitle=\{agent\.title\} onPreview=\{onPreview\} \/>/,
+    /activeTab === "Agent 配置" \?\s*\(\s*<ModelConfigPanel\s+scope="agent"\s+agentId=\{agent\.id\}\s+agentTitle=\{agent\.title\}\s+onPreview=\{onPreview\}\s*\/>/,
   );
   const projectTabs = agentWorkspace
     .match(/const PROJECT_TABS = \[([\s\S]*?)\];/)?.[1]
@@ -124,8 +124,10 @@ test("keeps the shell focused on the single chat agent", async () => {
     projectTabs.join("\n"),
     /项目资料|执行过程|成果交接/,
   );
-  assert.match(modelConfigPanel, /scope: "global" \| "agent";/);
-  assert.match(modelConfigPanel, /agentTitle\?: string;/);
+  assert.match(modelConfigPanel, /scope: "global";/);
+  assert.match(modelConfigPanel, /scope: "agent";/);
+  assert.match(modelConfigPanel, /agentId: string;/);
+  assert.match(modelConfigPanel, /agentTitle: string;/);
   assert.match(modelConfigPanel, /onPreview: \(message: string\) => void;/);
   assert.match(modelConfigPanel, /useModelRegistry/);
   assert.match(modelConfigPanel, /<h2>全局可用模型<\/h2>/);
@@ -138,7 +140,5 @@ test("keeps the shell focused on the single chat agent", async () => {
   assert.match(styles, /\.configured-model-list\s*\{/);
   assert.match(styles, /\.configured-model-row\s*\{/);
   assert.match(styles, /\.model-state-actions\s*\{/);
-  const props = modelConfigPanel.match(/type ModelConfigPanelProps = \{([\s\S]*?)\n\};/)?.[1] ?? "";
   assert.doesNotMatch(modelConfigPanel, /api[_-]?key|token|password|credential/i);
-  assert.doesNotMatch(props, /api[_-]?key|token|password|credential/i);
 });

@@ -2062,6 +2062,7 @@ button {
   place-items: center;
   background: rgba(18, 27, 45, 0.48);
   backdrop-filter: blur(5px);
+  overscroll-behavior: contain;
 }
 
 .result-preview-dialog {
@@ -2388,6 +2389,7 @@ button {
   .result-preview-dialog {
     width: calc(100vw - 20px);
     max-height: calc(100vh - 20px);
+    max-height: calc(100dvh - 20px);
     padding: 16px;
   }
 
