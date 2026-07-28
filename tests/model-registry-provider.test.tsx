@@ -30,7 +30,11 @@ const { ModelRegistryProvider, useModelRegistry } = await import(
   "../app/components/ModelRegistryProvider"
 );
 
-const STORAGE_KEY = "ai-workbench:model-registry:v1";
+const STORAGE_KEY = "ai-workbench:model-registry:v2";
+const LEGACY_MODEL_STORAGE_KEY = "ai-workbench:model-registry:v1";
+const CREDENTIAL_STORAGE_KEY = "ai-workbench:model-credentials:v1";
+const IMAGE_CONFIG_STORAGE_KEY = "ai-workbench:image-model-config:v1";
+const IMAGE_CREDENTIAL_STORAGE_KEY = "ai-workbench:image-model-credential:v1";
 const CHAT_SELECTION_STORAGE_KEY = "ai-workbench:chat-model-selection:v1";
 const AGENT_SELECTIONS_STORAGE_KEY = "ai-workbench:agent-model-selections:v1";
 const ADDED_MODEL_ID = "anthropic-claude-test";
@@ -41,14 +45,23 @@ const AGENT_B_ID = "topic-planning";
 function RegistryHarness() {
   const {
     models,
+    enabledModels,
     chatSelectedModel,
     chatSelectedModelId,
+    connectedModels,
     addModel,
+    getCredential,
+    getMaskedCredential,
     getAgentSelectedModelId,
     removeModel,
     setAgentSelectedModelId,
     setChatSelectedModelId,
     setModelEnabled,
+    saveCredential,
+    imageConfig,
+    imageCredential,
+    saveImageConfig,
+    saveImageCredential,
   } = useModelRegistry();
 
   return (
@@ -62,6 +75,16 @@ function RegistryHarness() {
         {getAgentSelectedModelId(AGENT_B_ID) ?? "none"}
       </output>
       <output aria-label="模型数量">{models.length}</output>
+      <output aria-label="已连接模型数量">{connectedModels.length}</output>
+      <output aria-label="可选择模型数量">{enabledModels.length}</output>
+      <output aria-label="默认模型密钥">
+        {getCredential("openai-gpt-5-6") ?? "none"}
+      </output>
+      <output aria-label="默认模型脱敏密钥">
+        {getMaskedCredential("openai-gpt-5-6") ?? "none"}
+      </output>
+      <output aria-label="生图配置">{JSON.stringify(imageConfig)}</output>
+      <output aria-label="生图密钥">{imageCredential ?? "none"}</output>
       <button
         onClick={() =>
           addModel({
@@ -101,6 +124,32 @@ function RegistryHarness() {
       </button>
       <button onClick={() => setModelEnabled(ADDED_MODEL_ID, false)}>停用新增模型</button>
       <button onClick={() => removeModel(SECOND_MODEL_ID)}>删除第二模型</button>
+      <button onClick={() => saveCredential("openai-gpt-5-6", "sk-fake-first-1234", false)}>
+        保存第一密钥
+      </button>
+      <button onClick={() => saveCredential("openai-gpt-5-6", "", false)}>
+        保留第一密钥
+      </button>
+      <button onClick={() => saveCredential("openai-gpt-5-6", "  sk-fake-second-5678  ", false)}>
+        替换第一密钥
+      </button>
+      <button onClick={() => saveCredential("openai-gpt-5-6", "", true)}>
+        清空第一密钥
+      </button>
+      <button
+        onClick={() =>
+          saveImageConfig({
+            baseUrl: " https://images.example.test/v1 ",
+            modelId: " image-test ",
+            enabled: true,
+          })
+        }
+      >
+        保存生图配置
+      </button>
+      <button onClick={() => saveImageCredential("sk-image-fake-4321", false)}>
+        保存生图密钥
+      </button>
     </section>
   );
 }
@@ -111,7 +160,115 @@ afterEach(() => {
   document.body.innerHTML = "";
 });
 
-test("persists added models and falls back when the selected model is disabled", async () => {
+test("keeps text and image credentials outside ordinary model metadata", async () => {
+  const user = userEvent.setup({ document });
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await waitFor(() => {
+    assert.equal(screen.getByLabelText("已连接模型数量").textContent, "0");
+    assert.equal(screen.getByLabelText("可选择模型数量").textContent, "0");
+  });
+
+  await user.click(screen.getByRole("button", { name: "保存第一密钥" }));
+  await waitFor(() => {
+    assert.equal(screen.getByLabelText("默认模型密钥").textContent, "sk-fake-first-1234");
+  });
+  await user.click(screen.getByRole("button", { name: "保留第一密钥" }));
+  assert.equal(screen.getByLabelText("默认模型密钥").textContent, "sk-fake-first-1234");
+  await user.click(screen.getByRole("button", { name: "替换第一密钥" }));
+  await waitFor(() => {
+    assert.equal(screen.getByLabelText("默认模型密钥").textContent, "sk-fake-second-5678");
+  });
+  assert.match(screen.getByLabelText("默认模型脱敏密钥").textContent ?? "", /^sk-/);
+  assert.doesNotMatch(
+    screen.getByLabelText("默认模型脱敏密钥").textContent ?? "",
+    /fake-second/,
+  );
+  assert.doesNotMatch(
+    window.localStorage.getItem(STORAGE_KEY) ?? "",
+    /sk-fake-(first|second)/,
+  );
+  assert.match(window.localStorage.getItem(CREDENTIAL_STORAGE_KEY) ?? "", /sk-fake-second-5678/);
+
+  await user.click(screen.getByRole("button", { name: "清空第一密钥" }));
+  await waitFor(() => {
+    assert.equal(screen.getByLabelText("默认模型密钥").textContent, "none");
+  });
+  assert.deepEqual(
+    JSON.parse(window.localStorage.getItem(CREDENTIAL_STORAGE_KEY) ?? "null"),
+    {},
+  );
+
+  await user.click(screen.getByRole("button", { name: "保存生图配置" }));
+  await user.click(screen.getByRole("button", { name: "保存生图密钥" }));
+  await waitFor(() => {
+    assert.match(window.localStorage.getItem(IMAGE_CONFIG_STORAGE_KEY) ?? "", /image-test/);
+    assert.equal(window.localStorage.getItem(IMAGE_CREDENTIAL_STORAGE_KEY), "sk-image-fake-4321");
+  });
+  assert.doesNotMatch(window.localStorage.getItem(IMAGE_CONFIG_STORAGE_KEY) ?? "", /sk-image/);
+  assert.doesNotMatch(window.localStorage.getItem(STORAGE_KEY) ?? "", /sk-image/);
+});
+
+test("migrates browser v1 model metadata into the v2 store without credentials", async () => {
+  window.localStorage.setItem(
+    LEGACY_MODEL_STORAGE_KEY,
+    JSON.stringify([
+      {
+        id: "legacy-model",
+        provider: "Legacy",
+        displayName: "Legacy Model",
+        modelId: "legacy-model-id",
+        enabled: true,
+        isDefault: true,
+      },
+    ]),
+  );
+
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await waitFor(() => {
+    const migrated = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "[]");
+    assert.equal(migrated[0]?.id, "legacy-model");
+    assert.equal(migrated[0]?.connectionStatus, "untested");
+    assert.equal(migrated[0]?.testedFingerprint, "");
+  });
+  assert.equal(screen.getByLabelText("已连接模型数量").textContent, "0");
+});
+
+test("marks a connected image configuration changed when its connection fields are saved differently", async () => {
+  window.localStorage.setItem(
+    IMAGE_CONFIG_STORAGE_KEY,
+    JSON.stringify({
+      baseUrl: "https://old-images.example.test/v1",
+      modelId: "old-image-model",
+      enabled: true,
+      connectionStatus: "connected",
+      testedFingerprint: "[\"https://old-images.example.test/v1\",\"old-image-model\",\"\"]",
+    }),
+  );
+  const user = userEvent.setup({ document });
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await waitFor(() => {
+    assert.match(screen.getByLabelText("生图配置").textContent ?? "", /old-image-model/);
+  });
+  await user.click(screen.getByRole("button", { name: "保存生图配置" }));
+  assert.match(screen.getByLabelText("生图配置").textContent ?? "", /"connectionStatus":"changed"/);
+});
+
+test("persists added untested models without making them selectable", async () => {
   const user = userEvent.setup({ document });
   const firstRender = render(
     <ModelRegistryProvider>
@@ -120,11 +277,11 @@ test("persists added models and falls back when the selected model is disabled",
   );
 
   await waitFor(() => {
-    assert.equal(screen.getByLabelText("聊天已选模型").textContent, "openai-gpt-5-6");
+    assert.equal(screen.getByLabelText("聊天已选模型").textContent, "none");
   });
   await user.click(screen.getByRole("button", { name: "添加模型" }));
   await user.click(screen.getByRole("button", { name: "聊天选择新增模型" }));
-  assert.equal(screen.getByLabelText("聊天已选模型").textContent, ADDED_MODEL_ID);
+  assert.equal(screen.getByLabelText("聊天已选模型").textContent, "none");
 
   firstRender.unmount();
   render(
@@ -136,11 +293,11 @@ test("persists added models and falls back when the selected model is disabled",
   await waitFor(() => {
     assert.equal(screen.getByLabelText("模型数量").textContent, "2");
   });
-  assert.equal(screen.getByLabelText("聊天已选模型").textContent, ADDED_MODEL_ID);
+  assert.equal(screen.getByLabelText("聊天已选模型").textContent, "none");
 
   await user.click(screen.getByRole("button", { name: "停用新增模型" }));
-  assert.equal(screen.getByLabelText("聊天已选模型").textContent, "openai-gpt-5-6");
-  assert.equal(screen.getByLabelText("聊天已选模型 ID").textContent, "openai-gpt-5-6");
+  assert.equal(screen.getByLabelText("聊天已选模型").textContent, "none");
+  assert.equal(screen.getByLabelText("聊天已选模型 ID").textContent, "none");
   assert.ok(window.localStorage.getItem(STORAGE_KEY)?.includes(ADDED_MODEL_ID));
 });
 
@@ -153,16 +310,22 @@ test("hydrates the enabled stored default instead of keeping the demo selection"
         provider: "OpenAI",
         displayName: "GPT-5.6",
         modelId: "gpt-5.6",
+        baseUrl: "https://models.example.test/v1",
         enabled: true,
         isDefault: false,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://models.example.test/v1\",\"gpt-5.6\",\"\"]",
       },
       {
         id: "anthropic-claude-stored",
         provider: "Anthropic",
         displayName: "Claude Stored",
         modelId: "claude-stored",
+        baseUrl: "https://models.example.test/v1",
         enabled: true,
         isDefault: true,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://models.example.test/v1\",\"claude-stored\",\"\"]",
       },
     ]),
   );
@@ -186,6 +349,44 @@ test("hydrates the enabled stored default instead of keeping the demo selection"
 });
 
 test("persists independent chat and per-Agent selections and reconciles each fallback", async () => {
+  window.localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify([
+      {
+        id: "openai-gpt-5-6",
+        provider: "OpenAI",
+        displayName: "GPT-5.6",
+        modelId: "gpt-5.6",
+        baseUrl: "https://models.example.test/v1",
+        enabled: true,
+        isDefault: true,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://models.example.test/v1\",\"gpt-5.6\",\"\"]",
+      },
+      {
+        id: ADDED_MODEL_ID,
+        provider: "Anthropic",
+        displayName: "Claude Test",
+        modelId: "claude-test",
+        baseUrl: "https://models.example.test/v1",
+        enabled: true,
+        isDefault: false,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://models.example.test/v1\",\"claude-test\",\"\"]",
+      },
+      {
+        id: SECOND_MODEL_ID,
+        provider: "Google",
+        displayName: "Gemini Test",
+        modelId: "gemini-test",
+        baseUrl: "https://models.example.test/v1",
+        enabled: true,
+        isDefault: false,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://models.example.test/v1\",\"gemini-test\",\"\"]",
+      },
+    ]),
+  );
   const user = userEvent.setup({ document });
   const firstRender = render(
     <ModelRegistryProvider>

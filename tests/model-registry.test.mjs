@@ -3,13 +3,102 @@ import test from "node:test";
 import {
   DEFAULT_MODELS,
   addModel,
+  connectionFingerprint,
+  getConnectedModels,
   getEnabledModels,
+  normalizeModels,
   parseStoredModels,
   removeModel,
   resolveSelectedModelId,
   setDefaultModel,
   setModelEnabled,
 } from "../app/lib/model-registry.mjs";
+
+test("migrates v1 records with untested connection metadata", () => {
+  const { baseUrl, connectionStatus, testedFingerprint, ...v1Model } = DEFAULT_MODELS[0];
+  const parsed = parseStoredModels(JSON.stringify([v1Model]));
+  assert.deepEqual(
+    {
+      baseUrl: parsed[0].baseUrl,
+      connectionStatus: parsed[0].connectionStatus,
+      testedFingerprint: parsed[0].testedFingerprint,
+    },
+    {
+      baseUrl: "",
+      connectionStatus: "untested",
+      testedFingerprint: "",
+    },
+  );
+});
+
+test("marks a connected model changed when its connection address or model changes", () => {
+  const connected = {
+    ...DEFAULT_MODELS[0],
+    baseUrl: "https://models.example.test/v1",
+    modelId: "gpt-tested",
+    connectionStatus: "connected",
+    testedFingerprint: connectionFingerprint(
+      "https://models.example.test/v1",
+      "gpt-tested",
+      "",
+    ),
+  };
+
+  assert.equal(
+    normalizeModels([{ ...connected, baseUrl: "https://other.example.test/v1" }])[0]
+      .connectionStatus,
+    "changed",
+  );
+  assert.equal(
+    normalizeModels([{ ...connected, modelId: "gpt-changed" }])[0].connectionStatus,
+    "changed",
+  );
+});
+
+test("only enabled connected models are available to callers", () => {
+  const models = [
+    {
+      ...DEFAULT_MODELS[0],
+      baseUrl: "https://models.example.test/v1",
+      connectionStatus: "connected",
+      testedFingerprint: connectionFingerprint(
+        "https://models.example.test/v1",
+        DEFAULT_MODELS[0].modelId,
+        "",
+      ),
+    },
+    {
+      id: "untested-model",
+      provider: "Anthropic",
+      displayName: "Untested",
+      modelId: "claude-untested",
+      baseUrl: "https://models.example.test/v1",
+      enabled: true,
+      isDefault: false,
+      connectionStatus: "untested",
+      testedFingerprint: "",
+    },
+    {
+      id: "disabled-model",
+      provider: "Google",
+      displayName: "Disabled",
+      modelId: "gemini-disabled",
+      baseUrl: "https://models.example.test/v1",
+      enabled: false,
+      isDefault: false,
+      connectionStatus: "connected",
+      testedFingerprint: connectionFingerprint(
+        "https://models.example.test/v1",
+        "gemini-disabled",
+        "",
+      ),
+    },
+  ];
+
+  assert.deepEqual(getConnectedModels(models).map((model) => model.id), [
+    DEFAULT_MODELS[0].id,
+  ]);
+});
 
 test("only enabled models reach the chat picker", () => {
   const disabled = setModelEnabled(DEFAULT_MODELS, DEFAULT_MODELS[0].id, false);
@@ -60,8 +149,11 @@ test("normalizes trim, duplicate, disabled, and default invariants", () => {
     provider: "Anthropic",
     displayName: "Claude Sonnet",
     modelId: "claude-sonnet",
+    baseUrl: "",
     enabled: false,
     isDefault: false,
+    connectionStatus: "untested",
+    testedFingerprint: "",
   });
   assert.equal(
     addModel(added, { ...model, id: undefined }).length,

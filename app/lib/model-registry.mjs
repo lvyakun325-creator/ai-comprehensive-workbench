@@ -1,4 +1,11 @@
 const CREDENTIAL_KEY_PATTERN = /api.?key|token|password|credential/i;
+const CONNECTION_STATUSES = new Set([
+  "untested",
+  "testing",
+  "connected",
+  "failed",
+  "changed",
+]);
 
 const DEFAULT_MODEL_LIST = [
   {
@@ -6,8 +13,11 @@ const DEFAULT_MODEL_LIST = [
     provider: "OpenAI",
     displayName: "GPT-5.6",
     modelId: "gpt-5.6",
+    baseUrl: "",
     enabled: true,
     isDefault: true,
+    connectionStatus: "untested",
+    testedFingerprint: "",
   },
 ];
 
@@ -17,6 +27,10 @@ export const DEFAULT_MODELS = Object.freeze(
 
 function text(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+export function connectionFingerprint(baseUrl, modelId, keyRevision) {
+  return JSON.stringify([text(baseUrl), text(modelId), text(keyRevision)]);
 }
 
 function isModel(value) {
@@ -40,13 +54,23 @@ function normalizeModel(value) {
     provider: text(value.provider),
     displayName: text(value.displayName),
     modelId: text(value.modelId),
+    baseUrl: text(value.baseUrl),
     enabled: value.enabled,
     isDefault: value.enabled && value.isDefault,
+    connectionStatus: CONNECTION_STATUSES.has(value.connectionStatus)
+      ? value.connectionStatus
+      : "untested",
+    testedFingerprint: text(value.testedFingerprint),
   };
 
-  return model.id && model.provider && model.displayName && model.modelId
-    ? model
-    : null;
+  if (!model.id || !model.provider || !model.displayName || !model.modelId) return null;
+  if (
+    model.connectionStatus === "connected"
+    && model.testedFingerprint !== connectionFingerprint(model.baseUrl, model.modelId, "")
+  ) {
+    model.connectionStatus = "changed";
+  }
+  return model;
 }
 
 function providerModelKey(model) {
@@ -110,8 +134,11 @@ export function addModel(models, draft) {
       provider,
       displayName,
       modelId,
+      baseUrl: draft?.baseUrl,
       enabled: draft?.enabled === true,
       isDefault: draft?.enabled === true && draft?.isDefault === true,
+      connectionStatus: "untested",
+      testedFingerprint: "",
     },
   ]);
 }
@@ -145,6 +172,12 @@ export function removeModel(models, id) {
 
 export function getEnabledModels(models) {
   return normalizeModels(models).filter((model) => model.enabled);
+}
+
+export function getConnectedModels(models) {
+  return normalizeModels(models).filter(
+    (model) => model.enabled && model.connectionStatus === "connected",
+  );
 }
 
 export function resolveSelectedModelId(models, selectedId) {
