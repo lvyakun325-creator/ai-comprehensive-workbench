@@ -65,6 +65,7 @@ export function updateCredential(credentials, id, draftValue, clearRequested) {
 export function maskCredential(value) {
   const credential = validCredential(value);
   if (!credential) return "";
+  if (credential.length <= 3) return "••••";
   const prefix = credential.slice(0, Math.min(3, credential.length));
   const suffix = credential.length > 7 ? credential.slice(-4) : "";
   return `${prefix}…${suffix}`;

@@ -58,6 +58,7 @@ function RegistryHarness() {
     setChatSelectedModelId,
     setModelEnabled,
     saveCredential,
+    saveModelConfig,
     imageConfig,
     imageCredential,
     saveImageConfig,
@@ -82,6 +83,9 @@ function RegistryHarness() {
       </output>
       <output aria-label="默认模型脱敏密钥">
         {getMaskedCredential("openai-gpt-5-6") ?? "none"}
+      </output>
+      <output aria-label="默认模型配置">
+        {JSON.stringify(models.find((model) => model.id === "openai-gpt-5-6") ?? null)}
       </output>
       <output aria-label="生图配置">{JSON.stringify(imageConfig)}</output>
       <output aria-label="生图密钥">{imageCredential ?? "none"}</output>
@@ -135,6 +139,26 @@ function RegistryHarness() {
       </button>
       <button onClick={() => saveCredential("openai-gpt-5-6", "", true)}>
         清空第一密钥
+      </button>
+      <button
+        onClick={() =>
+          saveModelConfig("openai-gpt-5-6", {
+            baseUrl: " https://changed-models.example.test/v1 ",
+            modelId: " gpt-changed ",
+          })
+        }
+      >
+        保存已变更模型配置
+      </button>
+      <button
+        onClick={() =>
+          saveModelConfig("openai-gpt-5-6", {
+            connectionStatus: "connected",
+            testedFingerprint: "[\"https://changed-models.example.test/v1\",\"gpt-changed\",\"\"]",
+          })
+        }
+      >
+        保存模型测试结果
       </button>
       <button
         onClick={() =>
@@ -266,6 +290,65 @@ test("marks a connected image configuration changed when its connection fields a
   });
   await user.click(screen.getByRole("button", { name: "保存生图配置" }));
   assert.match(screen.getByLabelText("生图配置").textContent ?? "", /"connectionStatus":"changed"/);
+});
+
+test("saves text connection metadata and invalidates a changed successful configuration", async () => {
+  window.localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify([
+      {
+        id: "openai-gpt-5-6",
+        provider: "OpenAI",
+        displayName: "GPT-5.6",
+        modelId: "gpt-tested",
+        baseUrl: "https://old-models.example.test/v1",
+        enabled: true,
+        isDefault: true,
+        connectionStatus: "connected",
+        testedFingerprint: "[\"https://old-models.example.test/v1\",\"gpt-tested\",\"\"]",
+      },
+    ]),
+  );
+  const user = userEvent.setup({ document });
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await waitFor(() => {
+    assert.equal(screen.getByLabelText("已连接模型数量").textContent, "1");
+  });
+  await user.click(screen.getByRole("button", { name: "保存已变更模型配置" }));
+  await waitFor(() => {
+    const saved = JSON.parse(screen.getByLabelText("默认模型配置").textContent ?? "null");
+    assert.deepEqual(
+      {
+        baseUrl: saved.baseUrl,
+        modelId: saved.modelId,
+        connectionStatus: saved.connectionStatus,
+        testedFingerprint: saved.testedFingerprint,
+      },
+      {
+        baseUrl: "https://changed-models.example.test/v1",
+        modelId: "gpt-changed",
+        connectionStatus: "changed",
+        testedFingerprint: "",
+      },
+    );
+    assert.equal(screen.getByLabelText("已连接模型数量").textContent, "0");
+  });
+
+  await user.click(screen.getByRole("button", { name: "保存模型测试结果" }));
+  await waitFor(() => {
+    assert.equal(screen.getByLabelText("已连接模型数量").textContent, "1");
+    const persisted = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "[]")[0];
+    assert.equal(persisted.connectionStatus, "connected");
+    assert.equal(
+      persisted.testedFingerprint,
+      "[\"https://changed-models.example.test/v1\",\"gpt-changed\",\"\"]",
+    );
+  });
 });
 
 test("persists added untested models without making them selectable", async () => {

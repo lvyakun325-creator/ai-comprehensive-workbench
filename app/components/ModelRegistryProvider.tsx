@@ -12,6 +12,7 @@ import {
   DEFAULT_MODELS,
   addModel as addRegisteredModel,
   getConnectedModels,
+  normalizeModels,
   parseStoredModels,
   removeModel as removeRegisteredModel,
   resolveSelectedModelId,
@@ -39,6 +40,10 @@ const SELECTABLE_AGENT_IDS = new Set(
 );
 
 type AgentModelSelections = Record<string, string>;
+type TextModelConfigDraft = Partial<Pick<
+  ChatModel,
+  "baseUrl" | "modelId" | "connectionStatus" | "testedFingerprint"
+>>;
 type ImageConfig = {
   baseUrl: string;
   modelId: string;
@@ -78,6 +83,7 @@ type ModelRegistry = {
   getCredential: (id: string) => string | null;
   getMaskedCredential: (id: string) => string;
   saveCredential: (id: string, draftValue: string, clearRequested: boolean) => void;
+  saveModelConfig: (id: string, draft: TextModelConfigDraft) => void;
   imageConfig: ImageConfig;
   imageCredential: string | null;
   saveImageConfig: (draft: Partial<ImageConfig>) => void;
@@ -343,6 +349,51 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
         setCredentials((currentCredentials) =>
           updateCredential(currentCredentials, id, draftValue, clearRequested),
         );
+      },
+      saveModelConfig: (id, draft) => {
+        const targetId = text(id);
+        if (!targetId) return;
+        setModels((currentModels) => {
+          const current = currentModels.find((model) => model.id === targetId);
+          if (!current) return currentModels;
+
+          const baseUrl = draft.baseUrl === undefined ? current.baseUrl : text(draft.baseUrl);
+          const modelId = draft.modelId === undefined ? current.modelId : text(draft.modelId);
+          if (!baseUrl || !modelId) return currentModels;
+
+          const connectionChanged = baseUrl !== current.baseUrl || modelId !== current.modelId;
+          const connectionStatus = connectionChanged && current.connectionStatus === "connected"
+            ? "changed"
+            : draft.connectionStatus === undefined
+              ? current.connectionStatus
+              : IMAGE_CONNECTION_STATUSES.has(draft.connectionStatus)
+                ? draft.connectionStatus
+                : "untested";
+          const testedFingerprint = connectionChanged
+            ? ""
+            : draft.testedFingerprint === undefined
+              ? current.testedFingerprint
+              : text(draft.testedFingerprint);
+          const nextModels = normalizeModels(currentModels.map((model) =>
+            model.id === targetId
+              ? {
+                  ...model,
+                  baseUrl,
+                  modelId,
+                  connectionStatus,
+                  testedFingerprint,
+                }
+              : model,
+          ));
+          if (
+            nextModels.length !== currentModels.length
+            || !nextModels.some((model) => model.id === targetId)
+          ) {
+            return currentModels;
+          }
+          reconcileSelections(nextModels);
+          return nextModels;
+        });
       },
       imageConfig,
       imageCredential,
