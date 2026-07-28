@@ -1,4 +1,9 @@
-export type TaskStatus = "running" | "completed" | "stopped" | "failed";
+export type TaskStatus =
+  | "waiting"
+  | "running"
+  | "completed"
+  | "stopped"
+  | "failed";
 export type TaskStatusFilter = TaskStatus | "all";
 
 export type ProjectTask = {

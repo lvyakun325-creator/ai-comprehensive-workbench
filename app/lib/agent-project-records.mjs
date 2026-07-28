@@ -1,4 +1,5 @@
 export const TASK_STATUSES = Object.freeze([
+  "waiting",
   "running",
   "completed",
   "stopped",

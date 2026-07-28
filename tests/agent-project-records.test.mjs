@@ -3,10 +3,22 @@ import test from "node:test";
 import {
   PROJECT_RESULTS,
   PROJECT_TASKS,
+  TASK_STATUSES,
   getAgentResults,
   getAgentTasks,
   getTaskResults,
 } from "../app/lib/agent-project-records.mjs";
+
+test("defines every supported task status exactly once", () => {
+  assert.deepEqual(TASK_STATUSES, [
+    "waiting",
+    "running",
+    "completed",
+    "stopped",
+    "failed",
+  ]);
+  assert.equal(new Set(TASK_STATUSES).size, TASK_STATUSES.length);
+});
 
 test("sorts current and historical tasks newest first", () => {
   const tasks = getAgentTasks("content-matrix", "all");
