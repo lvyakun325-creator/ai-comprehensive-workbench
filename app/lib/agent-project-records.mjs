@@ -59,7 +59,14 @@ export const PROJECT_TASKS = Object.freeze([
   }),
 ]);
 
-const createResult = (result) => Object.freeze({ ...result });
+const createResult = (result) =>
+  Object.freeze({
+    ...result,
+    sizeBytes:
+      typeof result.markdown === "string"
+        ? new TextEncoder().encode(result.markdown).byteLength
+        : result.sizeBytes,
+  });
 
 export const PROJECT_RESULTS = Object.freeze([
   createResult({
@@ -68,7 +75,6 @@ export const PROJECT_RESULTS = Object.freeze([
     taskId: "matrix-completed",
     filename: "慢病管理内容矩阵初版.md",
     completedAt: "2026-07-25T02:40:00.000Z",
-    sizeBytes: 1480,
     markdown: "# 内容矩阵方案\n\n## 核心方向\n\n围绕日常健康管理与合规内容教育，建立平台分工和周更节奏。",
   }),
   createResult({
@@ -77,7 +83,6 @@ export const PROJECT_RESULTS = Object.freeze([
     taskId: "competitor-completed",
     filename: "OTC竞品内容机会盘点.md",
     completedAt: "2026-07-24T04:15:00.000Z",
-    sizeBytes: 962,
     markdown: "# OTC 竞品内容机会盘点\n\n## 结论\n\n优先补齐场景化内容与合规表达。",
   }),
 ]);
@@ -93,14 +98,32 @@ export function getAgentTasks(agentId, status = "all") {
   ).toSorted(newestFirst);
 }
 
-export function getAgentResults(agentId) {
-  return PROJECT_RESULTS.filter((result) => result.agentId === agentId).toSorted(
-    newestFirst,
+export function getTaskById(taskId) {
+  return PROJECT_TASKS.find((task) => task.id === taskId);
+}
+
+export function isValidProjectResult(result) {
+  const sourceTask = getTaskById(result.taskId);
+
+  return Boolean(
+    sourceTask &&
+      sourceTask.status === "completed" &&
+      sourceTask.agentId === result.agentId &&
+      result.filename.toLowerCase().endsWith(".md"),
   );
 }
 
+export function getAgentResults(agentId, results = PROJECT_RESULTS) {
+  return results.filter(
+    (result) =>
+      result.agentId === agentId &&
+      result.filename.toLowerCase().endsWith(".md"),
+  ).toSorted(newestFirst);
+}
+
 export function getTaskResults(taskId) {
-  return PROJECT_RESULTS.filter((result) => result.taskId === taskId).toSorted(
-    newestFirst,
-  );
+  return PROJECT_RESULTS.filter(
+    (result) =>
+      result.taskId === taskId && isValidProjectResult(result),
+  ).toSorted(newestFirst);
 }

@@ -503,6 +503,9 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
             aria-current={activeTab === tab ? "page" : undefined}
             key={tab}
             onClick={() => {
+              if (tab === "成果文件") {
+                setResultTaskId(null);
+              }
               setActiveTab(tab);
               if (tab === "Agent 对话" && !isContentMatrix) {
                 onPreview(`${tab}将在真实 Agent 接入后启用`);

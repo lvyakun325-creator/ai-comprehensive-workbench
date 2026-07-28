@@ -38,22 +38,35 @@ Object.defineProperty(dom.window, "setTimeout", {
 Object.assign(navigator, {
   clipboard: { writeText: async (value: string) => value },
 });
-Object.defineProperty(URL, "createObjectURL", {
-  configurable: true,
-  value: () => "blob:test",
-});
-Object.defineProperty(URL, "revokeObjectURL", {
-  configurable: true,
-  value: () => undefined,
-});
 
 const { cleanup, render, screen } = await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
+const { within } = await import("@testing-library/dom");
 const { useState } = await import("react");
 const { AGENT_PROJECTS } = await import("../app/lib/agent-catalog.mjs");
 const { AgentResultFiles } = await import("../app/components/AgentResultFiles");
 const { AgentTaskList } = await import("../app/components/AgentTaskList");
 const { default: Home } = await import("../app/page");
+
+const createdMarkdownBlobs: Array<{ blob: Blob; url: string }> = [];
+const revokedMarkdownUrls: string[] = [];
+const clickedDownloadAnchors: HTMLAnchorElement[] = [];
+
+Object.defineProperty(URL, "createObjectURL", {
+  configurable: true,
+  value: (blob: Blob) => {
+    const url = `blob:test-${createdMarkdownBlobs.length + 1}`;
+    createdMarkdownBlobs.push({ blob, url });
+    return url;
+  },
+});
+Object.defineProperty(URL, "revokeObjectURL", {
+  configurable: true,
+  value: (url: string) => revokedMarkdownUrls.push(url),
+});
+dom.window.HTMLAnchorElement.prototype.click = function click() {
+  clickedDownloadAnchors.push(this);
+};
 
 type TaskHistoryHarnessProps = {
   onOpenResult?: (taskId: string) => void;
@@ -99,6 +112,34 @@ const taskStateFixtures: readonly ProjectTask[] = [
     errorSummary: null,
   },
   {
+    id: "fixture-running",
+    agentId: "content-matrix",
+    title: "正在执行任务",
+    status: "running",
+    progress: 64,
+    currentStep: "生成平台内容策略",
+    model: "gpt-5.6",
+    createdAt: "2026-07-28T03:30:00.000Z",
+    updatedAt: "2026-07-28T04:30:00.000Z",
+    completedAt: null,
+    stoppedAt: null,
+    errorSummary: null,
+  },
+  {
+    id: "fixture-completed",
+    agentId: "content-matrix",
+    title: "内容矩阵成品任务",
+    status: "completed",
+    progress: 100,
+    currentStep: "已生成成果 Markdown",
+    model: "gpt-5.6",
+    createdAt: "2026-07-28T03:00:00.000Z",
+    updatedAt: "2026-07-28T04:00:00.000Z",
+    completedAt: "2026-07-28T04:00:00.000Z",
+    stoppedAt: null,
+    errorSummary: null,
+  },
+  {
     id: "fixture-failed",
     agentId: "content-matrix",
     title: "执行失败任务",
@@ -135,7 +176,7 @@ const resultFileFixtures: readonly ProjectResult[] = [
     taskId: "fixture-completed",
     filename: "内容矩阵成果.md",
     completedAt: "2026-07-28T05:00:00.000Z",
-    sizeBytes: 52,
+    sizeBytes: 56,
     markdown: "# 内容矩阵成果\n\n这是只读的 Markdown 成果。",
   },
   {
@@ -149,10 +190,26 @@ const resultFileFixtures: readonly ProjectResult[] = [
   },
 ];
 
+const unavailableResultFixture: ProjectResult = {
+  id: "fixture-unavailable-result",
+  agentId: "content-matrix",
+  taskId: "fixture-completed",
+  filename: "暂不可用成果.md",
+  completedAt: "2026-07-28T05:10:00.000Z",
+  sizeBytes: 2048,
+  markdown: null,
+};
+
+const lookupFixtureTask = (taskId: string) =>
+  taskStateFixtures.find((task) => task.id === taskId);
+
 afterEach(() => {
   cleanup();
   document.body.innerHTML = "";
   window.localStorage.clear();
+  createdMarkdownBlobs.length = 0;
+  revokedMarkdownUrls.length = 0;
+  clickedDownloadAnchors.length = 0;
 });
 
 test("Markdown result lists only MD files and opens a read-only preview", async () => {
@@ -163,6 +220,7 @@ test("Markdown result lists only MD files and opens a read-only preview", async 
     <AgentResultFiles
       agentId="content-matrix"
       getAgentResults={() => resultFileFixtures}
+      getTaskById={lookupFixtureTask}
       initialTaskId={null}
       onPreview={(message) => previewMessages.push(message)}
     />,
@@ -170,10 +228,12 @@ test("Markdown result lists only MD files and opens a read-only preview", async 
 
   assert.ok(screen.getByText("内容矩阵成果.md"));
   assert.equal(screen.queryByText("内部过程.txt"), null);
+  assert.ok(screen.getByText("来源任务：内容矩阵成品任务"));
 
   await user.click(screen.getByRole("button", { name: /查看内容矩阵成果\.md/ }));
 
   const dialog = screen.getByRole("dialog", { name: "内容矩阵成果.md" });
+  assert.ok(within(dialog).getByText("已完成成果 · 只读预览"));
   assert.match(dialog.textContent ?? "", /这是只读的 Markdown 成果/);
   assert.equal(screen.queryByRole("textbox"), null);
   assert.equal(dialog.querySelector("[contenteditable]"), null);
@@ -183,8 +243,234 @@ test("Markdown result lists only MD files and opens a read-only preview", async 
 
   await user.click(screen.getByRole("button", { name: "复制内容" }));
   assert.deepEqual(previewMessages, ["Markdown 内容已复制"]);
+  assert.equal(
+    screen.getByRole("status", { name: "成果操作状态" }).textContent,
+    "Markdown 内容已复制",
+  );
 
   await user.click(screen.getByRole("button", { name: "关闭预览" }));
+  assert.equal(screen.queryByRole("dialog"), null);
+});
+
+test("Markdown result download uses the exact Blob, filename, and object URL lifecycle", async () => {
+  const user = userEvent.setup({ document });
+
+  render(
+    <AgentResultFiles
+      agentId="content-matrix"
+      getAgentResults={() => resultFileFixtures}
+      getTaskById={lookupFixtureTask}
+      initialTaskId={null}
+      onPreview={() => undefined}
+    />,
+  );
+
+  await user.click(screen.getByRole("button", { name: /查看内容矩阵成果\.md/ }));
+  await user.click(screen.getByRole("button", { name: "下载 MD" }));
+
+  assert.equal(createdMarkdownBlobs.length, 1);
+  assert.equal(
+    createdMarkdownBlobs[0].blob.type,
+    "text/markdown;charset=utf-8",
+  );
+  assert.equal(
+    await createdMarkdownBlobs[0].blob.text(),
+    "# 内容矩阵成果\n\n这是只读的 Markdown 成果。",
+  );
+  assert.equal(clickedDownloadAnchors.length, 1);
+  assert.equal(clickedDownloadAnchors[0].download, "内容矩阵成果.md");
+  assert.equal(clickedDownloadAnchors[0].href, createdMarkdownBlobs[0].url);
+  assert.deepEqual(revokedMarkdownUrls, [createdMarkdownBlobs[0].url]);
+});
+
+test("Markdown preview reports clipboard rejection inside the modal", async () => {
+  const user = userEvent.setup({ document });
+  const originalWriteText = navigator.clipboard.writeText;
+  const previewMessages: string[] = [];
+  Object.assign(navigator.clipboard, {
+    writeText: async () => {
+      throw new Error("clipboard denied");
+    },
+  });
+
+  try {
+    render(
+      <AgentResultFiles
+        agentId="content-matrix"
+        getAgentResults={() => resultFileFixtures}
+        getTaskById={lookupFixtureTask}
+        initialTaskId={null}
+        onPreview={(message) => previewMessages.push(message)}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /查看内容矩阵成果\.md/ }),
+    );
+    await user.click(screen.getByRole("button", { name: "复制内容" }));
+
+    assert.equal(
+      screen.getByRole("status", { name: "成果操作状态" }).textContent,
+      "复制失败，请手动选择内容",
+    );
+    assert.deepEqual(previewMessages, ["复制失败，请手动选择内容"]);
+  } finally {
+    Object.assign(navigator.clipboard, { writeText: originalWriteText });
+  }
+});
+
+test("Markdown preview traps keyboard focus, closes on Escape, and restores its trigger", async () => {
+  const user = userEvent.setup({ document });
+
+  render(
+    <AgentResultFiles
+      agentId="content-matrix"
+      getAgentResults={() => resultFileFixtures}
+      getTaskById={lookupFixtureTask}
+      initialTaskId={null}
+      onPreview={() => undefined}
+    />,
+  );
+
+  const trigger = screen.getByRole("button", {
+    name: /查看内容矩阵成果\.md/,
+  });
+  await user.click(trigger);
+
+  const dialog = screen.getByRole("dialog", { name: "内容矩阵成果.md" });
+  const closeButton = within(dialog).getByRole("button", { name: "关闭预览" });
+  const downloadButton = within(dialog).getByRole("button", { name: "下载 MD" });
+  assert.equal(dialog.contains(document.activeElement), true);
+  assert.equal(document.activeElement, closeButton);
+  assert.ok(trigger.closest('[aria-hidden="true"]'));
+  assert.equal(trigger.closest("[inert]")?.hasAttribute("inert"), true);
+
+  await user.tab({ shift: true });
+  assert.equal(document.activeElement, downloadButton);
+  await user.tab();
+  assert.equal(document.activeElement, closeButton);
+
+  await user.keyboard("{Escape}");
+  assert.equal(screen.queryByRole("dialog"), null);
+  assert.equal(document.activeElement, trigger);
+});
+
+test("task-opened Markdown preview restores focus to the matching result trigger", async () => {
+  const user = userEvent.setup({ document });
+
+  render(
+    <AgentResultFiles
+      agentId="content-matrix"
+      getAgentResults={() => resultFileFixtures}
+      getTaskById={lookupFixtureTask}
+      initialTaskId="fixture-completed"
+      onPreview={() => undefined}
+    />,
+  );
+
+  assert.ok(screen.getByRole("dialog", { name: "内容矩阵成果.md" }));
+  const matchingResultTrigger = document.querySelector<HTMLButtonElement>(
+    'button[aria-label="查看内容矩阵成果.md"]',
+  );
+  assert.ok(matchingResultTrigger);
+
+  await user.keyboard("{Escape}");
+  assert.equal(screen.queryByRole("dialog"), null);
+  assert.equal(document.activeElement, matchingResultTrigger);
+});
+
+test("task and result views distinguish empty filters, empty Agents, and unavailable Markdown", async () => {
+  const user = userEvent.setup({ document });
+
+  const emptyTasks = render(
+    <TaskHistoryHarness
+      resultQuery={() => []}
+      taskQuery={() => []}
+    />,
+  );
+  assert.ok(screen.getByText("还没有任务，可从 Agent 对话发起"));
+  emptyTasks.unmount();
+
+  const historicalTaskQuery = (
+    _agentId: string,
+    filter: TaskStatusFilter,
+  ) => taskStateFixtures.filter(
+    (task) => task.status === "completed" && (
+      filter === "all" || task.status === filter
+    ),
+  );
+  const filteredTasks = render(
+    <TaskHistoryHarness
+      resultQuery={() => []}
+      taskQuery={historicalTaskQuery}
+    />,
+  );
+  await user.click(screen.getByRole("button", { name: "进行中" }));
+  assert.ok(screen.getByText("当前筛选下没有任务"));
+  filteredTasks.unmount();
+
+  const emptyResults = render(
+    <AgentResultFiles
+      agentId="content-matrix"
+      getAgentResults={() => []}
+      getTaskById={lookupFixtureTask}
+      initialTaskId={null}
+      onPreview={() => undefined}
+    />,
+  );
+  assert.ok(
+    screen.getByText("任务完成后，Markdown 成果会出现在这里"),
+  );
+  emptyResults.unmount();
+
+  const previewMessages: string[] = [];
+  render(
+    <AgentResultFiles
+      agentId="content-matrix"
+      getAgentResults={() => [unavailableResultFixture]}
+      getTaskById={lookupFixtureTask}
+      initialTaskId={null}
+      onPreview={(message) => previewMessages.push(message)}
+    />,
+  );
+  assert.ok(screen.getByText("暂不可用成果.md"));
+  assert.match(
+    screen.getByText("暂不可用成果.md").closest("article")?.textContent ?? "",
+    /2\.0 KB/,
+  );
+  assert.ok(screen.getByText("来源任务：内容矩阵成品任务"));
+  await user.click(screen.getByRole("button", { name: /查看暂不可用成果\.md/ }));
+  assert.ok(screen.getByText("暂时无法预览"));
+  await user.click(screen.getByRole("button", { name: "重试下载" }));
+  assert.deepEqual(previewMessages, ["Markdown 内容暂时不可用，请稍后重试"]);
+  assert.equal(
+    screen.getByRole("status", { name: "成果操作状态" }).textContent,
+    "Markdown 内容暂时不可用，请稍后重试",
+  );
+  assert.equal(createdMarkdownBlobs.length, 0);
+});
+
+test("Markdown result cards expose and block an abnormal missing task relationship", async () => {
+  const user = userEvent.setup({ document });
+  render(
+    <AgentResultFiles
+      agentId="content-matrix"
+      getAgentResults={() => [{
+        ...resultFileFixtures[0],
+        taskId: "missing-task",
+      }]}
+      getTaskById={() => undefined}
+      initialTaskId={null}
+      onPreview={() => undefined}
+    />,
+  );
+
+  assert.ok(screen.getByText("来源任务：关联任务异常"));
+  const unavailableAction = screen.getByRole("button", {
+    name: "内容矩阵成果.md 来源任务异常，无法打开",
+  });
+  assert.equal((unavailableAction as HTMLButtonElement).disabled, true);
+  await user.click(unavailableAction);
   assert.equal(screen.queryByRole("dialog"), null);
 });
 
@@ -198,6 +484,9 @@ test("five project tabs connect task history to its Markdown result and preserve
 
   const navigation = screen.getByRole("navigation", {
     name: "内容矩阵 Agent 项目导航",
+  });
+  const resultFilesTab = within(navigation).getByRole("button", {
+    name: "成果文件",
   });
   assert.ok(
     screen.getByText("已完成的 Markdown 文档会保存在成果文件中。"),
@@ -229,10 +518,7 @@ test("five project tabs connect task history to its Markdown result and preserve
 
   await user.click(screen.getByRole("button", { name: "查看成果" }));
 
-  assert.equal(
-    screen.getByRole("button", { name: "成果文件" }).getAttribute("aria-current"),
-    "page",
-  );
+  assert.equal(resultFilesTab.getAttribute("aria-current"), "page");
   const dialog = screen.getByRole("dialog", {
     name: "慢病管理内容矩阵初版.md",
   });
@@ -257,6 +543,7 @@ test("five project tabs connect task history to its Markdown result and preserve
     screen.queryByText("成果文件将在真实 Agent 接入后启用"),
     null,
   );
+  assert.equal(screen.queryByRole("dialog"), null);
 });
 
 test("task history renders progress and filters completed results", async () => {
@@ -286,7 +573,7 @@ test("task history renders progress and filters completed results", async () => 
   assert.ok(screen.getByText("慢病管理内容矩阵初版"));
 });
 
-test("task history renders waiting failed and stopped cards with an error summary", () => {
+test("task history renders status-specific waiting, running, completed, stopped, and failed information", () => {
   const taskQuery = (_agentId: string, filter: TaskStatusFilter) =>
     taskStateFixtures.filter(
       (task) => filter === "all" || task.status === filter,
@@ -300,15 +587,50 @@ test("task history renders waiting failed and stopped cards with an error summar
   );
 
   assert.ok(screen.getByRole("heading", { name: "等待执行任务" }));
+  assert.ok(screen.getByRole("heading", { name: "正在执行任务" }));
+  assert.ok(screen.getByRole("heading", { name: "内容矩阵成品任务" }));
   assert.ok(screen.getByRole("heading", { name: "执行失败任务" }));
   assert.ok(screen.getByRole("heading", { name: "已停止任务" }));
   assert.ok(screen.getAllByText("等待中").length > 0);
+  assert.ok(screen.getAllByText("进行中").length > 0);
+  assert.ok(screen.getAllByText("已完成").length > 0);
   assert.ok(screen.getAllByText("失败").length > 0);
   assert.ok(screen.getAllByText("已停止").length > 0);
+
+  const waitingCard = screen.getByRole("heading", {
+    name: "等待执行任务",
+  }).closest("article");
+  const runningCard = screen.getByRole("heading", {
+    name: "正在执行任务",
+  }).closest("article");
+  const completedCard = screen.getByRole("heading", {
+    name: "内容矩阵成品任务",
+  }).closest("article");
+  const stoppedCard = screen.getByRole("heading", {
+    name: "已停止任务",
+  }).closest("article");
+  const failedCard = screen.getByRole("heading", {
+    name: "执行失败任务",
+  }).closest("article");
+
+  assert.ok(waitingCard);
+  assert.ok(runningCard);
+  assert.ok(completedCard);
+  assert.ok(stoppedCard);
+  assert.ok(failedCard);
+  assert.ok(within(waitingCard).getByText("等待开始"));
+  assert.match(runningCard.textContent ?? "", /当前步骤：生成平台内容策略/);
+  assert.equal(
+    within(runningCard).getByRole("progressbar").getAttribute("aria-valuenow"),
+    "64",
+  );
+  assert.ok(within(completedCard).getByText("完成于 07/28 12:00"));
+  assert.ok(within(stoppedCard).getByText("停止于 07/28 10:20"));
   assert.match(
-    screen.getByText(/错误摘要：/).parentElement?.textContent ?? "",
+    failedCard.textContent ?? "",
     /模型连接超时，请检查配置后重试/,
   );
+  assert.equal(within(failedCard).queryByRole("alert"), null);
 });
 
 test("task history mobile CSS keeps voice input visible without toolbar overflow", () => {

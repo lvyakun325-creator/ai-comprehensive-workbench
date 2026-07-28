@@ -28,7 +28,7 @@ export type ProjectResult = {
   filename: string;
   completedAt: string;
   sizeBytes: number;
-  markdown: string;
+  markdown: string | null;
 };
 
 export const TASK_STATUSES: readonly TaskStatus[];
@@ -38,5 +38,10 @@ export function getAgentTasks(
   agentId: string,
   status?: TaskStatusFilter,
 ): readonly ProjectTask[];
-export function getAgentResults(agentId: string): readonly ProjectResult[];
+export function getTaskById(taskId: string): ProjectTask | undefined;
+export function isValidProjectResult(result: ProjectResult): boolean;
+export function getAgentResults(
+  agentId: string,
+  results?: readonly ProjectResult[],
+): readonly ProjectResult[];
 export function getTaskResults(taskId: string): readonly ProjectResult[];

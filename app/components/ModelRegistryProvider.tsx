@@ -54,7 +54,7 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
     }
 
     queueMicrotask(() => {
-      setModels(storedModels);
+      setModels([...storedModels]);
       setSelectedModelIdState(resolveSelectedModelId(storedModels, null));
       setHydrated(true);
     });

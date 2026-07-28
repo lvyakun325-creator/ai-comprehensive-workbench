@@ -60,6 +60,10 @@ export function AgentTaskList({
   onOpenResult,
 }: AgentTaskListProps) {
   const tasks = getAgentTasks(agentId, filter);
+  const hasAnyTasks =
+    filter === "all"
+      ? tasks.length > 0
+      : getAgentTasks(agentId, "all").length > 0;
 
   return (
     <section aria-labelledby="agent-task-list-heading" className="agent-task-view">
@@ -87,7 +91,11 @@ export function AgentTaskList({
 
       <div className="agent-task-list">
         {tasks.length === 0 ? (
-          <p className="agent-task-empty">当前筛选下暂无任务。</p>
+          <p className="agent-task-empty">
+            {hasAnyTasks
+              ? "当前筛选下没有任务"
+              : "还没有任务，可从 Agent 对话发起"}
+          </p>
         ) : (
           tasks.map((task) => {
             const hasResults = getTaskResults(task.id).length > 0;
@@ -107,34 +115,57 @@ export function AgentTaskList({
                   <span className="agent-task-model">{task.model}</span>
                 </div>
 
-                <p className="agent-task-step">
-                  <strong>当前步骤：</strong>
-                  {task.currentStep}
-                </p>
-
-                {task.status === "running" ? (
-                  <div className="task-progress">
-                    <div className="task-progress-heading">
-                      <span>任务进度</span>
-                      <strong>{task.progress}%</strong>
-                    </div>
-                    <div
-                      aria-label={`${task.title}进度`}
-                      aria-valuemax={100}
-                      aria-valuemin={0}
-                      aria-valuenow={task.progress}
-                      className="task-progress-track"
-                      role="progressbar"
-                    >
-                      <span style={{ width: `${task.progress}%` }} />
-                    </div>
-                  </div>
+                {task.status === "waiting" ? (
+                  <p className="agent-task-step">等待开始</p>
                 ) : null}
 
-                {task.errorSummary ? (
-                  <p className="agent-task-error" role="alert">
+                {task.status === "running" ? (
+                  <>
+                    <p className="agent-task-step">
+                      <strong>当前步骤：</strong>
+                      {task.currentStep}
+                    </p>
+                    <div className="task-progress">
+                      <div className="task-progress-heading">
+                        <span>任务进度</span>
+                        <strong>{task.progress}%</strong>
+                      </div>
+                      <div
+                        aria-label={`${task.title}进度`}
+                        aria-valuemax={100}
+                        aria-valuemin={0}
+                        aria-valuenow={task.progress}
+                        className="task-progress-track"
+                        role="progressbar"
+                      >
+                        <span style={{ width: `${task.progress}%` }} />
+                      </div>
+                    </div>
+                  </>
+                ) : null}
+
+                {task.status === "completed" ? (
+                  <p className="agent-task-step">
+                    完成于{" "}
+                    {task.completedAt
+                      ? formatTimestamp(task.completedAt)
+                      : "时间未知"}
+                  </p>
+                ) : null}
+
+                {task.status === "stopped" ? (
+                  <p className="agent-task-step">
+                    停止于{" "}
+                    {task.stoppedAt
+                      ? formatTimestamp(task.stoppedAt)
+                      : "时间未知"}
+                  </p>
+                ) : null}
+
+                {task.status === "failed" ? (
+                  <p className="agent-task-error">
                     <strong>错误摘要：</strong>
-                    {task.errorSummary}
+                    {task.errorSummary ?? "暂无错误详情"}
                   </p>
                 ) : null}
 

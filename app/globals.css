@@ -2005,6 +2005,25 @@ button {
   margin: 6px 0 0;
 }
 
+.result-file-card .result-source-task,
+.result-file-card .result-source-error {
+  font-size: 12px;
+}
+
+.result-file-card .result-source-task {
+  color: #536074;
+}
+
+.result-file-card .result-source-error {
+  color: #a83333;
+  font-weight: 700;
+}
+
+.result-file-card.result-source-abnormal {
+  border-color: #efb8b8;
+  background: #fffafa;
+}
+
 .result-file-card > button,
 .result-preview-dialog button {
   border-radius: 10px;
@@ -2019,6 +2038,11 @@ button {
   border: 1px solid #cfdbf7;
   background: #eef3ff;
   color: var(--blue-dark);
+}
+
+.result-file-card > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
 }
 
 .agent-results-empty {
@@ -2088,6 +2112,28 @@ button {
   font: 13px/1.75 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
+.markdown-result-unavailable {
+  width: 100%;
+  min-height: 260px;
+  margin: 18px 0;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  border: 1px solid #e5e9f0;
+  border-radius: 12px;
+  background: #f8fafc;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.result-action-status {
+  margin: 0 0 12px;
+  color: #8b5b1b;
+  font-size: 12px;
+  text-align: right;
+}
+
 .result-preview-dialog footer {
   justify-content: flex-end;
   flex-wrap: wrap;
@@ -2102,6 +2148,11 @@ button {
   border: 1px solid #dce2ec;
   background: #fff;
   color: #536074;
+}
+
+.result-preview-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .result-preview-primary {
