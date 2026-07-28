@@ -179,3 +179,92 @@ Fix implementation commit: `83218db6324addaba94a7030c6c363182c0ff32e` (`fix: har
 - Adding any new server-side provider requires an explicit exact hostname addition after ownership and official endpoint verification; arbitrary custom OpenAI-compatible proxy URLs are intentionally unsupported by the safe server route.
 - Browser-direct APINebula credentials remain subject to browser-origin and CORS behavior outside this server runtime.
 - Repository-wide TypeScript errors recorded in the original report remain unrelated and unchanged.
+
+## Fix round 2 — explicit browser-direct and server-proxy egress modes
+
+### Status
+
+FIX_ROUND_2_COMPLETE_PENDING_REVIEW
+
+### Integration gap addressed
+
+- Added the explicit `GlobalModelEgressMode` contract with only `browser-direct` and `server-proxy`. Runtime calls default to `server-proxy`; browser clients must opt into `browser-direct` through runtime options.
+- `browser-direct` accepts only exact HTTPS `apinebula.ai` on the default port, without credentials, query, or fragment. It retains the same fixed downstream `/chat/completions` and `/models` endpoints and all response, timeout, cancellation, and redaction limits.
+- `server-proxy` remains restricted to exact `api.openai.com` on default HTTPS port. APINebula is still rejected in the default/server path; the allowlist was not widened.
+- All three API routes now set `egressMode: "server-proxy"` after injected runtime options. Neither request JSON nor route-factory options can switch a server route to browser-direct mode.
+
+### TDD evidence
+
+| Cycle | Coverage added before production change | RED command and observed failure | GREEN command and result |
+| --- | --- | --- | --- |
+| Runtime direct egress | `tests/global-model-runtime.test.mjs`: explicit APINebula text probe, image `/models` probe, and chat call; direct predicate rejects non-default port/query/fragment | `npx tsx --test tests/global-model-runtime.test.mjs` failed 4 tests: the predicate accepted `:8443`, and all three direct calls threw `UNSAFE_URL` before fetch. | Same command passed after explicit runtime mode validation: 18 passed, 0 failed. The three direct calls reached only `https://apinebula.ai/v1/chat/completions` or `https://apinebula.ai/v1/models`. |
+| Route egress lock | `tests/global-model-route.test.mjs`: all route factories and request bodies attempt to select browser-direct with APINebula | `npx tsx --test tests/global-model-route.test.mjs` failed because the first route returned 200 instead of 400 and reached fetch. | Same command passed after each route explicitly overrode mode to `server-proxy`: 9 passed, 0 failed, with zero provider calls for all APINebula route cases. |
+
+### Coverage files
+
+- `app/lib/global-model-runtime.ts`
+- `app/api/models/test-text/route.ts`
+- `app/api/models/test-image/route.ts`
+- `app/api/models/chat/route.ts`
+- `tests/global-model-runtime.test.mjs`
+- `tests/global-model-route.test.mjs`
+
+### Verification
+
+```bash
+npx tsx --test tests/global-model-runtime.test.mjs
+```
+
+Result: 18 tests passed, 0 failed, 0 skipped.
+
+```bash
+npx tsx --test tests/global-model-route.test.mjs
+```
+
+Result: 9 tests passed, 0 failed, 0 skipped.
+
+```bash
+npx tsx --test tests/global-model-runtime.test.mjs tests/global-model-route.test.mjs
+```
+
+Result: 27 tests passed, 0 failed, 0 skipped.
+
+The combined suite also confirms default APINebula server rejection and successful OpenAI proxy calls.
+
+```bash
+npm run build
+```
+
+Result: Vinext production build completed successfully and listed all three model API routes. The existing dynamic-route static-analysis notice remained informational.
+
+```bash
+npm run lint
+```
+
+Result: 0 errors. The same three existing warnings remain in `tests/model-registry.test.mjs`; no Task 2 file has a lint warning.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+### Commit
+
+Fix implementation commit: `de4e2db2fc54e704a8e748e7a4f4689cd1b4e8dc` (`fix: separate global model egress modes`).
+
+### Self-review
+
+- Egress selection is explicit and closed: unknown runtime modes produce `INVALID_CONFIG`; omitted mode is server-proxy.
+- Direct mode cannot target OpenAI, arbitrary domains, APINebula lookalikes, HTTP, non-default ports, credential-bearing URLs, or URLs with query/fragment components.
+- Server mode still uses the exact OpenAI allowlist and cannot infer direct mode from the configured URL.
+- Each API adapter places `egressMode: "server-proxy"` after spread options, so even internal route construction cannot override the server boundary.
+- Text probe, image model probe, and chat direct behavior are tested independently against literal fixed endpoint expectations.
+- Existing route success coverage continues to prove exact OpenAI proxy availability.
+- No Task 3 UI file was modified or staged in the implementation commit.
+
+### Remaining concerns
+
+- Browser-direct APINebula calls require the provider to permit the application origin through CORS; CORS behavior is external and cannot be guaranteed by this runtime.
+- Browser-direct requests expose credentials to the provider from the browser by design. UI copy and storage handling remain Task 3 concerns.
+- Adding any other direct or server provider requires an explicit reviewed egress-mode/hostname decision; automatic provider inference remains intentionally unsupported.
