@@ -157,6 +157,11 @@ export function ModelConfigPanel({
                 {model.enabled ? `停用 ${model.displayName}` : `启用 ${model.displayName}`}
               </button>
               <button
+                aria-label={
+                  model.isDefault
+                    ? "设为默认"
+                    : `设为默认 ${model.displayName}（${model.provider} · ${model.modelId}）`
+                }
                 disabled={!model.enabled || model.isDefault}
                 onClick={() => setDefaultModel(model.id)}
                 type="button"

@@ -107,3 +107,44 @@ test("persists added models and falls back when the selected model is disabled",
   assert.equal(screen.getByLabelText("已选模型 ID").textContent, "openai-gpt-5-6");
   assert.ok(window.localStorage.getItem(STORAGE_KEY)?.includes(ADDED_MODEL_ID));
 });
+
+test("hydrates the enabled stored default instead of keeping the demo selection", async () => {
+  window.localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify([
+      {
+        id: "openai-gpt-5-6",
+        provider: "OpenAI",
+        displayName: "GPT-5.6",
+        modelId: "gpt-5.6",
+        enabled: true,
+        isDefault: false,
+      },
+      {
+        id: "anthropic-claude-stored",
+        provider: "Anthropic",
+        displayName: "Claude Stored",
+        modelId: "claude-stored",
+        enabled: true,
+        isDefault: true,
+      },
+    ]),
+  );
+
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await waitFor(() => {
+    assert.equal(
+      screen.getByLabelText("已选模型").textContent,
+      "anthropic-claude-stored",
+    );
+  });
+  assert.equal(
+    screen.getByLabelText("已选模型 ID").textContent,
+    "anthropic-claude-stored",
+  );
+});

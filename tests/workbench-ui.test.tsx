@@ -104,6 +104,11 @@ test("model configuration adds an enabled model and rejects duplicate provider m
   await user.click(screen.getByRole("checkbox", { name: "添加后启用" }));
   await user.click(screen.getByRole("button", { name: "添加模型" }));
   assert.ok(screen.getByText("Claude Sonnet"));
+  assert.ok(
+    screen.getByRole("button", {
+      name: "设为默认 Claude Sonnet（Anthropic · claude-sonnet）",
+    }),
+  );
 
   await user.type(screen.getByLabelText("服务商"), "Anthropic");
   await user.type(screen.getByLabelText("模型显示名称"), "Claude Sonnet 副本");
@@ -132,6 +137,24 @@ test("chat agent selects only enabled models and requires configuration when non
   const user = userEvent.setup({ document });
   render(<Home />);
 
+  for (const [controlName, previewMessage] of [
+    ["添加附件", "附件功能尚未接入"],
+    ["工具", "工具功能尚未接入"],
+    ["语音输入", "语音输入尚未接入"],
+  ] as const) {
+    await user.click(screen.getByRole("button", { name: controlName }));
+    assert.equal(
+      screen.getByRole("status", { name: "设计预览提示" }).textContent,
+      previewMessage,
+    );
+  }
+
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  assert.equal(
+    screen.getByRole("status", { name: "设计预览提示" }).textContent,
+    "当前为界面预览，真实聊天模型尚未接入",
+  );
+
   await user.click(screen.getByRole("button", { name: "分析竞品账号" }));
   assert.match(
     screen.getByRole("status", { name: "设计预览提示" }).textContent ?? "",
@@ -151,6 +174,11 @@ test("chat agent selects only enabled models and requires configuration when non
   });
   await user.click(modelPicker);
   assert.equal(modelPicker.getAttribute("aria-expanded"), "true");
+  assert.equal(modelPicker.hasAttribute("aria-haspopup"), false);
+  const modelPickerPopup = screen.getByRole("group", { name: "已启用模型" });
+  assert.equal(modelPickerPopup.id, "enabled-model-picker");
+  assert.equal(modelPicker.getAttribute("aria-controls"), modelPickerPopup.id);
+  assert.equal(screen.queryByRole("menu"), null);
   await user.click(screen.getByRole("button", { name: /Claude Sonnet/ }));
   assert.equal(
     screen.getByRole("button", { name: "选择模型，当前 Claude Sonnet" }).getAttribute(
