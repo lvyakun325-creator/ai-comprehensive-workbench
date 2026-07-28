@@ -31,8 +31,11 @@ import { AGENT_IDS } from "../lib/agent-catalog.mjs";
 const MODEL_STORAGE_KEY = "ai-workbench:model-registry:v2";
 const LEGACY_MODEL_STORAGE_KEY = "ai-workbench:model-registry:v1";
 const CREDENTIAL_STORAGE_KEY = "ai-workbench:model-credentials:v1";
+const CREDENTIAL_REVISION_STORAGE_KEY = "ai-workbench:model-credential-revisions:v1";
 const IMAGE_CONFIG_STORAGE_KEY = "ai-workbench:image-model-config:v1";
 const IMAGE_CREDENTIAL_STORAGE_KEY = "ai-workbench:image-model-credential:v1";
+const IMAGE_CREDENTIAL_REVISION_STORAGE_KEY =
+  "ai-workbench:image-model-credential-revision:v1";
 const CHAT_SELECTION_STORAGE_KEY = "ai-workbench:chat-model-selection:v1";
 const AGENT_SELECTIONS_STORAGE_KEY = "ai-workbench:agent-model-selections:v1";
 const SELECTABLE_AGENT_IDS = new Set(
@@ -89,13 +92,24 @@ type ModelRegistry = {
   removeModel: (id: string) => void;
   getCredential: (id: string) => string | null;
   getMaskedCredential: (id: string) => string;
-  saveCredential: (id: string, draftValue: string, clearRequested: boolean) => void;
+  getCredentialRevision: (id: string) => string;
+  saveCredential: (
+    id: string,
+    draftValue: string,
+    clearRequested: boolean,
+    nextRevision?: string | null,
+  ) => string;
   saveModelConfig: (id: string, draft: TextModelConfigDraft) => void;
   invalidateModelConnection: (id: string) => void;
   imageConfig: ImageConfig;
   imageCredential: string | null;
+  imageCredentialRevision: string;
   saveImageConfig: (draft: Partial<ImageConfig>) => void;
-  saveImageCredential: (draftValue: string, clearRequested: boolean) => void;
+  saveImageCredential: (
+    draftValue: string,
+    clearRequested: boolean,
+    nextRevision?: string | null,
+  ) => string;
   invalidateImageConnection: () => void;
 };
 
@@ -166,6 +180,41 @@ function parseStoredImageCredential(raw: string | null): string | null {
   return parseStoredCredentials(JSON.stringify({ image: raw })).image ?? null;
 }
 
+function validCredentialRevision(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const revision = value.trim();
+  return revision
+    && revision.length <= 200
+    && !/[\u0000-\u001F\u007F]/.test(revision)
+    ? revision
+    : "";
+}
+
+function parseStoredCredentialRevisions(raw: string | null): Record<string, string> {
+  if (raw === null) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const revisions: Record<string, string> = {};
+    for (const [rawId, rawRevision] of Object.entries(parsed)) {
+      const id = text(rawId);
+      const revision = validCredentialRevision(rawRevision);
+      if (!id || !revision) return {};
+      revisions[id] = revision;
+    }
+    return revisions;
+  } catch {
+    return {};
+  }
+}
+
+function createCredentialRevision() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `rev-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function ModelRegistryProvider({ children }: { children: ReactNode }) {
   const [models, setModels] = useState<ChatModel[]>(() => [...DEFAULT_MODELS]);
   const [chatSelectedModelId, setChatSelectedModelIdState] = useState<
@@ -176,8 +225,11 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
   const [agentSelectedModelIds, setAgentSelectedModelIds] =
     useState<AgentModelSelections>({});
   const [credentials, setCredentials] = useState<Record<string, string>>({});
+  const [credentialRevisions, setCredentialRevisions] =
+    useState<Record<string, string>>({});
   const [imageConfig, setImageConfig] = useState<ImageConfig>(DEFAULT_IMAGE_CONFIG);
   const [imageCredential, setImageCredential] = useState<string | null>(null);
+  const [imageCredentialRevision, setImageCredentialRevision] = useState("");
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
@@ -185,8 +237,10 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
     let storedChatSelection: string | null = null;
     let storedAgentSelections: AgentModelSelections = {};
     let storedCredentials: Record<string, string> = {};
+    let storedCredentialRevisions: Record<string, string> = {};
     let storedImageConfig = DEFAULT_IMAGE_CONFIG;
     let storedImageCredential: string | null = null;
+    let storedImageCredentialRevision = "";
     try {
       const raw = window.localStorage.getItem(MODEL_STORAGE_KEY)
         ?? window.localStorage.getItem(LEGACY_MODEL_STORAGE_KEY);
@@ -201,12 +255,26 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
       storedCredentials = parseStoredCredentials(
         window.localStorage.getItem(CREDENTIAL_STORAGE_KEY),
       );
+      storedCredentialRevisions = parseStoredCredentialRevisions(
+        window.localStorage.getItem(CREDENTIAL_REVISION_STORAGE_KEY),
+      );
+      for (const id of Object.keys(storedCredentials)) {
+        if (!storedCredentialRevisions[id]) {
+          storedCredentialRevisions[id] = createCredentialRevision();
+        }
+      }
       storedImageConfig = parseStoredImageConfig(
         window.localStorage.getItem(IMAGE_CONFIG_STORAGE_KEY),
       );
       storedImageCredential = parseStoredImageCredential(
         window.localStorage.getItem(IMAGE_CREDENTIAL_STORAGE_KEY),
       );
+      storedImageCredentialRevision = validCredentialRevision(
+        window.localStorage.getItem(IMAGE_CREDENTIAL_REVISION_STORAGE_KEY),
+      );
+      if (storedImageCredential && !storedImageCredentialRevision) {
+        storedImageCredentialRevision = createCredentialRevision();
+      }
     } catch {
       // Keep the server-safe defaults if browser storage is unavailable.
     }
@@ -218,8 +286,10 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
       );
       setAgentSelectedModelIds(storedAgentSelections);
       setCredentials(storedCredentials);
+      setCredentialRevisions(storedCredentialRevisions);
       setImageConfig(storedImageConfig);
       setImageCredential(storedImageCredential);
+      setImageCredentialRevision(storedImageCredentialRevision);
       setHydrated(true);
     });
   }, []);
@@ -238,10 +308,14 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
     if (!hydrated) return;
     try {
       window.localStorage.setItem(CREDENTIAL_STORAGE_KEY, JSON.stringify(credentials));
+      window.localStorage.setItem(
+        CREDENTIAL_REVISION_STORAGE_KEY,
+        JSON.stringify(credentialRevisions),
+      );
     } catch {
       // Credentials remain isolated in memory when browser storage is unavailable.
     }
-  }, [credentials, hydrated]);
+  }, [credentialRevisions, credentials, hydrated]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -252,10 +326,18 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
       } else {
         window.localStorage.removeItem(IMAGE_CREDENTIAL_STORAGE_KEY);
       }
+      if (imageCredentialRevision) {
+        window.localStorage.setItem(
+          IMAGE_CREDENTIAL_REVISION_STORAGE_KEY,
+          imageCredentialRevision,
+        );
+      } else {
+        window.localStorage.removeItem(IMAGE_CREDENTIAL_REVISION_STORAGE_KEY);
+      }
     } catch {
       // Image settings remain isolated in memory when browser storage is unavailable.
     }
-  }, [hydrated, imageConfig, imageCredential]);
+  }, [hydrated, imageConfig, imageCredential, imageCredentialRevision]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -354,10 +436,27 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
       },
       getCredential: (id) => credentials[id] ?? null,
       getMaskedCredential: (id) => maskCredential(credentials[id]),
-      saveCredential: (id, draftValue, clearRequested) => {
+      getCredentialRevision: (id) => credentialRevisions[id] ?? "",
+      saveCredential: (id, draftValue, clearRequested, requestedRevision) => {
+        const targetId = text(id);
+        const hasReplacement = text(draftValue) !== "";
+        const currentRevision = credentialRevisions[targetId] ?? "";
+        if (!targetId || (!clearRequested && !hasReplacement)) {
+          return currentRevision;
+        }
+        const revision = requestedRevision === null
+          ? ""
+          : validCredentialRevision(requestedRevision) || createCredentialRevision();
         setCredentials((currentCredentials) =>
-          updateCredential(currentCredentials, id, draftValue, clearRequested),
+          updateCredential(currentCredentials, targetId, draftValue, clearRequested),
         );
+        setCredentialRevisions((current) => {
+          if (revision) return { ...current, [targetId]: revision };
+          const next = { ...current };
+          delete next[targetId];
+          return next;
+        });
+        return revision;
       },
       saveModelConfig: (id, draft) => {
         const targetId = text(id);
@@ -437,6 +536,7 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
       },
       imageConfig,
       imageCredential,
+      imageCredentialRevision,
       saveImageConfig: (draft) => {
         setImageConfig((current) => {
           const baseUrl = draft.baseUrl === undefined ? current.baseUrl : text(draft.baseUrl);
@@ -465,11 +565,20 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
           };
         });
       },
-      saveImageCredential: (draftValue, clearRequested) => {
+      saveImageCredential: (draftValue, clearRequested, requestedRevision) => {
+        const hasReplacement = text(draftValue) !== "";
+        if (!clearRequested && !hasReplacement) {
+          return imageCredentialRevision;
+        }
+        const revision = requestedRevision === null
+          ? ""
+          : validCredentialRevision(requestedRevision) || createCredentialRevision();
         setImageCredential((current) =>
           updateCredential({ image: current ?? "" }, "image", draftValue, clearRequested).image
             ?? null,
         );
+        setImageCredentialRevision(revision);
+        return revision;
       },
       invalidateImageConnection: () => {
         setImageConfig((current) =>
@@ -481,7 +590,16 @@ export function ModelRegistryProvider({ children }: { children: ReactNode }) {
         );
       },
     };
-  }, [agentSelectedModelIds, chatSelectedModelId, credentials, imageConfig, imageCredential, models]);
+  }, [
+    agentSelectedModelIds,
+    chatSelectedModelId,
+    credentialRevisions,
+    credentials,
+    imageConfig,
+    imageCredential,
+    imageCredentialRevision,
+    models,
+  ]);
 
   return <ModelRegistryContext.Provider value={registry}>{children}</ModelRegistryContext.Provider>;
 }

@@ -40,6 +40,7 @@ type NewTextDraft = TextDraft & { visible: boolean };
 type SettingsBaseline = {
   models: ChatModel[];
   credentials: Record<string, string | null>;
+  credentialRevisions: Record<string, string>;
   imageConfig: {
     baseUrl: string;
     modelId: string;
@@ -48,6 +49,14 @@ type SettingsBaseline = {
     testedFingerprint: string;
   };
   imageCredential: string | null;
+  imageCredentialRevision: string;
+};
+
+type ActiveProbe = {
+  controller: AbortController;
+  credentialRevision: string;
+  fingerprint: string;
+  token: symbol;
 };
 
 const EMPTY_NEW_TEXT_DRAFT: NewTextDraft = {
@@ -101,11 +110,12 @@ async function proxyTest(path: string, config: {
   baseUrl: string;
   apiKey: string;
   model: string;
-}) {
+}, signal: AbortSignal) {
   const response = await fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ config }),
+    signal,
   });
   const body = await response.json().catch(() => null) as {
     ok?: boolean;
@@ -114,6 +124,13 @@ async function proxyTest(path: string, config: {
   if (!response.ok || body?.ok !== true) {
     throw new Error(body?.message || "连接测试失败，请检查配置后重试。");
   }
+}
+
+function createCredentialRevision() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `revision-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function safeUiError(error: unknown, apiKey: string) {
@@ -132,9 +149,11 @@ export function GlobalModelSettings({
     models,
     addModel,
     getCredential,
+    getCredentialRevision,
     getMaskedCredential,
     imageConfig,
     imageCredential,
+    imageCredentialRevision,
     invalidateImageConnection,
     invalidateModelConnection,
     removeModel,
@@ -148,12 +167,21 @@ export function GlobalModelSettings({
   const imageDirty = useRef(false);
   const baseline = useRef<SettingsBaseline | null>(null);
   const addedModelIds = useRef(new Set<string>());
-  const [drafts, setDrafts] = useState<Record<string, TextDraft>>(() =>
-    Object.fromEntries(models.map((model) => [model.id, draftFromModel(model)])),
+  const initialDrafts = Object.fromEntries(
+    models.map((model) => [model.id, draftFromModel(model)]),
   );
-  const [imageDraft, setImageDraft] = useState<ImageDraft>(() =>
-    imageDraftFromConfig(imageConfig),
-  );
+  const [drafts, setDrafts] = useState<Record<string, TextDraft>>(initialDrafts);
+  const draftsRef = useRef(drafts);
+  const initialImageDraft = imageDraftFromConfig(imageConfig);
+  const [imageDraft, setImageDraft] = useState<ImageDraft>(initialImageDraft);
+  const imageDraftRef = useRef(imageDraft);
+  const textDraftRevisions = useRef<Record<string, string>>({});
+  const imageDraftRevision = useRef("");
+  const savedCredentialRevisions = useRef<Record<string, string>>({});
+  const savedImageCredentialRevision = useRef(imageCredentialRevision);
+  const textProbes = useRef(new Map<string, ActiveProbe>());
+  const imageProbe = useRef<ActiveProbe | null>(null);
+  const mounted = useRef(true);
   const [newDraft, setNewDraft] = useState<NewTextDraft>(EMPTY_NEW_TEXT_DRAFT);
   const [textRequests, setTextRequests] = useState<Record<string, boolean>>({});
   const [textErrors, setTextErrors] = useState<Record<string, string>>({});
@@ -164,6 +192,11 @@ export function GlobalModelSettings({
     () => new Set(),
   );
 
+  for (const model of models) {
+    savedCredentialRevisions.current[model.id] = getCredentialRevision(model.id);
+  }
+  savedImageCredentialRevision.current = imageCredentialRevision;
+
   const ensureBaseline = () => {
     if (baseline.current) return;
     baseline.current = {
@@ -171,27 +204,118 @@ export function GlobalModelSettings({
       credentials: Object.fromEntries(
         models.map((model) => [model.id, getCredential(model.id)]),
       ),
+      credentialRevisions: Object.fromEntries(
+        models.map((model) => [model.id, getCredentialRevision(model.id)]),
+      ),
       imageConfig: { ...imageConfig },
       imageCredential,
+      imageCredentialRevision,
     };
   };
 
   useEffect(() => {
     setDrafts((current) =>
-      Object.fromEntries(models.map((model) => [
+      {
+        const next = Object.fromEntries(models.map((model) => [
         model.id,
         dirtyModelIds.current.has(model.id)
           ? current[model.id] ?? draftFromModel(model)
           : draftFromModel(model),
-      ])),
+        ]));
+        draftsRef.current = next;
+        return next;
+      },
     );
   }, [models]);
 
   useEffect(() => {
     if (!imageDirty.current) {
-      setImageDraft(imageDraftFromConfig(imageConfig));
+      const next = imageDraftFromConfig(imageConfig);
+      imageDraftRef.current = next;
+      setImageDraft(next);
     }
   }, [imageConfig]);
+
+  useEffect(() => () => {
+    mounted.current = false;
+    for (const probe of textProbes.current.values()) {
+      probe.controller.abort();
+    }
+    textProbes.current.clear();
+    imageProbe.current?.controller.abort();
+    imageProbe.current = null;
+  }, []);
+
+  const abortTextProbe = (modelId: string) => {
+    const active = textProbes.current.get(modelId);
+    if (!active) return;
+    active.controller.abort();
+    textProbes.current.delete(modelId);
+    if (mounted.current) {
+      setTextRequests((current) => ({ ...current, [modelId]: false }));
+    }
+  };
+
+  const abortImageProbe = () => {
+    imageProbe.current?.controller.abort();
+    imageProbe.current = null;
+    if (mounted.current) setImageTesting(false);
+  };
+
+  const abortAllProbes = () => {
+    for (const modelId of textProbes.current.keys()) {
+      abortTextProbe(modelId);
+    }
+    abortImageProbe();
+  };
+
+  const textRevisionForDraft = (modelId: string, draft: TextDraft) => {
+    if (draft.clearCredential || draft.apiKeyDraft.trim()) {
+      return textDraftRevisions.current[modelId] ?? "";
+    }
+    return savedCredentialRevisions.current[modelId] ?? "";
+  };
+
+  const imageRevisionForDraft = (draft: ImageDraft) => {
+    if (draft.clearCredential || draft.apiKeyDraft.trim()) {
+      return imageDraftRevision.current;
+    }
+    return savedImageCredentialRevision.current;
+  };
+
+  const textFingerprintForDraft = (modelId: string, draft: TextDraft) =>
+    connectionFingerprint(
+      draft.baseUrl,
+      draft.modelId,
+      textRevisionForDraft(modelId, draft),
+    );
+
+  const imageFingerprintForDraft = (draft: ImageDraft) =>
+    connectionFingerprint(
+      draft.baseUrl,
+      draft.modelId,
+      imageRevisionForDraft(draft),
+    );
+
+  const textProbeIsCurrent = (
+    modelId: string,
+    probe: ActiveProbe,
+  ) => (
+    mounted.current
+    && textProbes.current.get(modelId)?.token === probe.token
+    && textRevisionForDraft(modelId, draftsRef.current[modelId])
+      === probe.credentialRevision
+    && textFingerprintForDraft(modelId, draftsRef.current[modelId])
+      === probe.fingerprint
+  );
+
+  const imageProbeIsCurrent = (probe: ActiveProbe) => (
+    mounted.current
+    && imageProbe.current?.token === probe.token
+    && imageRevisionForDraft(imageDraftRef.current)
+      === probe.credentialRevision
+    && imageFingerprintForDraft(imageDraftRef.current) === probe.fingerprint
+  );
 
   const updateTextDraft = (
     modelId: string,
@@ -199,11 +323,21 @@ export function GlobalModelSettings({
     connectionField = false,
   ) => {
     ensureBaseline();
+    if (connectionField) abortTextProbe(modelId);
     dirtyModelIds.current.add(modelId);
-    setDrafts((current) => ({
-      ...current,
-      [modelId]: { ...current[modelId], ...patch },
-    }));
+    const nextDraft = { ...draftsRef.current[modelId], ...patch };
+    draftsRef.current = {
+      ...draftsRef.current,
+      [modelId]: nextDraft,
+    };
+    if ("apiKeyDraft" in patch || "clearCredential" in patch) {
+      if (nextDraft.clearCredential || nextDraft.apiKeyDraft.trim()) {
+        textDraftRevisions.current[modelId] = createCredentialRevision();
+      } else {
+        delete textDraftRevisions.current[modelId];
+      }
+    }
+    setDrafts(draftsRef.current);
     if (connectionField) {
       invalidateModelConnection(modelId);
     }
@@ -214,8 +348,17 @@ export function GlobalModelSettings({
     connectionField = false,
   ) => {
     ensureBaseline();
+    if (connectionField) abortImageProbe();
     imageDirty.current = true;
-    setImageDraft((current) => ({ ...current, ...patch }));
+    const nextDraft = { ...imageDraftRef.current, ...patch };
+    imageDraftRef.current = nextDraft;
+    if ("apiKeyDraft" in patch || "clearCredential" in patch) {
+      imageDraftRevision.current =
+        nextDraft.clearCredential || nextDraft.apiKeyDraft.trim()
+          ? createCredentialRevision()
+          : "";
+    }
+    setImageDraft(nextDraft);
     if (connectionField) {
       invalidateImageConnection();
     }
@@ -227,7 +370,8 @@ export function GlobalModelSettings({
       : draft.apiKeyDraft.trim() || getCredential(id) || "";
 
   const testTextModel = async (model: ChatModel) => {
-    const draft = drafts[model.id];
+    abortTextProbe(model.id);
+    const draft = draftsRef.current[model.id];
     const apiKey = resolvedTextKey(model.id, draft);
     if (!draft.baseUrl.trim() || !draft.modelId.trim() || !apiKey) {
       setTextErrors((current) => ({
@@ -237,6 +381,19 @@ export function GlobalModelSettings({
       return;
     }
 
+    let credentialRevision = textRevisionForDraft(model.id, draft);
+    if (!credentialRevision) {
+      credentialRevision = createCredentialRevision();
+      textDraftRevisions.current[model.id] = credentialRevision;
+    }
+    const controller = new AbortController();
+    const probe: ActiveProbe = {
+      controller,
+      credentialRevision,
+      fingerprint: textFingerprintForDraft(model.id, draft),
+      token: Symbol(model.id),
+    };
+    textProbes.current.set(model.id, probe);
     setTextRequests((current) => ({ ...current, [model.id]: true }));
     setTextErrors((current) => ({ ...current, [model.id]: "" }));
     const config = {
@@ -255,11 +412,21 @@ export function GlobalModelSettings({
 
     try {
       if (usesBrowserDirectModelRoute(config.baseUrl)) {
-        await testTextConnection(config, { egressMode: "browser-direct" });
+        await testTextConnection(config, {
+          egressMode: "browser-direct",
+          signal: controller.signal,
+        });
       } else {
-        await proxyTest("/api/models/test-text", config);
+        await proxyTest("/api/models/test-text", config, controller.signal);
       }
-      saveCredential(model.id, draft.apiKeyDraft, draft.clearCredential);
+      if (!textProbeIsCurrent(model.id, probe)) return;
+      saveCredential(
+        model.id,
+        draft.apiKeyDraft,
+        draft.clearCredential,
+        credentialRevision,
+      );
+      savedCredentialRevisions.current[model.id] = credentialRevision;
       saveModelConfig(model.id, {
         provider: draft.provider,
         displayName: draft.displayName,
@@ -268,19 +435,22 @@ export function GlobalModelSettings({
         enabled: draft.enabled,
         isDefault: draft.isDefault,
         connectionStatus: "connected",
-        testedFingerprint: connectionFingerprint(config.baseUrl, config.model, ""),
+        testedFingerprint: probe.fingerprint,
       });
       dirtyModelIds.current.delete(model.id);
-      setDrafts((current) => ({
-        ...current,
+      delete textDraftRevisions.current[model.id];
+      draftsRef.current = {
+        ...draftsRef.current,
         [model.id]: {
-          ...current[model.id],
+          ...draftsRef.current[model.id],
           apiKeyDraft: "",
           clearCredential: false,
         },
-      }));
+      };
+      setDrafts(draftsRef.current);
       onPreview(`${draft.displayName} 连接成功`);
     } catch (error) {
+      if (!textProbeIsCurrent(model.id, probe)) return;
       saveModelConfig(model.id, {
         connectionStatus: "failed",
         testedFingerprint: "",
@@ -290,25 +460,45 @@ export function GlobalModelSettings({
         [model.id]: safeUiError(error, apiKey),
       }));
     } finally {
-      setTextRequests((current) => ({ ...current, [model.id]: false }));
+      if (textProbes.current.get(model.id)?.token === probe.token) {
+        textProbes.current.delete(model.id);
+        if (mounted.current) {
+          setTextRequests((current) => ({ ...current, [model.id]: false }));
+        }
+      }
     }
   };
 
   const testImageModel = async () => {
-    const apiKey = imageDraft.clearCredential
+    abortImageProbe();
+    const draft = imageDraftRef.current;
+    const apiKey = draft.clearCredential
       ? ""
-      : imageDraft.apiKeyDraft.trim() || imageCredential || "";
-    if (!imageDraft.baseUrl.trim() || !imageDraft.modelId.trim() || !apiKey) {
+      : draft.apiKeyDraft.trim() || imageCredential || "";
+    if (!draft.baseUrl.trim() || !draft.modelId.trim() || !apiKey) {
       setImageError("请先填写生图模型 API Key、接口地址和模型名称。");
       return;
     }
 
+    let credentialRevision = imageRevisionForDraft(draft);
+    if (!credentialRevision) {
+      credentialRevision = createCredentialRevision();
+      imageDraftRevision.current = credentialRevision;
+    }
+    const controller = new AbortController();
+    const probe: ActiveProbe = {
+      controller,
+      credentialRevision,
+      fingerprint: imageFingerprintForDraft(draft),
+      token: Symbol("image"),
+    };
+    imageProbe.current = probe;
     setImageTesting(true);
     setImageError("");
     const config = {
-      baseUrl: imageDraft.baseUrl.trim(),
+      baseUrl: draft.baseUrl.trim(),
       apiKey,
-      model: imageDraft.modelId.trim(),
+      model: draft.modelId.trim(),
     };
     saveImageConfig({
       baseUrl: config.baseUrl,
@@ -319,38 +509,54 @@ export function GlobalModelSettings({
 
     try {
       if (usesBrowserDirectModelRoute(config.baseUrl)) {
-        await testImageConnection(config, { egressMode: "browser-direct" });
+        await testImageConnection(config, {
+          egressMode: "browser-direct",
+          signal: controller.signal,
+        });
       } else {
-        await proxyTest("/api/models/test-image", config);
+        await proxyTest("/api/models/test-image", config, controller.signal);
       }
-      saveImageCredential(imageDraft.apiKeyDraft, imageDraft.clearCredential);
+      if (!imageProbeIsCurrent(probe)) return;
+      saveImageCredential(
+        draft.apiKeyDraft,
+        draft.clearCredential,
+        credentialRevision,
+      );
+      savedImageCredentialRevision.current = credentialRevision;
       saveImageConfig({
         baseUrl: config.baseUrl,
         modelId: config.model,
-        enabled: imageDraft.enabled,
+        enabled: draft.enabled,
         connectionStatus: "connected",
-        testedFingerprint: connectionFingerprint(config.baseUrl, config.model, ""),
+        testedFingerprint: probe.fingerprint,
       });
       imageDirty.current = false;
-      setImageDraft((current) => ({
-        ...current,
+      imageDraftRevision.current = "";
+      imageDraftRef.current = {
+        ...imageDraftRef.current,
         apiKeyDraft: "",
         clearCredential: false,
-      }));
+      };
+      setImageDraft(imageDraftRef.current);
       onPreview("生图模型连接成功");
     } catch (error) {
+      if (!imageProbeIsCurrent(probe)) return;
       saveImageConfig({ connectionStatus: "failed", testedFingerprint: "" });
       setImageError(safeUiError(error, apiKey));
     } finally {
-      setImageTesting(false);
+      if (imageProbe.current?.token === probe.token) {
+        imageProbe.current = null;
+        if (mounted.current) setImageTesting(false);
+      }
     }
   };
 
   const saveSettings = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    abortAllProbes();
     const visibleModels = models.filter((model) => !pendingDeletedIds.has(model.id));
     for (const model of visibleModels) {
-      const draft = drafts[model.id];
+      const draft = draftsRef.current[model.id];
       if (!draft.provider.trim() || !draft.displayName.trim() || !draft.modelId.trim()) {
         setValidationError("请填写每个文案模型的服务商、显示名称和模型名称。");
         return;
@@ -358,8 +564,19 @@ export function GlobalModelSettings({
     }
 
     for (const model of visibleModels) {
-      const draft = drafts[model.id];
-      saveCredential(model.id, draft.apiKeyDraft, draft.clearCredential);
+      const draft = draftsRef.current[model.id];
+      let credentialRevision = textRevisionForDraft(model.id, draft);
+      if ((draft.apiKeyDraft.trim() || draft.clearCredential) && !credentialRevision) {
+        credentialRevision = createCredentialRevision();
+      }
+      const savedRevision = saveCredential(
+        model.id,
+        draft.apiKeyDraft,
+        draft.clearCredential,
+        credentialRevision || undefined,
+      );
+      savedCredentialRevisions.current[model.id] = savedRevision;
+      delete textDraftRevisions.current[model.id];
       saveModelConfig(model.id, {
         provider: draft.provider,
         displayName: draft.displayName,
@@ -371,29 +588,56 @@ export function GlobalModelSettings({
       dirtyModelIds.current.delete(model.id);
     }
     for (const modelId of pendingDeletedIds) {
+      abortTextProbe(modelId);
       removeModel(modelId);
-      saveCredential(modelId, "", true);
+      saveCredential(modelId, "", true, null);
+      delete savedCredentialRevisions.current[modelId];
+      delete textDraftRevisions.current[modelId];
     }
-    const defaultModel = visibleModels.find((model) => drafts[model.id].isDefault);
+    const defaultModel = visibleModels.find(
+      (model) => draftsRef.current[model.id].isDefault,
+    );
     if (defaultModel) {
       setDefaultModel(defaultModel.id);
     }
-    saveImageCredential(imageDraft.apiKeyDraft, imageDraft.clearCredential);
+    const currentImageDraft = imageDraftRef.current;
+    let credentialRevision = imageRevisionForDraft(currentImageDraft);
+    if (
+      (currentImageDraft.apiKeyDraft.trim() || currentImageDraft.clearCredential)
+      && !credentialRevision
+    ) {
+      credentialRevision = createCredentialRevision();
+    }
+    const savedImageRevision = saveImageCredential(
+      currentImageDraft.apiKeyDraft,
+      currentImageDraft.clearCredential,
+      credentialRevision || undefined,
+    );
+    savedImageCredentialRevision.current = savedImageRevision;
+    imageDraftRevision.current = "";
     saveImageConfig({
-      baseUrl: imageDraft.baseUrl,
-      modelId: imageDraft.modelId,
-      enabled: imageDraft.enabled,
+      baseUrl: currentImageDraft.baseUrl,
+      modelId: currentImageDraft.modelId,
+      enabled: currentImageDraft.enabled,
     });
     imageDirty.current = false;
-    setDrafts(Object.fromEntries(models.map((model) => [
+    const nextDrafts = Object.fromEntries(visibleModels.map((model) => [
       model.id,
-      { ...drafts[model.id], apiKeyDraft: "", clearCredential: false },
-    ])));
-    setImageDraft((current) => ({
-      ...current,
+      {
+        ...draftsRef.current[model.id],
+        apiKeyDraft: "",
+        clearCredential: false,
+      },
+    ]));
+    draftsRef.current = nextDrafts;
+    setDrafts(nextDrafts);
+    const nextImageDraft = {
+      ...currentImageDraft,
       apiKeyDraft: "",
       clearCredential: false,
-    }));
+    };
+    imageDraftRef.current = nextImageDraft;
+    setImageDraft(nextImageDraft);
     baseline.current = null;
     addedModelIds.current.clear();
     setPendingDeletedIds(new Set());
@@ -402,12 +646,14 @@ export function GlobalModelSettings({
   };
 
   const cancelSettings = () => {
+    abortAllProbes();
     const saved = baseline.current;
     if (saved) {
       for (const model of models) {
         if (!saved.models.some((candidate) => candidate.id === model.id)) {
           removeModel(model.id);
-          saveCredential(model.id, "", true);
+          saveCredential(model.id, "", true, null);
+          delete savedCredentialRevisions.current[model.id];
         }
       }
       for (const model of saved.models) {
@@ -418,7 +664,14 @@ export function GlobalModelSettings({
           model.id,
           saved.credentials[model.id] ?? "",
           saved.credentials[model.id] === null,
+          saved.credentialRevisions[model.id] || null,
         );
+        if (saved.credentialRevisions[model.id]) {
+          savedCredentialRevisions.current[model.id] =
+            saved.credentialRevisions[model.id];
+        } else {
+          delete savedCredentialRevisions.current[model.id];
+        }
         saveModelConfig(model.id, {
           ...model,
           connectionStatus: "changed",
@@ -431,7 +684,9 @@ export function GlobalModelSettings({
       saveImageCredential(
         saved.imageCredential ?? "",
         saved.imageCredential === null,
+        saved.imageCredentialRevision || null,
       );
+      savedImageCredentialRevision.current = saved.imageCredentialRevision;
       saveImageConfig({
         ...saved.imageConfig,
         connectionStatus: "changed",
@@ -441,10 +696,18 @@ export function GlobalModelSettings({
     }
     dirtyModelIds.current.clear();
     imageDirty.current = false;
-    setDrafts(Object.fromEntries(
+    textDraftRevisions.current = {};
+    imageDraftRevision.current = "";
+    const restoredDrafts = Object.fromEntries(
       (saved?.models ?? models).map((model) => [model.id, draftFromModel(model)]),
-    ));
-    setImageDraft(imageDraftFromConfig(saved?.imageConfig ?? imageConfig));
+    );
+    draftsRef.current = restoredDrafts;
+    setDrafts(restoredDrafts);
+    const restoredImageDraft = imageDraftFromConfig(
+      saved?.imageConfig ?? imageConfig,
+    );
+    imageDraftRef.current = restoredImageDraft;
+    setImageDraft(restoredImageDraft);
     setNewDraft(EMPTY_NEW_TEXT_DRAFT);
     baseline.current = null;
     addedModelIds.current.clear();
@@ -673,11 +936,10 @@ export function GlobalModelSettings({
                 {textErrors[model.id] ? <p role="alert">{textErrors[model.id]}</p> : null}
                 <div className="model-settings-actions">
                   <button
-                    disabled={testing}
                     onClick={() => void testTextModel(model)}
                     type="button"
                   >
-                    {testing ? "正在测试…" : "测试文案模型"}
+                    {testing ? "重新测试" : "测试文案模型"}
                   </button>
                   <label>
                     <input
@@ -710,6 +972,7 @@ export function GlobalModelSettings({
                     className="danger"
                     onClick={() => {
                       ensureBaseline();
+                      abortTextProbe(model.id);
                       setPendingDeletedIds((current) =>
                         new Set([...current, model.id]));
                     }}
@@ -798,11 +1061,10 @@ export function GlobalModelSettings({
           {imageError ? <p role="alert">{imageError}</p> : null}
           <div className="model-settings-actions">
             <button
-              disabled={imageTesting}
               onClick={() => void testImageModel()}
               type="button"
             >
-              {imageTesting ? "正在测试…" : "测试生图模型"}
+              {imageTesting ? "重新测试" : "测试生图模型"}
             </button>
             <label>
               <input

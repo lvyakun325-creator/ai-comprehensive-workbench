@@ -33,8 +33,11 @@ const { ModelRegistryProvider, useModelRegistry } = await import(
 const STORAGE_KEY = "ai-workbench:model-registry:v2";
 const LEGACY_MODEL_STORAGE_KEY = "ai-workbench:model-registry:v1";
 const CREDENTIAL_STORAGE_KEY = "ai-workbench:model-credentials:v1";
+const CREDENTIAL_REVISION_STORAGE_KEY = "ai-workbench:model-credential-revisions:v1";
 const IMAGE_CONFIG_STORAGE_KEY = "ai-workbench:image-model-config:v1";
 const IMAGE_CREDENTIAL_STORAGE_KEY = "ai-workbench:image-model-credential:v1";
+const IMAGE_CREDENTIAL_REVISION_STORAGE_KEY =
+  "ai-workbench:image-model-credential-revision:v1";
 const CHAT_SELECTION_STORAGE_KEY = "ai-workbench:chat-model-selection:v1";
 const AGENT_SELECTIONS_STORAGE_KEY = "ai-workbench:agent-model-selections:v1";
 const ADDED_MODEL_ID = "anthropic-claude-test";
@@ -43,6 +46,7 @@ const AGENT_A_ID = "competitor-insight";
 const AGENT_B_ID = "topic-planning";
 
 function RegistryHarness() {
+  const registry = useModelRegistry();
   const {
     models,
     enabledModels,
@@ -63,7 +67,16 @@ function RegistryHarness() {
     imageCredential,
     saveImageConfig,
     saveImageCredential,
-  } = useModelRegistry();
+  } = registry;
+  const getCredentialRevision =
+    "getCredentialRevision" in registry
+    && typeof registry.getCredentialRevision === "function"
+      ? registry.getCredentialRevision as (id: string) => string
+      : () => "missing";
+  const imageCredentialRevision =
+    "imageCredentialRevision" in registry
+      ? String(registry.imageCredentialRevision)
+      : "missing";
 
   return (
     <section>
@@ -84,11 +97,15 @@ function RegistryHarness() {
       <output aria-label="默认模型脱敏密钥">
         {getMaskedCredential("openai-gpt-5-6") ?? "none"}
       </output>
+      <output aria-label="默认模型密钥版本">
+        {getCredentialRevision("openai-gpt-5-6") || "none"}
+      </output>
       <output aria-label="默认模型配置">
         {JSON.stringify(models.find((model) => model.id === "openai-gpt-5-6") ?? null)}
       </output>
       <output aria-label="生图配置">{JSON.stringify(imageConfig)}</output>
       <output aria-label="生图密钥">{imageCredential ?? "none"}</output>
+      <output aria-label="生图密钥版本">{imageCredentialRevision || "none"}</output>
       <button
         onClick={() =>
           addModel({
@@ -235,6 +252,79 @@ test("keeps text and image credentials outside ordinary model metadata", async (
   });
   assert.doesNotMatch(window.localStorage.getItem(IMAGE_CONFIG_STORAGE_KEY) ?? "", /sk-image/);
   assert.doesNotMatch(window.localStorage.getItem(STORAGE_KEY) ?? "", /sk-image/);
+});
+
+test("persists opaque credential revisions and changes them only for replacement or clear", async () => {
+  const user = userEvent.setup({ document });
+  const firstRender = render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+
+  await user.click(screen.getByRole("button", { name: "保存第一密钥" }));
+  const firstRevision = screen.getByLabelText("默认模型密钥版本").textContent ?? "";
+  assert.notEqual(firstRevision, "missing");
+  assert.notEqual(firstRevision, "none");
+  assert.doesNotMatch(firstRevision, /fake|first|1234|sk-/i);
+
+  await user.click(screen.getByRole("button", { name: "保留第一密钥" }));
+  assert.equal(
+    screen.getByLabelText("默认模型密钥版本").textContent,
+    firstRevision,
+  );
+
+  await user.click(screen.getByRole("button", { name: "替换第一密钥" }));
+  const replacementRevision =
+    screen.getByLabelText("默认模型密钥版本").textContent ?? "";
+  assert.notEqual(replacementRevision, firstRevision);
+  assert.doesNotMatch(replacementRevision, /fake|second|5678|sk-/i);
+
+  await user.click(screen.getByRole("button", { name: "清空第一密钥" }));
+  const clearedRevision =
+    screen.getByLabelText("默认模型密钥版本").textContent ?? "";
+  assert.notEqual(clearedRevision, replacementRevision);
+  assert.notEqual(clearedRevision, "none");
+
+  await user.click(screen.getByRole("button", { name: "保存生图密钥" }));
+  const imageRevision = screen.getByLabelText("生图密钥版本").textContent ?? "";
+  assert.notEqual(imageRevision, "missing");
+  assert.notEqual(imageRevision, "none");
+  assert.doesNotMatch(imageRevision, /image|fake|4321|sk-/i);
+
+  await waitFor(() => {
+    assert.equal(
+      JSON.parse(
+        window.localStorage.getItem(CREDENTIAL_REVISION_STORAGE_KEY) ?? "{}",
+      )["openai-gpt-5-6"],
+      clearedRevision,
+    );
+    assert.equal(
+      window.localStorage.getItem(IMAGE_CREDENTIAL_REVISION_STORAGE_KEY),
+      imageRevision,
+    );
+  });
+  assert.doesNotMatch(
+    window.localStorage.getItem(CREDENTIAL_REVISION_STORAGE_KEY) ?? "",
+    /sk-fake|first|second|1234|5678/i,
+  );
+
+  firstRender.unmount();
+  render(
+    <ModelRegistryProvider>
+      <RegistryHarness />
+    </ModelRegistryProvider>,
+  );
+  await waitFor(() => {
+    assert.equal(
+      screen.getByLabelText("默认模型密钥版本").textContent,
+      clearedRevision,
+    );
+    assert.equal(
+      screen.getByLabelText("生图密钥版本").textContent,
+      imageRevision,
+    );
+  });
 });
 
 test("migrates browser v1 model metadata into the v2 store without credentials", async () => {

@@ -207,7 +207,7 @@ test("only content matrix exposes temporary API configuration and requires a suc
     await user.click(screen.getByRole("button", { name: "← 返回 Agent 项目" }));
   }
   await user.click(screen.getByRole("button", { name: "模型配置" }));
-  assert.ok(screen.getByRole("heading", { name: "全局可用模型" }));
+  assert.ok(screen.getByRole("heading", { name: "模型设置" }));
   assert.equal(screen.queryByLabelText("API Key"), null);
 });
 

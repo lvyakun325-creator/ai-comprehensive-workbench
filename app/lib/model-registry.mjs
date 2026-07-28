@@ -29,6 +29,21 @@ function text(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function matchesConnectionFingerprint(fingerprint, baseUrl, modelId) {
+  try {
+    const parsed = JSON.parse(fingerprint);
+    return (
+      Array.isArray(parsed)
+      && parsed.length === 3
+      && parsed.every((value) => typeof value === "string")
+      && parsed[0] === text(baseUrl)
+      && parsed[1] === text(modelId)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function connectionFingerprint(baseUrl, modelId, keyRevision) {
   return JSON.stringify([text(baseUrl), text(modelId), text(keyRevision)]);
 }
@@ -66,7 +81,11 @@ function normalizeModel(value) {
   if (!model.id || !model.provider || !model.displayName || !model.modelId) return null;
   if (
     model.connectionStatus === "connected"
-    && model.testedFingerprint !== connectionFingerprint(model.baseUrl, model.modelId, "")
+    && !matchesConnectionFingerprint(
+      model.testedFingerprint,
+      model.baseUrl,
+      model.modelId,
+    )
   ) {
     model.connectionStatus = "changed";
   }

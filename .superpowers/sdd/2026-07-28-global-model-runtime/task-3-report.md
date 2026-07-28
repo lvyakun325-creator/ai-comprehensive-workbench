@@ -71,3 +71,55 @@ Implementation commit: `524c77402adc206b54b127f8feeaa782fdeeade3` (`feat: build 
 - Browser local storage is intentionally not hardware-backed encryption and remains readable by any script that gains execution in the same origin; the UI now states this directly.
 - APINebula browser-direct success still depends on the provider's live CORS policy and browser network conditions. A provider-side CORS change will surface as a connection failure rather than falling back to the server proxy.
 - This task does not implement real home chat; that remains the separately scoped Task 4.
+
+---
+
+## Fix round 1 — stale probes and credential revisions
+
+### Status
+
+DONE
+
+### Fix summary
+
+- Every text and image connection probe now owns an `AbortController`, an opaque request token, the exact credential revision, and the complete connection fingerprint.
+- Editing connection fields, replacing or clearing a Key, retesting, deleting, saving, canceling, leaving model settings, and unmounting all abort the affected probe. A stale completion must also pass token, revision, and fingerprint checks before it can write status, configuration, or credentials.
+- Retest remains available while a request is active; the newer request aborts and supersedes the older request.
+- Added persistent opaque text/image credential revisions. Blank drafts retain the prior revision, replacement and clear generate a new revision, and cancel can restore or remove the exact baseline revision.
+- Successful connection fingerprints now bind Base URL, model ID, and opaque credential revision without including credential material.
+- Cancel now restores credentials, credential revisions, deleted models, newly added models, image configuration, and the original default model.
+- Updated the legacy content-matrix UI assertion to the current global settings heading.
+
+### RED / GREEN evidence
+
+| Cycle | RED evidence | GREEN evidence |
+| --- | --- | --- |
+| Credential revisions | `npx tsx --test --test-name-pattern="opaque credential revisions" tests/model-registry-provider.test.tsx` failed because the Provider returned `missing`. | The same focused test passed after adding persistent opaque revisions and public revision accessors. |
+| Fingerprint normalization | `npx tsx --test --test-name-pattern="opaque credential revision" tests/model-registry.test.mjs` failed because a valid revision-bound fingerprint normalized to `changed`. | The same test passed after validating the fingerprint structure and matching its Base URL and model ID while retaining the opaque revision. |
+| Deferred probe races | The focused stale/retest/cancel/delete/unmount suite failed 7/7: proxy requests had no abort signal, a second test could not start, and stale successes or failures could overwrite current state. | The expanded focused suite passed 8/8, including full cancel restoration. |
+| Full cancel restoration | `npx tsx --test --test-name-pattern="cancel fully restores" tests/workbench-ui.test.tsx` failed because original revisions were regenerated and a newly added model left an orphan revision. | The same test passed after exact baseline revision restoration and explicit removal of revisions for canceled additions. |
+
+### Final verification
+
+```bash
+npm test
+```
+
+Result: production build completed and all 177 tests passed with 0 failures.
+
+```bash
+npm run lint
+```
+
+Result: 0 errors. The same three existing unused-variable warnings remain in `tests/model-registry.test.mjs`.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+### Remaining concerns
+
+- Credential storage remains origin-readable browser storage, not hardware-backed encryption; the existing UI disclosure remains accurate.
+- The opaque revision is a connection-validity token, not an encryption key or credential hash.

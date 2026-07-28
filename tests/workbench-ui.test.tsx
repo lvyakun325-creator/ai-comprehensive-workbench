@@ -49,6 +49,16 @@ const { AgentTaskList } = await import("../app/components/AgentTaskList");
 const { default: Home } = await import("../app/page");
 const originalFetch = globalThis.fetch;
 
+function deferredValue<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 const createdMarkdownBlobs: Array<{ blob: Blob; url: string }> = [];
 const revokedMarkdownUrls: string[] = [];
 const clickedDownloadAnchors: HTMLAnchorElement[] = [];
@@ -942,6 +952,307 @@ test("global text model test uses the safe proxy and only connected drafts can b
     },
   });
   assert.equal((enabled as HTMLInputElement).disabled, false);
+  await waitFor(() => {
+    const revisions = JSON.parse(
+      window.localStorage.getItem(
+        "ai-workbench:model-credential-revisions:v1",
+      ) ?? "{}",
+    );
+    const storedModels = JSON.parse(
+      window.localStorage.getItem("ai-workbench:model-registry:v2") ?? "[]",
+    );
+    const storedModel = storedModels.find(
+      (model: { id: string }) => model.id === "openai-gpt-5-6",
+    );
+    assert.ok(revisions["openai-gpt-5-6"]);
+    assert.deepEqual(JSON.parse(storedModel.testedFingerprint), [
+      "https://api.openai.com/v1",
+      "gpt-5.6",
+      revisions["openai-gpt-5-6"],
+    ]);
+    assert.doesNotMatch(storedModel.testedFingerprint, /sk-fake-proxy-key/);
+  });
+});
+
+test("editing a text connection aborts its probe and ignores the stale success", async () => {
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("文案模型 API Key"), "sk-stale-text-edit");
+  await user.type(screen.getByLabelText("文案接口地址"), "https://api.openai.com/v1");
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await waitFor(() => assert.ok(requestSignal));
+
+  await user.type(screen.getByLabelText("文案模型名称"), "-changed");
+  pending.resolve(Response.json({ ok: true }));
+
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+      "配置已变更",
+    );
+  });
+  assert.equal(requestSignal?.aborted, true);
+  assert.doesNotMatch(
+    window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "",
+    /sk-stale-text-edit/,
+  );
+});
+
+test("canceling a text draft aborts its probe and restores the prior credential", async () => {
+  window.localStorage.setItem(
+    "ai-workbench:model-credentials:v1",
+    JSON.stringify({ "openai-gpt-5-6": "sk-original-text" }),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credential-revisions:v1",
+    JSON.stringify({ "openai-gpt-5-6": "revision-original-text" }),
+  );
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("文案模型 API Key"), "sk-stale-cancel");
+  await user.type(screen.getByLabelText("文案接口地址"), "https://api.openai.com/v1");
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.click(screen.getByRole("button", { name: "取消" }));
+  pending.resolve(Response.json({ ok: true }));
+
+  await waitFor(() => {
+    assert.deepEqual(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "{}",
+      ),
+      { "openai-gpt-5-6": "sk-original-text" },
+    );
+  });
+  assert.equal(requestSignal?.aborted, true);
+});
+
+test("cancel fully restores credentials, deletion, addition, and the default model", async () => {
+  const originalModels = [
+    {
+      id: "model-alpha",
+      provider: "OpenAI",
+      displayName: "Alpha",
+      modelId: "alpha-1",
+      baseUrl: "https://api.alpha.example/v1",
+      enabled: true,
+      isDefault: true,
+      connectionStatus: "connected",
+      testedFingerprint:
+        "[\"https://api.alpha.example/v1\",\"alpha-1\",\"revision-alpha\"]",
+    },
+    {
+      id: "model-beta",
+      provider: "OpenAI",
+      displayName: "Beta",
+      modelId: "beta-1",
+      baseUrl: "https://api.beta.example/v1",
+      enabled: true,
+      isDefault: false,
+      connectionStatus: "connected",
+      testedFingerprint:
+        "[\"https://api.beta.example/v1\",\"beta-1\",\"revision-beta\"]",
+    },
+  ];
+  const originalCredentials = {
+    "model-alpha": "sk-original-alpha",
+    "model-beta": "sk-original-beta",
+  };
+  const originalRevisions = {
+    "model-alpha": "revision-alpha",
+    "model-beta": "revision-beta",
+  };
+  window.localStorage.setItem(
+    "ai-workbench:model-registry:v2",
+    JSON.stringify(originalModels),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credentials:v1",
+    JSON.stringify(originalCredentials),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credential-revisions:v1",
+    JSON.stringify(originalRevisions),
+  );
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.click(screen.getByRole("button", { name: "删除 Alpha" }));
+  await user.click(screen.getByRole("radio", { name: "设为默认" }));
+  await user.type(
+    within(screen.getByRole("heading", { name: "Beta" }).closest("article")!)
+      .getByLabelText("文案模型 API Key"),
+    "sk-replacement-beta",
+  );
+
+  await user.click(screen.getByRole("button", { name: "添加文案模型" }));
+  const newModelCard = screen
+    .getByRole("heading", { name: "新增文案模型" })
+    .closest("article");
+  assert.ok(newModelCard);
+  const newModel = within(newModelCard);
+  await user.type(newModel.getByLabelText("服务商"), "Example");
+  await user.type(newModel.getByLabelText("模型显示名称"), "Gamma");
+  await user.type(newModel.getByLabelText("文案模型 API Key"), "sk-new-gamma");
+  await user.type(
+    newModel.getByLabelText("文案接口地址"),
+    "https://api.gamma.example/v1",
+  );
+  await user.type(newModel.getByLabelText("文案模型名称"), "gamma-1");
+  await user.click(newModel.getByRole("button", { name: "添加模型" }));
+  assert.ok(screen.getByRole("heading", { name: "Gamma" }));
+
+  await user.click(screen.getByRole("button", { name: "取消" }));
+
+  await waitFor(() => {
+    assert.ok(screen.getByRole("heading", { name: "Alpha" }));
+    assert.ok(screen.getByRole("heading", { name: "Beta" }));
+    assert.equal(screen.queryByRole("heading", { name: "Gamma" }), null);
+    assert.deepEqual(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "{}",
+      ),
+      originalCredentials,
+    );
+    assert.deepEqual(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:model-credential-revisions:v1") ?? "{}",
+      ),
+      originalRevisions,
+    );
+    const restoredModels = JSON.parse(
+      window.localStorage.getItem("ai-workbench:model-registry:v2") ?? "[]",
+    );
+    assert.deepEqual(
+      restoredModels.map((model: { id: string }) => model.id),
+      ["model-alpha", "model-beta"],
+    );
+    assert.equal(
+      restoredModels.find((model: { id: string }) => model.id === "model-alpha")
+        ?.isDefault,
+      true,
+    );
+  });
+});
+
+test("deleting a tested text draft cannot leave an orphan credential", async () => {
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("文案模型 API Key"), "sk-orphan-text");
+  await user.type(screen.getByLabelText("文案接口地址"), "https://api.openai.com/v1");
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.click(screen.getByRole("button", { name: "删除 GPT-5.6" }));
+  await user.click(screen.getByRole("button", { name: "保存设置" }));
+  pending.resolve(Response.json({ ok: true }));
+
+  await waitFor(() => {
+    assert.deepEqual(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "{}",
+      ),
+      {},
+    );
+    assert.deepEqual(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:model-registry:v2") ?? "[]",
+      ),
+      [],
+    );
+  });
+  assert.equal(requestSignal?.aborted, true);
+});
+
+test("a newer text probe wins and an older failure cannot overwrite it", async () => {
+  const first = deferredValue<Response>();
+  const second = deferredValue<Response>();
+  const requestSignals: AbortSignal[] = [];
+  let callCount = 0;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignals.push(init?.signal as AbortSignal);
+    callCount += 1;
+    return callCount === 1 ? first.promise : second.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("文案模型 API Key"), "sk-retest-text");
+  await user.type(screen.getByLabelText("文案接口地址"), "https://api.openai.com/v1");
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await waitFor(() => assert.equal(callCount, 1));
+  await user.click(screen.getByRole("button", { name: /正在测试|重新测试/ }));
+  await waitFor(() => assert.equal(callCount, 2));
+
+  second.resolve(Response.json({ ok: true }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+  first.resolve(
+    Response.json({ ok: false, message: "旧请求失败" }, { status: 401 }),
+  );
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+  assert.equal(requestSignals[0]?.aborted, true);
+});
+
+test("leaving model settings aborts a text probe before its stale success", async () => {
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("文案模型 API Key"), "sk-unmounted-text");
+  await user.type(screen.getByLabelText("文案接口地址"), "https://api.openai.com/v1");
+  await user.click(screen.getByRole("button", { name: "测试文案模型" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+  pending.resolve(Response.json({ ok: true }));
+
+  await waitFor(() => {
+    assert.doesNotMatch(
+      window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "",
+      /sk-unmounted-text/,
+    );
+  });
+  assert.equal(requestSignal?.aborted, true);
 });
 
 test("global image model test checks the model list without generating an image", async () => {
@@ -976,6 +1287,92 @@ test("global image model test checks the model list without generating an image"
   assert.deepEqual(requestedUrls, ["/api/models/test-image"]);
   assert.equal(requestedUrls.some((url) => url.includes("/images/generations")), false);
   assert.equal((enabled as HTMLInputElement).disabled, false);
+});
+
+test("editing or canceling an image draft aborts and ignores stale image probes", async () => {
+  const editPending = deferredValue<Response>();
+  const cancelPending = deferredValue<Response>();
+  const requestSignals: AbortSignal[] = [];
+  let callCount = 0;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignals.push(init?.signal as AbortSignal);
+    callCount += 1;
+    return callCount === 1 ? editPending.promise : cancelPending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("生图模型 API Key"), "sk-stale-image-edit");
+  await user.type(screen.getByLabelText("生图接口地址"), "https://api.openai.com/v1");
+  await user.type(screen.getByLabelText("生图模型名称"), "image-old");
+  await user.click(screen.getByRole("button", { name: "测试生图模型" }));
+  await waitFor(() => assert.equal(callCount, 1));
+  await user.type(screen.getByLabelText("生图模型名称"), "-changed");
+  editPending.resolve(Response.json({ ok: true }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "配置已变更",
+    );
+  });
+  assert.equal(requestSignals[0]?.aborted, true);
+
+  await user.click(screen.getByRole("button", { name: /正在测试|测试生图模型/ }));
+  await waitFor(() => assert.equal(callCount, 2));
+  await user.click(screen.getByRole("button", { name: "取消" }));
+  cancelPending.resolve(Response.json({ ok: true }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "未测试",
+    );
+  });
+  assert.equal(requestSignals[1]?.aborted, true);
+  assert.doesNotMatch(
+    window.localStorage.getItem("ai-workbench:image-model-credential:v1") ?? "",
+    /sk-stale-image-edit/,
+  );
+});
+
+test("a newer image probe wins and an older failure cannot overwrite it", async () => {
+  const first = deferredValue<Response>();
+  const second = deferredValue<Response>();
+  const requestSignals: AbortSignal[] = [];
+  let callCount = 0;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignals.push(init?.signal as AbortSignal);
+    callCount += 1;
+    return callCount === 1 ? first.promise : second.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("生图模型 API Key"), "sk-retest-image");
+  await user.type(screen.getByLabelText("生图接口地址"), "https://api.openai.com/v1");
+  await user.type(screen.getByLabelText("生图模型名称"), "image-retest");
+  await user.click(screen.getByRole("button", { name: "测试生图模型" }));
+  await waitFor(() => assert.equal(callCount, 1));
+  await user.click(screen.getByRole("button", { name: /正在测试|重新测试/ }));
+  await waitFor(() => assert.equal(callCount, 2));
+  second.resolve(Response.json({ ok: true }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+  first.resolve(
+    Response.json({ ok: false, message: "旧图像请求失败" }, { status: 401 }),
+  );
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+  assert.equal(requestSignals[0]?.aborted, true);
 });
 
 test("APINebula text testing uses the exact browser-direct chat probe", async () => {

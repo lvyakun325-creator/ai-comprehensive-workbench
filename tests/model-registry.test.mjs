@@ -55,6 +55,26 @@ test("marks a connected model changed when its connection address or model chang
   );
 });
 
+test("keeps an opaque credential revision bound to matching connection metadata", () => {
+  const connected = {
+    ...DEFAULT_MODELS[0],
+    baseUrl: "https://models.example.test/v1",
+    modelId: "gpt-tested",
+    connectionStatus: "connected",
+    testedFingerprint: connectionFingerprint(
+      "https://models.example.test/v1",
+      "gpt-tested",
+      "revision-opaque-7f3a",
+    ),
+  };
+
+  assert.equal(normalizeModels([connected])[0].connectionStatus, "connected");
+  assert.equal(
+    normalizeModels([{ ...connected, modelId: "gpt-changed" }])[0].connectionStatus,
+    "changed",
+  );
+});
+
 test("only enabled connected models are available to callers", () => {
   const models = [
     {
