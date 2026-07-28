@@ -52,3 +52,35 @@ Implementation commit: `51f097a1e74ab319b6f042188a7b72ba33570412` (`feat: persis
 ## Remaining concern
 
 Browser `localStorage` is intentionally used by the approved design, but it is not hardware-backed encryption and is readable by code executing in the same page origin. The settings UI in a later task should present that boundary clearly; this Task 1 implementation does not add UI copy.
+
+## Fix round 1 — review corrections
+
+Status: DONE_WITH_CONCERNS
+
+### Fixed findings
+
+- `maskCredential` now returns the fixed mask `••••` for every valid Key of length 1–3. This prevents a one-, two-, or three-character Key from appearing verbatim in the UI.
+- Added the controlled `saveModelConfig(id, draft)` Provider API for an existing text model. It persists `baseUrl`, `modelId`, `connectionStatus`, and `testedFingerprint`; rejects empty connection fields and duplicate provider/model outcomes; clears the fingerprint and changes a previously connected model to `changed` when its URL or model ID is edited. A subsequent successful test result can persist `connected` plus its current fingerprint.
+
+### TDD evidence
+
+| Finding | New coverage | RED command and observed failure | GREEN command and result |
+| --- | --- | --- | --- |
+| Short Key masking | `tests/model-credential-store.test.mjs` — `masks every character of credentials too short to safely preserve a prefix` | `npx tsx --test tests/model-credential-store.test.mjs` failed: actual `a…`, expected fixed `••••`. | The same command passed: 3 tests, 0 failures. |
+| Text draft save and invalidation | `tests/model-registry-provider.test.tsx` — `saves text connection metadata and invalidates a changed successful configuration` | `npx tsx --test tests/model-registry-provider.test.tsx` failed: `saveModelConfig is not a function`, with unchanged connected metadata. | The same command passed: 7 tests, 0 failures. |
+
+### Verification
+
+```bash
+npx tsx --test tests/model-credential-store.test.mjs tests/model-registry.test.mjs tests/model-registry-provider.test.tsx
+```
+
+Result: 20 tests passed, 0 failed, 0 skipped.
+
+```bash
+npm run build
+```
+
+Result: Vinext production build completed successfully; the existing dynamic-route static-analysis notice remained informational only.
+
+Fix implementation commit: `1c9046c15d4c269c9503b718b99ae6df0b782686` (`fix: preserve model credential masking and drafts`).
