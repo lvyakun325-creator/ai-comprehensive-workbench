@@ -94,3 +94,88 @@ Implementation commit: `0fd43bf58c31f6c0c6b5c58200030a91fbd56bc4` (`feat: add sa
 - This runtime blocks private and local IP literals but does not perform DNS resolution or pinning, so a malicious public hostname that later resolves to a private address remains a DNS-rebinding/SSRF concern. A network-layer egress policy or resolver-aware proxy is required for a complete defense.
 - API Keys are necessarily present in server-process memory and outbound Authorization headers for the duration of a request. Logging and observability layers outside this runtime must continue to avoid request-header/body capture.
 - The repository-wide TypeScript command has unrelated existing failures as listed above; Task 2 did not expand scope to repair them.
+
+## Fix round 1 — SSRF and unbounded upstream-response corrections
+
+### Status
+
+FIX_ROUND_1_COMPLETE_PENDING_REVIEW
+
+### Findings addressed
+
+1. **Critical — SSRF / DNS rebinding:** Server-side proxying now uses an exact trusted-host allowlist containing only `api.openai.com`, on HTTPS default port 443. It does not perform a DNS preflight and therefore does not introduce a DNS-check/fetch TOCTOU window. Arbitrary public-looking domains, single-label names, `.local`, private/special IP literals, lookalike subdomains, non-standard ports, DNS-rebinding representative names, and `apinebula.ai` are rejected before fetch. APINebula remains eligible only for the existing exact HTTPS browser-direct matcher.
+2. **Important — unbounded provider response/cost:** Provider JSON is now streamed through a 256 KiB byte limit and the unread stream is canceled on overflow. Normalized model lists are limited to 1,000 entries with 200-character model IDs; parsed chat replies are limited to 24,000 characters; chat requests explicitly set `max_tokens: 2048`. Every overflow maps to fixed safe `PROVIDER_RESPONSE_TOO_LARGE` output without Key or provider-body content.
+
+### TDD evidence
+
+| Cycle | Coverage added before production change | RED command and observed failure | GREEN command and result |
+| --- | --- | --- | --- |
+| Trusted proxy egress | `tests/global-model-runtime.test.mjs`: `.local`, single-label, 172.16/12, 169.254/16, IPv6 ULA/link-local/multicast, IPv4-mapped private IPv6, DNS-rebinding representative host, OpenAI lookalike, APINebula server-proxy rejection | `npx tsx --test tests/global-model-runtime.test.mjs` failed because a rejected host reached fetch and produced `INVALID_PROVIDER_RESPONSE` instead of `UNSAFE_URL`. | Same command passed after the exact `api.openai.com` allowlist was added: 11 passed, 0 failed at this cycle. |
+| Exact trusted origin port | `tests/global-model-runtime.test.mjs`: `https://api.openai.com:8443/v1` rejection | Runtime command failed because the non-standard port reached fetch and produced `INVALID_PROVIDER_RESPONSE`. | Same command passed after non-default ports were rejected: 15 passed, 0 failed. |
+| Explicit chat output cost | `tests/global-model-runtime.test.mjs`: forwarded chat body includes literal `max_tokens: 2048` | Runtime command failed with a deep-equality diff showing `max_tokens` was absent. | Runtime command passed after the fixed output budget was added. |
+| Raw upstream response bytes and cancellation | `tests/global-model-runtime.test.mjs`: 600 KiB streamed provider JSON; `tests/global-model-route.test.mjs`: safe route overflow response | Runtime RED reported “Missing expected rejection”; route RED returned status 200 instead of 502. | Runtime and route commands passed after 256 KiB incremental reading, active cancellation, and fixed safe error mapping. |
+| Model-list cardinality and field bounds | `tests/global-model-runtime.test.mjs`: 1,001 entries and 201-character model ID | Runtime RED reported missing rejection for entry count and `MODEL_NOT_FOUND` instead of a size error for the oversized ID. | Runtime command passed after 1,000-entry and 200-character ID limits. |
+| Parsed chat reply length | `tests/global-model-runtime.test.mjs`: reply over 24,000 characters containing a fake Key | Runtime RED reported “Missing expected rejection.” | Runtime command passed after the reply-length limit; the error remained fixed and redacted. |
+
+### Verification
+
+Coverage files:
+
+- `tests/global-model-runtime.test.mjs`
+- `tests/global-model-route.test.mjs`
+
+```bash
+npx tsx --test tests/global-model-runtime.test.mjs
+```
+
+Final result: 15 tests passed, 0 failed, 0 skipped.
+
+```bash
+npx tsx --test tests/global-model-route.test.mjs
+```
+
+Final result: 8 tests passed, 0 failed, 0 skipped.
+
+```bash
+npx tsx --test tests/global-model-runtime.test.mjs tests/global-model-route.test.mjs
+```
+
+Final combined result: 23 tests passed, 0 failed, 0 skipped.
+
+```bash
+npm run build
+```
+
+Result: Vinext production build completed successfully and listed all three model API routes. The existing dynamic-route static-analysis notice remained informational.
+
+```bash
+npm run lint
+```
+
+Result: 0 errors. The same three existing warnings remain in `tests/model-registry.test.mjs`; no Task 2 file has a lint warning.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+### Commit
+
+Fix implementation commit: `83218db6324addaba94a7030c6c363182c0ff32e` (`fix: harden global model proxy boundaries`).
+
+### Self-review
+
+- The SSRF boundary no longer depends on attacker-controlled DNS resolving to a public address before fetch. Only one explicitly trusted hostname and default HTTPS port can enter the server fetch path.
+- Exact-host tests fail for lookalikes and arbitrary rebinding representatives; APINebula cannot enter the server proxy even though its exact HTTPS origin remains browser-direct eligible.
+- The 256 KiB raw limit is enforced incrementally without trusting `Content-Length`; declared oversized responses are also canceled before reading.
+- Provider JSON is accumulated only up to the byte ceiling. Model-list cardinality/ID and reply-length limits are enforced after parsing but before membership success or chat return.
+- Oversized response errors contain only a fixed code/message; route coverage confirms the fake Key, provider raw text, and endpoint are absent.
+- Mutation check: wildcarding the allowlist, accepting non-standard ports, removing the raw byte check/cancel, increasing cardinality/field/reply values beyond tested boundaries, dropping `max_tokens`, or returning provider overflow text would fail focused coverage.
+- Implementation commit scope contains only `app/lib/global-model-runtime.ts`, `tests/global-model-runtime.test.mjs`, and `tests/global-model-route.test.mjs`.
+
+### Remaining concerns
+
+- Adding any new server-side provider requires an explicit exact hostname addition after ownership and official endpoint verification; arbitrary custom OpenAI-compatible proxy URLs are intentionally unsupported by the safe server route.
+- Browser-direct APINebula credentials remain subject to browser-origin and CORS behavior outside this server runtime.
+- Repository-wide TypeScript errors recorded in the original report remain unrelated and unchanged.
