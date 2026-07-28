@@ -16,6 +16,7 @@ export function createTestImageRoute(
       await testImageConnection(input.config as GlobalImageConfig, {
         ...options,
         signal: request.signal,
+        egressMode: "server-proxy",
       });
       return noStoreJson({ ok: true });
     } catch (error) {

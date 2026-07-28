@@ -150,6 +150,61 @@ test("default POST exports reject unsafe URLs before contacting a provider", asy
   }
 });
 
+test("all API routes force server-proxy mode and cannot be switched to APINebula direct", async () => {
+  let calls = 0;
+  const fetchImpl = async (url) => {
+    calls += 1;
+    if (String(url).endsWith("/models")) {
+      return Response.json({
+        object: "list",
+        data: [{ id: "gpt-example", object: "model" }],
+      });
+    }
+    return Response.json({
+      choices: [{ message: { role: "assistant", content: "不应调用" } }],
+    });
+  };
+  const apinebulaConfig = config({
+    baseUrl: "https://apinebula.ai/v1",
+  });
+  const cases = [
+    [
+      createTestTextRoute({ fetchImpl, egressMode: "browser-direct" }),
+      request("/api/models/test-text", {
+        config: apinebulaConfig,
+        egressMode: "browser-direct",
+      }),
+    ],
+    [
+      createTestImageRoute({ fetchImpl, egressMode: "browser-direct" }),
+      request("/api/models/test-image", {
+        config: apinebulaConfig,
+        egressMode: "browser-direct",
+      }),
+    ],
+    [
+      createChatRoute({ fetchImpl, egressMode: "browser-direct" }),
+      request("/api/models/chat", {
+        config: apinebulaConfig,
+        turns: [{ role: "user", content: "hello" }],
+        egressMode: "browser-direct",
+      }),
+    ],
+  ];
+
+  for (const [handler, input] of cases) {
+    const response = await handler(input);
+    assert.equal(response.status, 400);
+    assertSafeJsonResponse(response);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      code: "UNSAFE_URL",
+      message: "接口地址必须是安全的 HTTPS 公网地址。",
+    });
+  }
+  assert.equal(calls, 0);
+});
+
 test("routes reject malformed JSON and oversized bodies without calling the provider", async () => {
   let calls = 0;
   const fetchImpl = async () => {

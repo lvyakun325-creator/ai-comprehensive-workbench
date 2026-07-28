@@ -16,6 +16,7 @@ export function createTestTextRoute(
       await testTextConnection(input.config as GlobalTextConfig, {
         ...options,
         signal: request.signal,
+        egressMode: "server-proxy",
       });
       return noStoreJson({ ok: true });
     } catch (error) {

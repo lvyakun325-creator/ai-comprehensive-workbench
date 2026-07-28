@@ -57,7 +57,103 @@ test("APINebula direct routing requires the exact HTTPS hostname", () => {
     false,
   );
   assert.equal(usesBrowserDirectModelRoute("http://apinebula.ai/v1"), false);
+  assert.equal(
+    usesBrowserDirectModelRoute("https://apinebula.ai:8443/v1"),
+    false,
+  );
+  assert.equal(
+    usesBrowserDirectModelRoute("https://apinebula.ai/v1?target=evil"),
+    false,
+  );
+  assert.equal(
+    usesBrowserDirectModelRoute("https://apinebula.ai/v1#fragment"),
+    false,
+  );
   assert.equal(usesBrowserDirectModelRoute("not a URL"), false);
+});
+
+test("browser-direct text probe reaches only the fixed APINebula chat endpoint", async () => {
+  let captured;
+  await testTextConnection(
+    textConfig({
+      baseUrl: "https://apinebula.ai/v1/",
+      model: "gpt-5.5",
+    }),
+    {
+      egressMode: "browser-direct",
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), init };
+        return jsonResponse({
+          choices: [
+            { message: { role: "assistant", content: "连接正常" } },
+          ],
+        });
+      },
+    },
+  );
+
+  assert.equal(captured.url, "https://apinebula.ai/v1/chat/completions");
+  assert.equal(captured.init.redirect, "error");
+  assert.deepEqual(JSON.parse(captured.init.body), {
+    model: "gpt-5.5",
+    messages: [{ role: "user", content: "只回复：连接正常" }],
+    max_tokens: 16,
+  });
+});
+
+test("browser-direct image probe reaches only the fixed APINebula models endpoint", async () => {
+  let captured;
+  await testImageConnection(
+    textConfig({
+      baseUrl: "https://apinebula.ai/v1",
+      model: "flux-pro",
+    }),
+    {
+      egressMode: "browser-direct",
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), init };
+        return jsonResponse({
+          object: "list",
+          data: [{ id: "flux-pro", object: "model" }],
+        });
+      },
+    },
+  );
+
+  assert.equal(captured.url, "https://apinebula.ai/v1/models");
+  assert.equal(captured.init.method, "GET");
+  assert.equal(captured.init.redirect, "error");
+});
+
+test("browser-direct chat reaches only the fixed APINebula chat endpoint", async () => {
+  let captured;
+  const reply = await generateChatReply(
+    textConfig({
+      baseUrl: "https://apinebula.ai/v1",
+      model: "gpt-5.5",
+    }),
+    [{ role: "user", content: "你好" }],
+    {
+      egressMode: "browser-direct",
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), init };
+        return jsonResponse({
+          choices: [
+            { message: { role: "assistant", content: "你好" } },
+          ],
+        });
+      },
+    },
+  );
+
+  assert.equal(captured.url, "https://apinebula.ai/v1/chat/completions");
+  assert.equal(captured.init.redirect, "error");
+  assert.deepEqual(JSON.parse(captured.init.body), {
+    model: "gpt-5.5",
+    messages: [{ role: "user", content: "你好" }],
+    max_tokens: 2048,
+  });
+  assert.equal(reply, "你好");
 });
 
 test("runtime rejects non-public URLs and control characters before fetching", async () => {

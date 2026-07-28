@@ -18,6 +18,7 @@ export function createChatRoute(options: GlobalModelRuntimeOptions = {}) {
         {
           ...options,
           signal: request.signal,
+          egressMode: "server-proxy",
         },
       );
       return noStoreJson({ ok: true, reply });

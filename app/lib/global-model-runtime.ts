@@ -17,10 +17,13 @@ export type ChatTurn = {
 
 type Fetch = typeof fetch;
 
+export type GlobalModelEgressMode = "server-proxy" | "browser-direct";
+
 export type GlobalModelRuntimeOptions = {
   fetchImpl?: Fetch;
   timeoutMs?: number;
   signal?: AbortSignal;
+  egressMode?: GlobalModelEgressMode;
 };
 
 const TEXT_TEST_PATH = ["chat", "completions"] as const;
@@ -104,8 +107,11 @@ export function usesBrowserDirectModelRoute(baseUrl: string): boolean {
     return (
       url.protocol === "https:"
       && url.hostname.toLowerCase() === "apinebula.ai"
+      && url.port === ""
       && url.username === ""
       && url.password === ""
+      && url.search === ""
+      && url.hash === ""
     );
   } catch {
     return false;
@@ -116,7 +122,7 @@ export async function testTextConnection(
   config: GlobalTextConfig,
   options: GlobalModelRuntimeOptions = {},
 ): Promise<void> {
-  const validConfig = validateConfig(config);
+  const validConfig = validateConfig(config, resolveEgressMode(options.egressMode));
   const body = await fetchProviderJson(
     buildRequest(validConfig, TEXT_TEST_PATH, {
       method: "POST",
@@ -136,7 +142,7 @@ export async function testImageConnection(
   config: GlobalImageConfig,
   options: GlobalModelRuntimeOptions = {},
 ): Promise<void> {
-  const validConfig = validateConfig(config);
+  const validConfig = validateConfig(config, resolveEgressMode(options.egressMode));
   const body = await fetchProviderJson(
     buildRequest(validConfig, IMAGE_TEST_PATH, {
       method: "GET",
@@ -155,7 +161,7 @@ export async function generateChatReply(
   turns: ChatTurn[],
   options: GlobalModelRuntimeOptions = {},
 ): Promise<string> {
-  const validConfig = validateConfig(config);
+  const validConfig = validateConfig(config, resolveEgressMode(options.egressMode));
   const validTurns = validateTurns(turns);
   const body = await fetchProviderJson(
     buildRequest(validConfig, CHAT_PATH, {
@@ -269,7 +275,10 @@ type ValidatedConfig = GlobalTextConfig & {
   baseUrl: string;
 };
 
-function validateConfig(input: unknown): ValidatedConfig {
+function validateConfig(
+  input: unknown,
+  egressMode: GlobalModelEgressMode,
+): ValidatedConfig {
   if (!isRecord(input)) {
     throw new SafeModelError("INVALID_CONFIG");
   }
@@ -297,10 +306,16 @@ function validateConfig(input: unknown): ValidatedConfig {
   }
 
   return {
-    baseUrl: validatePublicBaseUrl(baseUrl),
+    baseUrl: validatePublicBaseUrl(baseUrl, egressMode),
     apiKey,
     model,
   };
+}
+
+function resolveEgressMode(value: unknown): GlobalModelEgressMode {
+  if (value === undefined) return "server-proxy";
+  if (value === "server-proxy" || value === "browser-direct") return value;
+  throw new SafeModelError("INVALID_CONFIG");
 }
 
 function validateTurns(input: unknown): ChatTurn[] {
@@ -337,7 +352,10 @@ function validateTurns(input: unknown): ChatTurn[] {
   });
 }
 
-function validatePublicBaseUrl(value: string): string {
+function validatePublicBaseUrl(
+  value: string,
+  egressMode: GlobalModelEgressMode,
+): string {
   let url: URL;
   try {
     url = new URL(value);
@@ -352,7 +370,15 @@ function validatePublicBaseUrl(value: string): string {
     || url.search !== ""
     || url.hash !== ""
     || !url.hostname
-    || !TRUSTED_PROXY_HOSTNAMES.has(url.hostname.toLowerCase())
+  ) {
+    throw new SafeModelError("UNSAFE_URL");
+  }
+  if (egressMode === "browser-direct") {
+    if (!usesBrowserDirectModelRoute(url.toString())) {
+      throw new SafeModelError("UNSAFE_URL");
+    }
+  } else if (
+    !TRUSTED_PROXY_HOSTNAMES.has(url.hostname.toLowerCase())
     || isBlockedHostname(url.hostname)
   ) {
     throw new SafeModelError("UNSAFE_URL");
