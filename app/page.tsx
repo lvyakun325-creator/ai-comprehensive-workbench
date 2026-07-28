@@ -7,6 +7,7 @@ import { AgentWorkspace } from "./components/AgentWorkspace";
 import { AssetLibrary } from "./components/AssetLibrary";
 import { DataOverview } from "./components/DataOverview";
 import { ModelConfigPanel } from "./components/ModelConfigPanel";
+import { ModelRegistryProvider } from "./components/ModelRegistryProvider";
 import { PreviewToast } from "./components/PreviewToast";
 import { TaskCenter } from "./components/TaskCenter";
 import { WorkbenchShell } from "./components/WorkbenchShell";
@@ -27,6 +28,14 @@ const VIEW_LABELS: Record<Exclude<WorkbenchView, "control" | "settings">, string
 };
 
 export default function Home() {
+  return (
+    <ModelRegistryProvider>
+      <WorkbenchHome />
+    </ModelRegistryProvider>
+  );
+}
+
+function WorkbenchHome() {
   const [state, setState] = useState(createInitialState());
   const [toast, setToast] = useState("");
 
