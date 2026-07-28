@@ -1597,6 +1597,108 @@ button {
   margin-top: 14px;
 }
 
+.model-config-form {
+  margin-top: 28px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.model-config-form label {
+  display: grid;
+  gap: 7px;
+  color: #536074;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.model-config-form input:not([type="checkbox"]) {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 11px;
+  border: 1px solid #d9e0eb;
+  border-radius: 10px;
+  background: #fff;
+  color: #344258;
+}
+
+.model-config-form .model-enabled-toggle {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.model-config-form button,
+.model-state-actions button {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid #cfd9e8;
+  border-radius: 10px;
+  background: #fff;
+  color: #45556d;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.model-config-form button {
+  border-color: #4f75d5;
+  background: #4f75d5;
+  color: #fff;
+}
+
+.configured-model-list {
+  margin: 24px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+  list-style: none;
+}
+
+.configured-model-row {
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #dfe5ef;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.86);
+}
+
+.configured-model-row > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.configured-model-row strong {
+  color: #35445a;
+  font-size: 14px;
+}
+
+.configured-model-row span {
+  color: #778499;
+  font-size: 12px;
+}
+
+.model-state-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.model-state-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 @keyframes toast-in {
   from {
     transform: translate(-50%, 8px);
@@ -1798,6 +1900,24 @@ button {
 
   .config-panel {
     padding: 24px 18px;
+  }
+
+  .model-config-form {
+    grid-template-columns: 1fr;
+  }
+
+  .configured-model-row,
+  .model-state-actions {
+    align-items: stretch;
+  }
+
+  .configured-model-row {
+    flex-direction: column;
+  }
+
+  .model-state-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 }
 

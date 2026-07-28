@@ -92,7 +92,42 @@ test("switches primary views and keeps system settings in the mobile navigation"
   assert.ok(screen.getByRole("heading", { name: "系统设置" }));
 });
 
-test("keeps Agent model choices isolated while content matrix opens its intake preview", async () => {
+test("model configuration adds an enabled model and rejects duplicate provider model IDs", async () => {
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("服务商"), "Anthropic");
+  await user.type(screen.getByLabelText("模型显示名称"), "Claude Sonnet");
+  await user.type(screen.getByLabelText("模型 ID"), "claude-sonnet");
+  await user.click(screen.getByRole("checkbox", { name: "添加后启用" }));
+  await user.click(screen.getByRole("button", { name: "添加模型" }));
+  assert.ok(screen.getByText("Claude Sonnet"));
+
+  await user.type(screen.getByLabelText("服务商"), "Anthropic");
+  await user.type(screen.getByLabelText("模型显示名称"), "Claude Sonnet 副本");
+  await user.type(screen.getByLabelText("模型 ID"), "claude-sonnet");
+  await user.click(screen.getByRole("button", { name: "添加模型" }));
+  assert.match(screen.getByRole("alert").textContent ?? "", /已存在/);
+
+  await user.click(screen.getByRole("button", { name: "停用 Claude Sonnet" }));
+  assert.match(
+    screen.getByRole("list", { name: "已配置模型" }).textContent ?? "",
+    /Claude Sonnet.*已停用/,
+  );
+
+  await user.click(screen.getByRole("button", { name: "Agent 项目" }));
+  await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
+  await user.click(screen.getByRole("button", { name: "Agent 配置" }));
+  assert.equal(screen.queryByRole("radio", { name: /Claude Sonnet/ }), null);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.click(screen.getByRole("button", { name: "删除 Claude Sonnet" }));
+  assert.equal(screen.queryByText("Claude Sonnet"), null);
+  assert.equal(screen.queryByLabelText(/api key|token|password|credential/i), null);
+});
+
+test("keeps content matrix configuration separate while other Agents select enabled global models", async () => {
   const user = userEvent.setup({ document });
   render(<Home />);
 
@@ -120,17 +155,10 @@ test("keeps Agent model choices isolated while content matrix opens its intake p
   await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
   await user.click(screen.getByRole("button", { name: "Agent 配置" }));
   assert.equal(
-    screen
-      .getByRole("button", { name: /OpenAI GPT 系列/ })
-      .getAttribute("aria-pressed"),
-    "true",
+    (screen.getByRole("radio", { name: /GPT-5\.6 OpenAI/ }) as HTMLInputElement).checked,
+    true,
   );
-  assert.equal(
-    screen
-      .getByRole("button", { name: /Anthropic Claude 系列/ })
-      .getAttribute("aria-pressed"),
-    "false",
-  );
+  assert.equal(screen.queryByRole("radio", { name: /Claude/ }), null);
 });
 
 test("content matrix Agent collects intake details before marking diagnostic materials ready", async () => {

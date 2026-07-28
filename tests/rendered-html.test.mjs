@@ -114,12 +114,18 @@ test("keeps the shell focused on the total-control preview", async () => {
   assert.match(modelConfigPanel, /scope: "global" \| "agent";/);
   assert.match(modelConfigPanel, /agentTitle\?: string;/);
   assert.match(modelConfigPanel, /onPreview: \(message: string\) => void;/);
-  assert.match(
-    modelConfigPanel,
-    /scope === "global" \? "全局可用模型" : `\$\{agentTitle\} · Agent 默认模型`/,
-  );
-  assert.match(modelConfigPanel, /密钥仅在后续接口阶段通过服务端保存，当前页面不收集、不显示。/);
-  assert.match(modelConfigPanel, /onPreview\("当前为设计预览，未填写或保存任何模型密钥"\);/);
+  assert.match(modelConfigPanel, /useModelRegistry/);
+  assert.match(modelConfigPanel, /<h2>全局可用模型<\/h2>/);
+  assert.match(modelConfigPanel, /agentTitle\} · Agent 默认模型/);
+  assert.match(modelConfigPanel, /className="model-config-form"/);
+  assert.match(modelConfigPanel, /className="configured-model-list"/);
+  assert.match(modelConfigPanel, /添加后启用/);
+  assert.match(modelConfigPanel, /role="alert"/);
+  assert.match(styles, /\.model-config-form\s*\{/);
+  assert.match(styles, /\.configured-model-list\s*\{/);
+  assert.match(styles, /\.configured-model-row\s*\{/);
+  assert.match(styles, /\.model-state-actions\s*\{/);
   const props = modelConfigPanel.match(/type ModelConfigPanelProps = \{([\s\S]*?)\n\};/)?.[1] ?? "";
-  assert.doesNotMatch(props, /api[_-]?key|token|credential/i);
+  assert.doesNotMatch(modelConfigPanel, /api[_-]?key|token|password|credential/i);
+  assert.doesNotMatch(props, /api[_-]?key|token|password|credential/i);
 });
