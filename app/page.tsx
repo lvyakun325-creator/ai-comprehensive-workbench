@@ -104,7 +104,9 @@ function WorkbenchHome() {
     return (
       <section className="design-preview">
         <span className="eyebrow">DESIGN PREVIEW</span>
-        <h1>{VIEW_LABELS[state.view]}</h1>
+        <h1>
+          {state.view === "agent" ? "Agent 项目" : VIEW_LABELS[state.view]}
+        </h1>
         <p>该模块将在对应功能阶段启用。</p>
       </section>
     );

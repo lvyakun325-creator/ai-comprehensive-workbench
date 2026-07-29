@@ -63,7 +63,7 @@ export function WorkbenchShell({
           <div className="top-actions">
             <div className="status-pill">
               <i />
-              本地设计预览
+              本地工作台运行中
             </div>
             <button className="ghost-button" onClick={() => onPreview("使用指南将在下一阶段接入")}>
               使用指南

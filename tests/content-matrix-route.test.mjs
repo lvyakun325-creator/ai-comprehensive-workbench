@@ -8,11 +8,12 @@ import {
 
 const FAKE_KEY = "sk-fake";
 
-function request(body) {
+function request(body, signal) {
   return new Request("https://workbench.example/api/agents/content-matrix", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
 }
 
@@ -20,7 +21,7 @@ function testPayload(overrides = {}) {
   return {
     action: "test",
     protocol: "openai-compatible",
-    baseUrl: "https://api.example.com/v1",
+    baseUrl: "https://api.openai.com/v1",
     apiKey: FAKE_KEY,
     model: "gpt-example",
     ...overrides,
@@ -63,23 +64,13 @@ test("route connection success returns only necessary connection information", a
   });
 });
 
-test("route APINebula test probes chat without returning the provider reply", async () => {
-  let captured;
+test("route rejects APINebula because browser-direct providers cannot use server egress", async () => {
+  let calls = 0;
   const handler = createContentMatrixRoute({
-    fetchImpl: async (url, init) => {
-      captured = { url: String(url), init };
+    fetchImpl: async () => {
+      calls += 1;
       return Response.json({
-        id: "chatcmpl-probe",
-        object: "chat.completion",
-        created: 1,
-        model: "gpt-5.5",
-        choices: [
-          {
-            index: 0,
-            message: { role: "assistant", content: "连接正常" },
-            finish_reason: "stop",
-          },
-        ],
+        data: [{ id: "gpt-5.5" }],
       });
     },
   });
@@ -94,18 +85,86 @@ test("route APINebula test probes chat without returning the provider reply", as
   );
   const body = await response.json();
 
-  assert.equal(response.status, 200);
+  assert.equal(response.status, 400);
   assert.equal(response.headers.get("cache-control"), "no-store");
-  assert.equal(captured.url, "https://apinebula.ai/v1/chat/completions");
-  assert.equal(captured.init.method, "POST");
   assert.deepEqual(body, {
-    ok: true,
-    action: "test",
-    connected: true,
-    modelAvailable: true,
+    ok: false,
+    error: {
+      code: "UNSAFE_URL",
+      message: "接口地址必须是安全的 HTTPS 公网地址。",
+    },
   });
-  assert.equal(JSON.stringify(body).includes("连接正常"), false);
+  assert.equal(calls, 0);
   assert.equal(JSON.stringify(body).includes(FAKE_KEY), false);
+});
+
+test("route hard-codes server-proxy after injected and request-supplied egress choices", async () => {
+  const requestedUrls = [];
+  const handler = createContentMatrixRoute({
+    egressMode: "browser-direct",
+    fetchImpl: async (url) => {
+      requestedUrls.push(String(url));
+      return Response.json({ data: [{ id: "gpt-example" }] });
+    },
+  });
+
+  const officialResponse = await handler(
+    request(testPayload({ egressMode: "browser-direct" })),
+  );
+  assert.equal(officialResponse.status, 200);
+  assert.deepEqual(requestedUrls, ["https://api.openai.com/v1/models"]);
+
+  const customResponse = await handler(
+    request(
+      testPayload({
+        baseUrl: "https://models.partner-example.com/v1",
+        egressMode: "browser-direct",
+      }),
+    ),
+  );
+  const customBody = JSON.stringify(await customResponse.json());
+  assert.equal(customResponse.status, 400);
+  assert.match(customBody, /UNSAFE_URL/);
+  assert.doesNotMatch(customBody, /partner-example|sk-fake/);
+  assert.equal(requestedUrls.length, 1);
+});
+
+test("route passes caller cancellation to the provider and returns no Key or provider body", async () => {
+  const caller = new AbortController();
+  let providerSignal;
+  let notifyProviderStarted;
+  const providerStarted = new Promise((resolve) => {
+    notifyProviderStarted = resolve;
+  });
+  const handler = createContentMatrixRoute({
+    timeoutMs: 1_000,
+    fetchImpl: async (_url, init) =>
+      new Promise((_resolve, reject) => {
+        providerSignal = init.signal;
+        notifyProviderStarted();
+        init.signal.addEventListener("abort", () => {
+          reject(
+            new DOMException(
+              `provider canceled with ${FAKE_KEY} and internal body`,
+              "AbortError",
+            ),
+          );
+        }, { once: true });
+      }),
+  });
+
+  const responsePromise = handler(
+    request(testPayload(), caller.signal),
+  );
+  await providerStarted;
+  caller.abort();
+  const response = await responsePromise;
+  const body = JSON.stringify(await response.json());
+
+  assert.equal(providerSignal.aborted, true);
+  assert.equal(response.status, 499);
+  assert.match(body, /REQUEST_CANCELLED/);
+  assert.doesNotMatch(body, /sk-fake|provider canceled|internal body|api\.openai/);
 });
 
 test("route safely blocks redirects for all provider authentication protocols", async () => {

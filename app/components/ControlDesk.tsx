@@ -289,7 +289,13 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
           value={input}
         />
         {messages.length > 0 ? (
-          <section aria-label="聊天记录" className="chat-transcript">
+          <section
+            aria-label="聊天记录"
+            aria-live="polite"
+            aria-relevant="additions text"
+            className="chat-transcript"
+            role="log"
+          >
             {messages.map((message) => (
               <article
                 className={`chat-message ${message.role}`}

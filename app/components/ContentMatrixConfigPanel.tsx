@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import {
   usesApinebulaDirectProbe,
+  usesContentMatrixServerProxy,
   type ContentMatrixProtocol,
 } from "../lib/content-matrix-runtime";
 
@@ -97,8 +98,12 @@ export function ContentMatrixConfigPanel({
     draft.protocol,
     draft.baseUrl,
   );
+  const usesServerProxy = usesContentMatrixServerProxy(draft.baseUrl);
   const activeUsesApinebulaProbe = activeConfig
     ? usesApinebulaDirectProbe(activeConfig.protocol, activeConfig.baseUrl)
+    : false;
+  const activeUsesServerProxy = activeConfig
+    ? usesContentMatrixServerProxy(activeConfig.baseUrl)
     : false;
 
   useEffect(() => {
@@ -139,7 +144,9 @@ export function ContentMatrixConfigPanel({
             当前草稿测试路径：
             {usesApinebulaProbe
               ? "浏览器直接发送至APINebula官方域名，Key不经过工作台服务端；测试会产生极少量费用。"
-              : "经过工作台服务端代理。"}
+              : usesServerProxy
+                ? "经过工作台服务端代理，仅连接已审核的官方 HTTPS 地址。"
+                : "浏览器直接发送至自定义服务商；需服务商支持 CORS，Key 会从当前浏览器直接发送，不经过工作台服务端。"}
           </p>
           <p>
             已应用会话运行路径：
@@ -147,7 +154,9 @@ export function ContentMatrixConfigPanel({
               ? "尚未应用会话配置。"
               : activeUsesApinebulaProbe
                 ? "浏览器直接发送至APINebula官方域名，Key不经过工作台服务端。"
-                : "经过工作台服务端代理。"}
+                : activeUsesServerProxy
+                  ? "经过工作台服务端代理，仅连接已审核的官方 HTTPS 地址。"
+                  : "浏览器直接发送至自定义服务商；需服务商支持 CORS，Key 会从当前浏览器直接发送，不经过工作台服务端。"}
           </p>
         </div>
         <span className={`matrix-config-badge ${activeConfig ? "ready" : ""}`}>

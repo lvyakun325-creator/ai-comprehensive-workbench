@@ -15,7 +15,14 @@ import {
 } from "../app/lib/model-registry.mjs";
 
 test("migrates v1 records with untested connection metadata", () => {
-  const { baseUrl, connectionStatus, testedFingerprint, ...v1Model } = DEFAULT_MODELS[0];
+  const v1Model = {
+    id: DEFAULT_MODELS[0].id,
+    provider: DEFAULT_MODELS[0].provider,
+    displayName: DEFAULT_MODELS[0].displayName,
+    modelId: DEFAULT_MODELS[0].modelId,
+    enabled: DEFAULT_MODELS[0].enabled,
+    isDefault: DEFAULT_MODELS[0].isDefault,
+  };
   const parsed = parseStoredModels(JSON.stringify([v1Model]));
   assert.deepEqual(
     {

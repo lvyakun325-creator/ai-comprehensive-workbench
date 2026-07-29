@@ -19,6 +19,7 @@ import {
   ContentMatrixRuntimeError,
   createContentMatrixRuntime,
   usesApinebulaDirectProbe,
+  usesContentMatrixServerProxy,
 } from "../lib/content-matrix-runtime";
 import { ModelConfigPanel } from "./ModelConfigPanel";
 
@@ -216,17 +217,21 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       testedDraft.protocol,
       testedDraft.baseUrl,
     );
+    const browserDirect = !usesContentMatrixServerProxy(testedDraft.baseUrl);
     setMatrixTestedConfig(null);
     setMatrixConnection({
       kind: "testing",
       message: directApinebula
         ? "正在由浏览器直接测试 APINebula 文案模型…"
+        : browserDirect
+          ? "正在由浏览器直接测试自定义服务商…"
         : "正在通过服务端代理测试连接…",
     });
     try {
-      if (directApinebula) {
+      if (browserDirect) {
         const result = await createContentMatrixRuntime({
           fetchImpl: fetch,
+          egressMode: "browser-direct",
         }).testConnection(testedDraft);
         if (!requestIsCurrent()) return;
         setMatrixTestedConfig(testedDraft);
@@ -396,16 +401,18 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
     };
 
     try {
-      if (
-        usesApinebulaDirectProbe(
+      if (!usesContentMatrixServerProxy(activeConfig.baseUrl)) {
+        const directApinebula = usesApinebulaDirectProbe(
           activeConfig.protocol,
           activeConfig.baseUrl,
-        )
-      ) {
+        );
         const result = await createContentMatrixRuntime({
           fetchImpl: fetch,
-          generationTimeoutMs: APINEBULA_GENERATION_TIMEOUT_MS,
+          ...(directApinebula
+            ? { generationTimeoutMs: APINEBULA_GENERATION_TIMEOUT_MS }
+            : {}),
           signal: runController.signal,
+          egressMode: "browser-direct",
         }).runStage(runPayload);
         if (!requestIsCurrent()) return;
         setMatrixStages((current) => [

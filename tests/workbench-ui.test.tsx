@@ -59,6 +59,11 @@ function deferredValue<T>() {
   return { promise, reject, resolve };
 }
 
+function assertSignalAborted(signal: AbortSignal | null) {
+  assert.ok(signal);
+  assert.equal(signal.aborted, true);
+}
+
 type ConnectedChatModelFixture = {
   id: string;
   provider: string;
@@ -1052,7 +1057,7 @@ test("editing a text connection aborts its probe and ignores the stale success",
       "配置已变更",
     );
   });
-  assert.equal(requestSignal?.aborted, true);
+  assertSignalAborted(requestSignal);
   assert.doesNotMatch(
     window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "",
     /sk-stale-text-edit/,
@@ -1093,7 +1098,7 @@ test("canceling a text draft aborts its probe and restores the prior credential"
       { "openai-gpt-5-6": "sk-original-text" },
     );
   });
-  assert.equal(requestSignal?.aborted, true);
+  assertSignalAborted(requestSignal);
 });
 
 test("cancel fully restores credentials, deletion, addition, and the default model", async () => {
@@ -1205,6 +1210,247 @@ test("cancel fully restores credentials, deletion, addition, and the default mod
   });
 });
 
+test("navigating away restores the exact text-model entry baseline after edit, add, delete, default, and test", async () => {
+  const originalModels = [
+    {
+      id: "nav-alpha",
+      provider: "OpenAI",
+      displayName: "Nav Alpha",
+      modelId: "alpha-1",
+      baseUrl: "https://api.openai.com/v1",
+      enabled: true,
+      isDefault: true,
+      connectionStatus: "connected",
+      testedFingerprint:
+        "[\"https://api.openai.com/v1\",\"alpha-1\",\"revision-nav-alpha\"]",
+    },
+    {
+      id: "nav-beta",
+      provider: "OpenAI",
+      displayName: "Nav Beta",
+      modelId: "beta-1",
+      baseUrl: "https://api.openai.com/v1",
+      enabled: true,
+      isDefault: false,
+      connectionStatus: "connected",
+      testedFingerprint:
+        "[\"https://api.openai.com/v1\",\"beta-1\",\"revision-nav-beta\"]",
+    },
+  ];
+  const originalCredentials = {
+    "nav-alpha": "sk-nav-alpha-original",
+    "nav-beta": "sk-nav-beta-original",
+  };
+  const originalRevisions = {
+    "nav-alpha": "revision-nav-alpha",
+    "nav-beta": "revision-nav-beta",
+  };
+  window.localStorage.setItem(
+    "ai-workbench:model-registry:v2",
+    JSON.stringify(originalModels),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credentials:v1",
+    JSON.stringify(originalCredentials),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credential-revisions:v1",
+    JSON.stringify(originalRevisions),
+  );
+  globalThis.fetch = (async () => Response.json({ ok: true })) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.click(screen.getByRole("button", { name: "删除 Nav Alpha" }));
+  const betaCard = screen
+    .getByRole("heading", { name: "Nav Beta" })
+    .closest("article");
+  assert.ok(betaCard);
+  const beta = within(betaCard);
+  await user.click(beta.getByRole("radio", { name: "设为默认" }));
+  await user.type(
+    beta.getByLabelText("文案模型 API Key"),
+    "sk-nav-beta-replacement",
+  );
+  await user.clear(beta.getByLabelText("文案模型名称"));
+  await user.type(beta.getByLabelText("文案模型名称"), "beta-edited");
+  await user.click(beta.getByRole("button", { name: "测试文案模型" }));
+  await waitFor(() => {
+    assert.equal(
+      beta.getByRole("status", { name: "Nav Beta 连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+
+  await user.click(screen.getByRole("button", { name: "添加文案模型" }));
+  const newModelCard = screen
+    .getByRole("heading", { name: "新增文案模型" })
+    .closest("article");
+  assert.ok(newModelCard);
+  const newModel = within(newModelCard);
+  await user.type(newModel.getByLabelText("服务商"), "Partner");
+  await user.type(newModel.getByLabelText("模型显示名称"), "Nav Gamma");
+  await user.type(newModel.getByLabelText("文案模型 API Key"), "sk-nav-gamma");
+  await user.type(
+    newModel.getByLabelText("文案接口地址"),
+    "https://models.partner-example.com/v1",
+  );
+  await user.type(newModel.getByLabelText("文案模型名称"), "gamma-1");
+  await user.click(newModel.getByRole("button", { name: "添加模型" }));
+  assert.ok(screen.getByRole("heading", { name: "Nav Gamma" }));
+
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+
+  await waitFor(() => {
+    assert.ok(screen.getByRole("heading", { name: "Nav Alpha" }));
+    assert.ok(screen.getByRole("heading", { name: "Nav Beta" }));
+    assert.equal(screen.queryByRole("heading", { name: "Nav Gamma" }), null);
+    assert.deepEqual(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:model-registry:v2") ?? "null",
+      ),
+      originalModels,
+    );
+    assert.deepEqual(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "null",
+      ),
+      originalCredentials,
+    );
+    assert.deepEqual(
+      JSON.parse(
+        window.localStorage.getItem(
+          "ai-workbench:model-credential-revisions:v1",
+        ) ?? "null",
+      ),
+      originalRevisions,
+    );
+  });
+});
+
+test("navigating away restores the exact image-model entry baseline after edit and test", async () => {
+  const originalImageConfig = {
+    baseUrl: "https://api.openai.com/v1",
+    modelId: "image-original",
+    enabled: true,
+    connectionStatus: "connected",
+    testedFingerprint:
+      "[\"https://api.openai.com/v1\",\"image-original\",\"revision-image-nav\"]",
+  };
+  window.localStorage.setItem(
+    "ai-workbench:image-model-config:v1",
+    JSON.stringify(originalImageConfig),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:image-model-credential:v1",
+    "sk-image-nav-original",
+  );
+  window.localStorage.setItem(
+    "ai-workbench:image-model-credential-revision:v1",
+    "revision-image-nav",
+  );
+  globalThis.fetch = (async () => Response.json({ ok: true })) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(
+    screen.getByLabelText("生图模型 API Key"),
+    "sk-image-nav-replacement",
+  );
+  await user.clear(screen.getByLabelText("生图模型名称"));
+  await user.type(screen.getByLabelText("生图模型名称"), "image-edited");
+  await user.click(screen.getByRole("button", { name: "测试生图模型" }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+
+  await waitFor(() => {
+    assert.equal(
+      (screen.getByLabelText("生图模型名称") as HTMLInputElement).value,
+      "image-original",
+    );
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "连接成功",
+    );
+    assert.deepEqual(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:image-model-config:v1") ?? "null",
+      ),
+      originalImageConfig,
+    );
+    assert.equal(
+      window.localStorage.getItem("ai-workbench:image-model-credential:v1"),
+      "sk-image-nav-original",
+    );
+    assert.equal(
+      window.localStorage.getItem(
+        "ai-workbench:image-model-credential-revision:v1",
+      ),
+      "revision-image-nav",
+    );
+  });
+});
+
+test("a successful Save commits the new text and image baseline across later navigation", async () => {
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(
+    screen.getByLabelText("文案模型 API Key"),
+    "sk-save-baseline-text",
+  );
+  await user.type(
+    screen.getByLabelText("文案接口地址"),
+    "https://api.openai.com/v1",
+  );
+  await user.clear(screen.getByLabelText("文案模型名称"));
+  await user.type(screen.getByLabelText("文案模型名称"), "saved-text-model");
+  await user.type(
+    screen.getByLabelText("生图模型 API Key"),
+    "sk-save-baseline-image",
+  );
+  await user.type(
+    screen.getByLabelText("生图接口地址"),
+    "https://api.openai.com/v1",
+  );
+  await user.type(
+    screen.getByLabelText("生图模型名称"),
+    "saved-image-model",
+  );
+  await user.click(screen.getByRole("button", { name: "保存设置" }));
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+
+  await waitFor(() => {
+    assert.equal(
+      (screen.getByLabelText("文案模型名称") as HTMLInputElement).value,
+      "saved-text-model",
+    );
+    assert.equal(
+      (screen.getByLabelText("生图模型名称") as HTMLInputElement).value,
+      "saved-image-model",
+    );
+    assert.match(
+      window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "",
+      /sk-save-baseline-text/,
+    );
+    assert.equal(
+      window.localStorage.getItem("ai-workbench:image-model-credential:v1"),
+      "sk-save-baseline-image",
+    );
+  });
+});
+
 test("deleting a tested text draft cannot leave an orphan credential", async () => {
   const pending = deferredValue<Response>();
   let requestSignal: AbortSignal | null = null;
@@ -1238,7 +1484,7 @@ test("deleting a tested text draft cannot leave an orphan credential", async () 
       [],
     );
   });
-  assert.equal(requestSignal?.aborted, true);
+  assertSignalAborted(requestSignal);
 });
 
 for (const [lateResult, response] of [
@@ -1452,7 +1698,22 @@ test("leaving model settings aborts a text probe before its stale success", asyn
       /sk-unmounted-text/,
     );
   });
-  assert.equal(requestSignal?.aborted, true);
+  assertSignalAborted(requestSignal);
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "GPT-5.6 连接状态" }).textContent,
+      "未测试",
+    );
+    assert.equal(
+      (screen.getByLabelText("文案接口地址") as HTMLInputElement).value,
+      "",
+    );
+    assert.doesNotMatch(
+      window.localStorage.getItem("ai-workbench:model-registry:v2") ?? "",
+      /"connectionStatus":"testing"/,
+    );
+  });
 });
 
 test("saving during a text probe aborts it and persists a settled non-testing state", async () => {
@@ -1610,6 +1871,60 @@ test("global image model test checks the model list without generating an image"
   assert.deepEqual(requestedUrls, ["/api/models/test-image"]);
   assert.equal(requestedUrls.some((url) => url.includes("/images/generations")), false);
   assert.equal((enabled as HTMLInputElement).disabled, false);
+});
+
+test("leaving during an image probe aborts it and returning shows the restored non-testing baseline", async () => {
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(
+    screen.getByLabelText("生图模型 API Key"),
+    "sk-active-image-leave",
+  );
+  await user.type(
+    screen.getByLabelText("生图接口地址"),
+    "https://api.openai.com/v1",
+  );
+  await user.type(
+    screen.getByLabelText("生图模型名称"),
+    "image-active-leave",
+  );
+  await user.click(screen.getByRole("button", { name: "测试生图模型" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+  pending.resolve(Response.json({ ok: true }));
+
+  assertSignalAborted(requestSignal);
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "未测试",
+    );
+    assert.equal(
+      (screen.getByLabelText("生图接口地址") as HTMLInputElement).value,
+      "",
+    );
+    assert.equal(
+      (screen.getByLabelText("生图模型名称") as HTMLInputElement).value,
+      "",
+    );
+    assert.doesNotMatch(
+      window.localStorage.getItem("ai-workbench:image-model-config:v1") ?? "",
+      /"connectionStatus":"testing"/,
+    );
+    assert.doesNotMatch(
+      window.localStorage.getItem("ai-workbench:image-model-credential:v1") ?? "",
+      /sk-active-image-leave/,
+    );
+  });
 });
 
 test("saving during an image probe aborts it and persists a settled non-testing state", async () => {
@@ -1987,7 +2302,7 @@ test("keeps content matrix configuration separate while other Agents select enab
   );
   await user.selectOptions(screen.getByLabelText("服务商预设"), "anthropic");
   assert.equal(
-    (screen.getByLabelText("协议") as HTMLSelectElement).value,
+    (screen.getByLabelText("协议") as unknown as HTMLSelectElement).value,
     "anthropic",
   );
 
@@ -2026,9 +2341,10 @@ test("home chat keeps blank send disabled, fills a quick prompt, and shows the s
   assert.equal((send as HTMLButtonElement).disabled, false);
 
   await user.click(send);
-  assert.ok(
-    within(screen.getByLabelText("聊天记录")).getByText("规划本月内容"),
-  );
+  const transcript = screen.getByRole("log", { name: "聊天记录" });
+  assert.equal(transcript.getAttribute("aria-live"), "polite");
+  assert.equal(transcript.getAttribute("aria-relevant"), "additions text");
+  assert.ok(within(transcript).getByText("规划本月内容"));
   assert.equal((input as HTMLTextAreaElement).value, "");
   assert.equal((send as HTMLButtonElement).disabled, true);
   assert.ok(screen.getByRole("button", { name: "停止" }));
@@ -2290,7 +2606,7 @@ test("home chat stop aborts and rejects a late reply without removing visible tu
   await waitFor(() => assert.ok(requestSignal));
   await user.click(screen.getByRole("button", { name: "停止" }));
 
-  assert.equal(requestSignal?.aborted, true);
+  assertSignalAborted(requestSignal);
   assert.ok(screen.getByText("保留这条消息"));
   assert.equal(screen.queryByRole("button", { name: "停止" }), null);
   pending.resolve(Response.json({ ok: true, reply: "不应出现的旧回复" }));
@@ -2506,7 +2822,7 @@ test("leaving home chat aborts its active request and ignores its completion", a
   await waitFor(() => assert.ok(requestSignal));
   await user.click(screen.getByRole("button", { name: "Agent 项目" }));
 
-  assert.equal(requestSignal?.aborted, true);
+  assertSignalAborted(requestSignal);
   pending.resolve(Response.json({ ok: true, reply: "卸载后的旧回复" }));
   await waitFor(() => assert.equal(screen.queryByText("卸载后的旧回复"), null));
 });

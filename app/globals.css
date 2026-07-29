@@ -771,6 +771,12 @@ button {
   color: #a1a9b6;
 }
 
+.chat-card textarea:focus-visible {
+  outline: 3px solid rgba(54, 98, 227, 0.32);
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+
 .chat-transcript {
   display: grid;
   gap: 10px;

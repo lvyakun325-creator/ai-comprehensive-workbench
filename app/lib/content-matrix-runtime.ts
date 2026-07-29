@@ -15,6 +15,8 @@ export type ContentMatrixHistoryEntry = {
   markdown: string;
 };
 
+export type ContentMatrixEgressMode = "server-proxy" | "browser-direct";
+
 export type ContentMatrixRunInput = ContentMatrixConfig & {
   stage: number;
   diagnostic: string;
@@ -31,6 +33,7 @@ type RuntimeOptions = {
   timeoutMs?: number;
   generationTimeoutMs?: number;
   signal?: AbortSignal;
+  egressMode?: ContentMatrixEgressMode;
 };
 
 type ValidatedConfig = ContentMatrixConfig & {
@@ -57,9 +60,33 @@ const MAX_DIAGNOSTIC_LENGTH = 20_000;
 const MAX_FEEDBACK_LENGTH = 4_000;
 const MAX_HISTORY_ENTRIES = 3;
 const MAX_HISTORY_MARKDOWN_LENGTH = 30_000;
+const MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_PROVIDER_MODELS = 1_000;
+const MAX_PROVIDER_MODEL_ID_LENGTH = 200;
+const MAX_GENERATED_MARKDOWN_LENGTH = 200_000;
+const LONG_FORM_MAX_TOKENS = 8_192;
 const ANTHROPIC_VERSION = "2023-06-01";
 const APINEBULA_DEFAULT_MAX_TOKENS = 3_800;
 const APINEBULA_HISTORY_AWARE_MAX_TOKENS = 2_000;
+const OFFICIAL_SERVER_PROXY_ORIGINS = new Set([
+  "https://api.openai.com",
+  "https://api.anthropic.com",
+  "https://generativelanguage.googleapis.com",
+  "https://api.deepseek.com",
+]);
+const APINEBULA_ORIGINS = new Set([
+  "https://apinebula.ai",
+  "https://api.yhlxj.ai",
+]);
+const DNS_REBINDING_SUFFIXES = [".nip.io", ".sslip.io", ".xip.io"];
+const UNSAFE_BROWSER_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69,
+  77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117, 119,
+  123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514, 515,
+  526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990,
+  993, 995, 1_719, 1_720, 1_723, 2_049, 3_656, 4_044, 4_045, 5_060,
+  5_061, 6_000, 6_569, 6_669, 10_080,
+]);
 
 const SAFE_ERRORS = {
   INVALID_REQUEST: ["INVALID_REQUEST", "请求参数无效。", 400],
@@ -98,6 +125,11 @@ const SAFE_ERRORS = {
     "模型服务返回格式异常，请稍后重试。",
     502,
   ],
+  PROVIDER_RESPONSE_TOO_LARGE: [
+    "PROVIDER_RESPONSE_TOO_LARGE",
+    "模型服务返回内容过大，请缩小请求后重试。",
+    502,
+  ],
   INVALID_STAGE_OUTPUT: [
     "INVALID_STAGE_OUTPUT",
     "模型输出未满足正式方案要求，请重试。",
@@ -125,10 +157,11 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const generationTimeoutMs = options.generationTimeoutMs ?? timeoutMs;
   const callerSignal = options.signal;
+  const egressMode = options.egressMode ?? "browser-direct";
 
   return {
     async testConnection(input: unknown) {
-      const config = validateConfig(input);
+      const config = validateConfig(input, egressMode);
       if (usesApinebulaDirectProbe(config.protocol, config.baseUrl)) {
         const body = await fetchProviderJson(
           fetchImpl,
@@ -159,7 +192,7 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
     },
 
     async runStage(input: unknown) {
-      const runInput = validateRunInput(input);
+      const runInput = validateRunInput(input, egressMode);
       const prompt = buildStagePrompt(runInput);
       const body = await fetchProviderJson(
         fetchImpl,
@@ -201,8 +234,33 @@ export function usesApinebulaDirectProbe(
 ): boolean {
   if (protocol !== "openai-compatible") return false;
   try {
-    const hostname = new URL(baseUrl).hostname.toLowerCase();
-    return hostname === "apinebula.ai" || hostname === "api.yhlxj.ai";
+    const url = new URL(baseUrl);
+    return (
+      APINEBULA_ORIGINS.has(url.origin.toLowerCase())
+      && url.protocol === "https:"
+      && url.port === ""
+      && url.username === ""
+      && url.password === ""
+      && url.search === ""
+      && url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function usesContentMatrixServerProxy(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    return (
+      OFFICIAL_SERVER_PROXY_ORIGINS.has(url.origin.toLowerCase())
+      && url.protocol === "https:"
+      && url.port === ""
+      && url.username === ""
+      && url.password === ""
+      && url.search === ""
+      && url.hash === ""
+    );
   } catch {
     return false;
   }
@@ -226,7 +284,10 @@ function buildApinebulaProbeRequest(config: ValidatedConfig) {
   };
 }
 
-function validateConfig(input: unknown): ValidatedConfig {
+function validateConfig(
+  input: unknown,
+  egressMode: ContentMatrixEgressMode,
+): ValidatedConfig {
   const record = asRecord(input);
   const protocol = record.protocol;
   if (typeof protocol !== "string" || !PROTOCOLS.has(protocol as ContentMatrixProtocol)) {
@@ -249,15 +310,18 @@ function validateConfig(input: unknown): ValidatedConfig {
 
   return {
     protocol: protocol as ContentMatrixProtocol,
-    baseUrl: validatePublicBaseUrl(baseUrl),
+    baseUrl: validatePublicBaseUrl(baseUrl, egressMode),
     apiKey,
     model,
   };
 }
 
-function validateRunInput(input: unknown): ValidatedRunInput {
+function validateRunInput(
+  input: unknown,
+  egressMode: ContentMatrixEgressMode,
+): ValidatedRunInput {
   const record = asRecord(input);
-  const config = validateConfig(record);
+  const config = validateConfig(record, egressMode);
   const stage = record.stage;
   if (!Number.isInteger(stage) || typeof stage !== "number" || stage < 2 || stage > 5) {
     throw new ContentMatrixRuntimeError("INVALID_STAGE");
@@ -312,7 +376,10 @@ function validateRunInput(input: unknown): ValidatedRunInput {
   };
 }
 
-function validatePublicBaseUrl(value: string): string {
+function validatePublicBaseUrl(
+  value: string,
+  egressMode: ContentMatrixEgressMode,
+): string {
   let url: URL;
   try {
     url = new URL(value);
@@ -327,7 +394,10 @@ function validatePublicBaseUrl(value: string): string {
     url.search !== "" ||
     url.hash !== "" ||
     !url.hostname ||
-    isBlockedHostname(url.hostname)
+    isBlockedHostname(url.hostname) ||
+    (egressMode === "server-proxy"
+      ? !usesContentMatrixServerProxy(url.toString())
+      : isUnsafeBrowserPort(url.port))
   ) {
     throw new ContentMatrixRuntimeError("UNSAFE_URL");
   }
@@ -344,7 +414,8 @@ function isBlockedHostname(value: string): boolean {
   if (
     hostname === "localhost" ||
     hostname.endsWith(".localhost") ||
-    hostname.endsWith(".local")
+    hostname.endsWith(".local") ||
+    DNS_REBINDING_SUFFIXES.some((suffix) => hostname.endsWith(suffix))
   ) {
     return true;
   }
@@ -353,7 +424,7 @@ function isBlockedHostname(value: string): boolean {
   if (ipv4) return isBlockedIpv4(ipv4);
 
   const ipv6 = parseIpv6(hostname);
-  if (!ipv6) return false;
+  if (!ipv6) return !hostname.includes(".");
   if (ipv6.every((part) => part === 0)) return true;
   if (ipv6.slice(0, 7).every((part) => part === 0) && ipv6[7] === 1) {
     return true;
@@ -361,6 +432,7 @@ function isBlockedHostname(value: string): boolean {
   if ((ipv6[0] & 0xfe00) === 0xfc00 || (ipv6[0] & 0xffc0) === 0xfe80) {
     return true;
   }
+  if ((ipv6[0] & 0xff00) === 0xff00) return true;
   const isMappedIpv4 =
     ipv6.slice(0, 5).every((part) => part === 0) &&
     (ipv6[5] === 0 || ipv6[5] === 0xffff);
@@ -373,6 +445,13 @@ function isBlockedHostname(value: string): boolean {
     ]);
   }
   return false;
+}
+
+function isUnsafeBrowserPort(value: string): boolean {
+  if (!value) return false;
+  const port = Number(value);
+  return !Number.isInteger(port) || port < 1 || port > 65_535
+    || UNSAFE_BROWSER_PORTS.has(port);
 }
 
 function parseIpv4(hostname: string): number[] | null {
@@ -456,7 +535,7 @@ function buildGenerationRequest(
                 temperature: 0.65,
                 max_tokens: apinebulaMaxTokens(input),
               }
-            : {}),
+            : { max_tokens: LONG_FORM_MAX_TOKENS }),
         }),
       } satisfies RequestInit,
     };
@@ -489,6 +568,7 @@ function buildGenerationRequest(
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: prompt.system }] },
         contents: [{ role: "user", parts: [{ text: prompt.user }] }],
+        generationConfig: { maxOutputTokens: LONG_FORM_MAX_TOKENS },
       }),
     } satisfies RequestInit,
   };
@@ -564,17 +644,7 @@ async function fetchProviderJson(
       throw new ContentMatrixRuntimeError("PROVIDER_REQUEST_FAILED");
     }
 
-    try {
-      return await response.json();
-    } catch (error) {
-      if (callerSignal?.aborted) {
-        throw new ContentMatrixRuntimeError("REQUEST_CANCELLED");
-      }
-      if (isTimeoutError(error, controller.signal)) {
-        throw new ContentMatrixRuntimeError("PROVIDER_TIMEOUT");
-      }
-      throw new ContentMatrixRuntimeError("INVALID_PROVIDER_RESPONSE");
-    }
+    return await readBoundedProviderJson(response);
   } catch (error) {
     if (error instanceof ContentMatrixRuntimeError) {
       throw error;
@@ -589,6 +659,46 @@ async function fetchProviderJson(
   } finally {
     clearTimeout(timer);
     callerSignal?.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+async function readBoundedProviderJson(response: Response): Promise<unknown> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (
+    Number.isFinite(declaredLength)
+    && declaredLength > MAX_PROVIDER_RESPONSE_BYTES
+  ) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new ContentMatrixRuntimeError("PROVIDER_RESPONSE_TOO_LARGE");
+  }
+  if (!response.body) {
+    throw new ContentMatrixRuntimeError("INVALID_PROVIDER_RESPONSE");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let receivedBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > MAX_PROVIDER_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new ContentMatrixRuntimeError("PROVIDER_RESPONSE_TOO_LARGE");
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+    chunks.push(decoder.decode());
+  } finally {
+    reader.releaseLock();
+  }
+
+  try {
+    return JSON.parse(chunks.join(""));
+  } catch {
+    throw new ContentMatrixRuntimeError("INVALID_PROVIDER_RESPONSE");
   }
 }
 
@@ -611,11 +721,19 @@ function parseModelIds(
   if (!Array.isArray(models)) {
     throw new ContentMatrixRuntimeError("INVALID_PROVIDER_RESPONSE");
   }
+  if (models.length > MAX_PROVIDER_MODELS) {
+    throw new ContentMatrixRuntimeError("INVALID_PROVIDER_RESPONSE");
+  }
 
   return models.map((model) => {
     const modelRecord = asProviderRecord(model);
     const id = protocol === "gemini" ? modelRecord.name : modelRecord.id;
-    if (typeof id !== "string" || !id) {
+    if (
+      typeof id !== "string"
+      || !id
+      || id.length > MAX_PROVIDER_MODEL_ID_LENGTH
+      || hasControlCharacter(id)
+    ) {
       throw new ContentMatrixRuntimeError("INVALID_PROVIDER_RESPONSE");
     }
     return id;
@@ -672,7 +790,10 @@ function parseGeneratedMarkdown(
       .join("");
   }
 
-  if (!text.trim()) {
+  if (
+    !text.trim()
+    || text.length > MAX_GENERATED_MARKDOWN_LENGTH
+  ) {
     throw new ContentMatrixRuntimeError("INVALID_PROVIDER_RESPONSE");
   }
   return text;

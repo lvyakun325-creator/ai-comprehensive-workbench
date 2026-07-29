@@ -167,7 +167,8 @@ export function GlobalModelSettings({
   const dirtyModelIds = useRef(new Set<string>());
   const imageDirty = useRef(false);
   const baseline = useRef<SettingsBaseline | null>(null);
-  const addedModelIds = useRef(new Set<string>());
+  const modelsRef = useRef(models);
+  const rollbackOnUnmount = useRef<() => void>(() => undefined);
   const initialDrafts = Object.fromEntries(
     models.map((model) => [model.id, draftFromModel(model)]),
   );
@@ -193,6 +194,7 @@ export function GlobalModelSettings({
     () => new Set(),
   );
 
+  modelsRef.current = models;
   for (const model of models) {
     savedCredentialRevisions.current[model.id] = getCredentialRevision(model.id);
   }
@@ -248,6 +250,7 @@ export function GlobalModelSettings({
       activeTextProbes.clear();
       imageProbe.current?.controller.abort();
       imageProbe.current = null;
+      rollbackOnUnmount.current();
     };
   }, []);
 
@@ -273,6 +276,60 @@ export function GlobalModelSettings({
     }
     abortImageProbe();
   };
+
+  const restoreEntryBaseline = () => {
+    const saved = baseline.current;
+    if (!saved) return;
+
+    for (const model of modelsRef.current) {
+      if (!saved.models.some((candidate) => candidate.id === model.id)) {
+        removeModel(model.id);
+        saveCredential(model.id, "", true, null);
+        delete savedCredentialRevisions.current[model.id];
+      }
+    }
+    for (const model of saved.models) {
+      if (!modelsRef.current.some((candidate) => candidate.id === model.id)) {
+        addModel(model);
+      }
+      saveCredential(
+        model.id,
+        saved.credentials[model.id] ?? "",
+        saved.credentials[model.id] === null,
+        saved.credentialRevisions[model.id] || null,
+      );
+      if (saved.credentialRevisions[model.id]) {
+        savedCredentialRevisions.current[model.id] =
+          saved.credentialRevisions[model.id];
+      } else {
+        delete savedCredentialRevisions.current[model.id];
+      }
+      saveModelConfig(model.id, {
+        ...model,
+        connectionStatus: "changed",
+        testedFingerprint: "",
+      });
+      saveModelConfig(model.id, model);
+    }
+    const savedDefault = saved.models.find((model) => model.isDefault);
+    if (savedDefault) setDefaultModel(savedDefault.id);
+
+    saveImageCredential(
+      saved.imageCredential ?? "",
+      saved.imageCredential === null,
+      saved.imageCredentialRevision || null,
+    );
+    savedImageCredentialRevision.current = saved.imageCredentialRevision;
+    saveImageConfig({
+      ...saved.imageConfig,
+      connectionStatus: "changed",
+      testedFingerprint: "",
+    });
+    saveImageConfig(saved.imageConfig);
+    baseline.current = null;
+  };
+
+  rollbackOnUnmount.current = restoreEntryBaseline;
 
   const textRevisionForDraft = (modelId: string, draft: TextDraft) => {
     if (draft.clearCredential || draft.apiKeyDraft.trim()) {
@@ -698,7 +755,6 @@ export function GlobalModelSettings({
     imageDraftRef.current = nextImageDraft;
     setImageDraft(nextImageDraft);
     baseline.current = null;
-    addedModelIds.current.clear();
     setPendingDeletedIds(new Set());
     setValidationError("");
     onPreview("模型设置已保存");
@@ -707,52 +763,7 @@ export function GlobalModelSettings({
   const cancelSettings = () => {
     abortAllProbes();
     const saved = baseline.current;
-    if (saved) {
-      for (const model of models) {
-        if (!saved.models.some((candidate) => candidate.id === model.id)) {
-          removeModel(model.id);
-          saveCredential(model.id, "", true, null);
-          delete savedCredentialRevisions.current[model.id];
-        }
-      }
-      for (const model of saved.models) {
-        if (!models.some((candidate) => candidate.id === model.id)) {
-          addModel(model);
-        }
-        saveCredential(
-          model.id,
-          saved.credentials[model.id] ?? "",
-          saved.credentials[model.id] === null,
-          saved.credentialRevisions[model.id] || null,
-        );
-        if (saved.credentialRevisions[model.id]) {
-          savedCredentialRevisions.current[model.id] =
-            saved.credentialRevisions[model.id];
-        } else {
-          delete savedCredentialRevisions.current[model.id];
-        }
-        saveModelConfig(model.id, {
-          ...model,
-          connectionStatus: "changed",
-          testedFingerprint: "",
-        });
-        saveModelConfig(model.id, model);
-      }
-      const savedDefault = saved.models.find((model) => model.isDefault);
-      if (savedDefault) setDefaultModel(savedDefault.id);
-      saveImageCredential(
-        saved.imageCredential ?? "",
-        saved.imageCredential === null,
-        saved.imageCredentialRevision || null,
-      );
-      savedImageCredentialRevision.current = saved.imageCredentialRevision;
-      saveImageConfig({
-        ...saved.imageConfig,
-        connectionStatus: "changed",
-        testedFingerprint: "",
-      });
-      saveImageConfig(saved.imageConfig);
-    }
+    restoreEntryBaseline();
     dirtyModelIds.current.clear();
     imageDirty.current = false;
     textDraftRevisions.current = {};
@@ -768,8 +779,6 @@ export function GlobalModelSettings({
     imageDraftRef.current = restoredImageDraft;
     setImageDraft(restoredImageDraft);
     setNewDraft(EMPTY_NEW_TEXT_DRAFT);
-    baseline.current = null;
-    addedModelIds.current.clear();
     setPendingDeletedIds(new Set());
     setValidationError("");
     setTextErrors({});
@@ -806,7 +815,6 @@ export function GlobalModelSettings({
       enabled: false,
       isDefault: false,
     });
-    addedModelIds.current.add(id);
     saveCredential(id, apiKey, false);
     setNewDraft(EMPTY_NEW_TEXT_DRAFT);
     setValidationError("");

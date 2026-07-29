@@ -49,6 +49,8 @@ test("server-renders the AI workspace interface", async () => {
   assert.match(html, /项目隔离已开启/);
   assert.match(html, /只会操作本项目资料/);
   assert.match(html, /进入独立项目/);
+  assert.match(html, /本地工作台运行中/);
+  assert.doesNotMatch(html, /本地设计预览/);
   assert.doesNotMatch(
     html,
     /总控 Agent|拆解并分配|拆解竞品账号|最大并发|子 Agent|任务调度预览|成果交接预览/,

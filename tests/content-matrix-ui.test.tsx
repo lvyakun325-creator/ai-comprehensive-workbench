@@ -117,26 +117,35 @@ async function prepareRunnableMatrix(user: ReturnType<typeof userEvent.setup>) {
   await fillCompleteDiagnosis(user);
 }
 
-test("only content matrix exposes temporary API configuration and requires a successful connection test before applying", async () => {
+test("custom ContentMatrix providers stay browser-direct, disclose CORS and Key handling, and require a successful test", async () => {
   const user = userEvent.setup({ document });
-  const requests: Array<Record<string, unknown>> = [];
+  const requests: Array<{
+    url: string;
+    body: Record<string, unknown> | null;
+    headers: Headers;
+  }> = [];
   let shouldFail = true;
-  globalThis.fetch = async (_input, init) => {
-    requests.push(JSON.parse(String(init?.body)));
+  globalThis.fetch = async (input, init) => {
+    requests.push({
+      url: String(input),
+      body: init?.body
+        ? JSON.parse(String(init.body)) as Record<string, unknown>
+        : null,
+      headers: new Headers(init?.headers),
+    });
     if (shouldFail) {
-      return new Response(JSON.stringify({
-        ok: false,
-        error: {
-          code: "AUTH_FAILED",
-          message: "模型服务鉴权失败，请检查 API Key：sk-ui-secret",
-        },
-      }), { status: 401, headers: { "content-type": "application/json" } });
+      return new Response(`provider rejected sk-ui-secret`, {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
     }
     return new Response(JSON.stringify({
-      ok: true,
-      action: "test",
-      connected: true,
-      modelAvailable: true,
+      data: [{
+        type: "model",
+        id: "claude-test",
+        display_name: "Claude Test",
+        created_at: "2026-01-01T00:00:00Z",
+      }],
     }), { status: 200, headers: { "content-type": "application/json" } });
   };
 
@@ -165,6 +174,18 @@ test("only content matrix exposes temporary API configuration and requires a suc
   await user.type(keyInput, "sk-ui-secret");
   await user.clear(screen.getByLabelText("模型名称"));
   await user.type(screen.getByLabelText("模型名称"), "claude-test");
+  assert.match(
+    screen.getByText(/^当前草稿测试路径/).textContent ?? "",
+    /浏览器直接发送/,
+  );
+  assert.match(
+    screen.getByText(/^当前草稿测试路径/).textContent ?? "",
+    /服务商支持 CORS/,
+  );
+  assert.match(
+    screen.getByText(/^当前草稿测试路径/).textContent ?? "",
+    /Key 会从当前浏览器直接发送/,
+  );
   await user.click(screen.getByRole("button", { name: "测试连接" }));
 
   assert.match(screen.getByRole("alert").textContent ?? "", /鉴权失败/);
@@ -173,13 +194,9 @@ test("only content matrix exposes temporary API configuration and requires a suc
     screen.getByRole("button", { name: "应用到当前会话" }).hasAttribute("disabled"),
     true,
   );
-  assert.deepEqual(requests[0], {
-    action: "test",
-    protocol: "anthropic",
-    baseUrl: "https://models.example.com/v1",
-    apiKey: "sk-ui-secret",
-    model: "claude-test",
-  });
+  assert.equal(requests[0].url, "https://models.example.com/v1/models");
+  assert.equal(requests[0].body, null);
+  assert.equal(requests[0].headers.get("x-api-key"), "sk-ui-secret");
 
   shouldFail = false;
   await user.click(screen.getByRole("button", { name: "测试连接" }));
@@ -190,6 +207,13 @@ test("only content matrix exposes temporary API configuration and requires a suc
   );
   await user.click(screen.getByRole("button", { name: "应用到当前会话" }));
   assert.match(screen.getByText(/当前会话已应用/).textContent ?? "", /claude-test/);
+  assert.deepEqual(
+    requests.map(({ url }) => url),
+    [
+      "https://models.example.com/v1/models",
+      "https://models.example.com/v1/models",
+    ],
+  );
   assert.equal(storageAccesses, 0);
 
   await user.click(screen.getByRole("button", { name: "← 返回 Agent 项目" }));
@@ -234,7 +258,7 @@ test("APINebula CODEX preset uses the recommended endpoint and adds a safe actio
   );
 
   assert.equal(
-    (screen.getByLabelText("协议") as HTMLSelectElement).value,
+    (screen.getByLabelText("协议") as unknown as HTMLSelectElement).value,
     "openai-compatible",
   );
   assert.equal(
@@ -792,7 +816,7 @@ test("non-APINebula generation never schedules the APINebula 180-second deadline
   assert.equal(storageAccesses, 0);
 });
 
-test("non-APINebula providers keep using the workbench server proxy", async () => {
+test("reviewed official providers keep using the workbench server proxy", async () => {
   const user = userEvent.setup({ document });
   const urls: string[] = [];
   globalThis.fetch = async (input) => {
@@ -815,6 +839,48 @@ test("non-APINebula providers keep using the workbench server proxy", async () =
     screen.getByText(/^当前草稿测试路径/).textContent ?? "",
     /工作台服务端代理/,
   );
+  assert.equal(storageAccesses, 0);
+});
+
+test("custom provider generation remains browser-direct after the session config is applied", async () => {
+  const user = userEvent.setup({ document });
+  const urls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    urls.push(url);
+    if (url.endsWith("/models")) {
+      return Response.json({ data: [{ id: "custom-long-form" }] });
+    }
+    return Response.json({
+      choices: [{
+        message: { content: "## 战略判断\n自定义服务商长文生成完成" },
+      }],
+    });
+  };
+
+  await openContentMatrixConfig(user);
+  await user.selectOptions(screen.getByLabelText("服务商预设"), "custom");
+  await user.clear(screen.getByLabelText("API 地址"));
+  await user.type(
+    screen.getByLabelText("API 地址"),
+    "https://models.partner-example.com/openai/v1",
+  );
+  await user.clear(screen.getByLabelText("模型名称"));
+  await user.type(screen.getByLabelText("模型名称"), "custom-long-form");
+  await user.type(screen.getByLabelText("API Key"), "sk-custom-browser-only");
+  await user.click(screen.getByRole("button", { name: "测试连接" }));
+  await screen.findByText("连接测试成功，模型可用");
+  await user.click(screen.getByRole("button", { name: "应用到当前会话" }));
+  await user.click(screen.getByRole("button", { name: "Agent 对话" }));
+  await fillCompleteDiagnosis(user);
+  await user.click(screen.getByRole("button", { name: "开始战略分析" }));
+
+  assert.ok(await screen.findByText(/自定义服务商长文生成完成/));
+  assert.deepEqual(urls, [
+    "https://models.partner-example.com/openai/v1/models",
+    "https://models.partner-example.com/openai/v1/chat/completions",
+  ]);
+  assert.equal(urls.some((url) => url.startsWith("/api/")), false);
   assert.equal(storageAccesses, 0);
 });
 

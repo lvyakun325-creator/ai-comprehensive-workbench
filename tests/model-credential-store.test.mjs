@@ -30,11 +30,21 @@ test("retains, replaces, clears, and masks credentials without exposing the full
   assert.doesNotMatch(masked, /secret-value/);
 });
 
-test("masks every character of credentials too short to safely preserve a prefix", () => {
-  for (const credential of ["a", "ab", "abc"]) {
+test("fully masks 1 through 7 character credentials at the safe boundary", () => {
+  for (const credential of [
+    "a",
+    "ab",
+    "abc",
+    "abcd",
+    "abcde",
+    "abcdef",
+    "abcdefg",
+  ]) {
     const masked = maskCredential(credential);
     assert.equal(masked, "••••");
     assert.notEqual(masked, credential);
     assert.doesNotMatch(masked, new RegExp(credential));
   }
+
+  assert.equal(maskCredential("abcdefgh"), "abc…efgh");
 });

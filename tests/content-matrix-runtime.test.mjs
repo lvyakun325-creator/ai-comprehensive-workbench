@@ -198,7 +198,7 @@ test("APINebula long-form generation uses the bounded output settings accepted b
   assert.equal(apinebulaStageThreeBody.temperature, 0.65);
 
   const otherOpenAiBody = JSON.parse(requests[2].init.body);
-  assert.equal("max_tokens" in otherOpenAiBody, false);
+  assert.equal(otherOpenAiBody.max_tokens, 8192);
   assert.equal("temperature" in otherOpenAiBody, false);
 });
 
@@ -361,6 +361,16 @@ test("APINebula probe matching rejects lookalike hosts and the wrong protocol", 
     config(
       "openai-compatible",
       "https://api.yhlxj.ai.evil.example/v1",
+      "gpt-5.5",
+    ),
+    config(
+      "openai-compatible",
+      "https://apinebula.ai:8443/v1",
+      "gpt-5.5",
+    ),
+    config(
+      "openai-compatible",
+      "https://api.yhlxj.ai:9443/v1",
       "gpt-5.5",
     ),
     config("anthropic", "https://apinebula.ai/v1", "gpt-5.5"),
@@ -621,6 +631,7 @@ test("OpenAI-compatible generation sends model and messages then parses Markdown
   assert.equal(body.messages[0].role, "system");
   assert.equal(body.messages[1].role, "user");
   assert.match(body.messages[1].content, /主攻小红书/);
+  assert.equal(body.max_tokens, 8192);
 });
 
 test("Anthropic generation separates system and user messages and parses text blocks", async () => {
@@ -712,6 +723,7 @@ test("Gemini generation strips the standard models prefix and parses candidate p
   assert.equal(body.systemInstruction.parts.length, 1);
   assert.equal(body.contents[0].role, "user");
   assert.equal(body.contents[0].parts.length, 1);
+  assert.deepEqual(body.generationConfig, { maxOutputTokens: 8192 });
 });
 
 test("stage system prompt enforces workflow boundary, compliance, and untrusted-data rules", async () => {
@@ -911,22 +923,36 @@ test("redacts API Key occurrences from all untrusted data before building the pr
 test("rejects non-public custom endpoints before making a network request", async () => {
   const blockedUrls = [
     "http://api.example.com/v1",
+    "https://metadata/v1",
     "https://localhost/v1",
     "https://localhost./v1",
     "https://service.local/v1",
     "https://service.local./v1",
+    "https://user:password@api.example.com/v1",
+    "https://api.example.com/v1?target=localhost",
+    "https://api.example.com/v1#fragment",
+    "https://api.example.com:22/v1",
     "https://0.1.2.3/v1",
     "https://127.0.0.1/v1",
     "https://2130706433/v1",
     "https://10.1.2.3/v1",
+    "https://100.64.0.1/v1",
+    "https://100.127.255.255/v1",
     "https://169.254.169.254/v1",
     "https://172.16.0.1/v1",
     "https://172.31.255.255/v1",
     "https://192.168.1.1/v1",
+    "https://198.18.0.1/v1",
+    "https://224.0.0.1/v1",
     "https://[::1]/v1",
+    "https://[::ffff:127.0.0.1]/v1",
+    "https://[::ffff:10.1.2.3]/v1",
     "https://[fc00::1]/v1",
     "https://[fd00::1]/v1",
     "https://[fe80::1]/v1",
+    "https://[ff02::1]/v1",
+    "https://127.0.0.1.nip.io/v1",
+    "https://10.0.0.1.sslip.io/v1",
   ];
   let calls = 0;
   const runtime = createContentMatrixRuntime({
@@ -946,6 +972,103 @@ test("rejects non-public custom endpoints before making a network request", asyn
     );
   }
   assert.equal(calls, 0);
+});
+
+test("browser-direct mode accepts a validated arbitrary third-party HTTPS origin", async () => {
+  let captured;
+  const runtime = createContentMatrixRuntime({
+    egressMode: "browser-direct",
+    fetchImpl: async (url, init) => {
+      captured = { url: String(url), init };
+      return jsonResponse({
+        data: [{ id: "third-party-model" }],
+      });
+    },
+  });
+
+  const result = await runtime.testConnection(
+    config(
+      "openai-compatible",
+      "https://models.partner-example.com:8443/openai/v1",
+      "third-party-model",
+    ),
+  );
+
+  assert.deepEqual(result, { connected: true, modelAvailable: true });
+  assert.equal(
+    captured.url,
+    "https://models.partner-example.com:8443/openai/v1/models",
+  );
+  assert.equal(captured.init.redirect, "error");
+});
+
+test("server-proxy mode accepts only reviewed official HTTPS default-port origins", async () => {
+  const cases = [
+    [
+      config("openai-compatible", "https://api.openai.com/v1", "gpt-example"),
+      { data: [{ id: "gpt-example" }] },
+    ],
+    [
+      config("anthropic", "https://api.anthropic.com/v1", "claude-example"),
+      { data: [{ id: "claude-example" }] },
+    ],
+    [
+      config(
+        "gemini",
+        "https://generativelanguage.googleapis.com/v1beta",
+        "gemini-example",
+      ),
+      { models: [{ name: "models/gemini-example" }] },
+    ],
+    [
+      config("openai-compatible", "https://api.deepseek.com/v1", "deepseek-chat"),
+      { data: [{ id: "deepseek-chat" }] },
+    ],
+  ];
+
+  for (const [officialConfig, body] of cases) {
+    let calls = 0;
+    const runtime = createContentMatrixRuntime({
+      egressMode: "server-proxy",
+      fetchImpl: async () => {
+        calls += 1;
+        return jsonResponse(body);
+      },
+    });
+    assert.equal(
+      (await runtime.testConnection(officialConfig)).modelAvailable,
+      true,
+    );
+    assert.equal(calls, 1);
+  }
+
+  const rejected = [
+    "https://api.openai.com.evil.example/v1",
+    "https://api.openai.com:8443/v1",
+    "https://api.anthropic.com.evil.example/v1",
+    "https://generativelanguage.googleapis.com.evil.example/v1beta",
+    "https://api.deepseek.com.evil.example/v1",
+    "https://models.partner-example.com/v1",
+    "https://apinebula.ai/v1",
+  ];
+  for (const baseUrl of rejected) {
+    let calls = 0;
+    const runtime = createContentMatrixRuntime({
+      egressMode: "server-proxy",
+      fetchImpl: async () => {
+        calls += 1;
+        return jsonResponse({ data: [] });
+      },
+    });
+    await assert.rejects(
+      runtime.testConnection(
+        config("openai-compatible", baseUrl, "gpt-example"),
+      ),
+      (error) => error.code === "UNSAFE_URL",
+      baseUrl,
+    );
+    assert.equal(calls, 0);
+  }
 });
 
 test("rejects invalid stages, oversized inputs, and excess history", async () => {
@@ -1166,6 +1289,133 @@ test("deadline remains active while response headers are ready but the body stal
 
   assert.equal(outcome.code, "PROVIDER_TIMEOUT");
   assert.doesNotMatch(outcome.message, /body stalled|api\.example|sk-fake/);
+});
+
+test("rejects and cancels a provider response whose declared size exceeds the raw byte limit", async () => {
+  let canceled = false;
+  const body = new ReadableStream({
+    pull(controller) {
+      controller.enqueue(
+        new TextEncoder().encode('{"data":[{"id":"gpt-example"}]}'),
+      );
+      controller.close();
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  const runtime = createContentMatrixRuntime({
+    fetchImpl: async () =>
+      new Response(body, {
+        status: 200,
+        headers: {
+          "content-length": String(2 * 1024 * 1024 + 1),
+          "content-type": "application/json",
+        },
+      }),
+  });
+
+  await assert.rejects(
+    runtime.testConnection(
+      config("openai-compatible", "https://api.example.com/v1", "gpt-example"),
+    ),
+    (error) => {
+      assert.equal(error.code, "PROVIDER_RESPONSE_TOO_LARGE");
+      assert.doesNotMatch(error.message, /gpt-example|api\.example|sk-fake/);
+      return true;
+    },
+  );
+  assert.equal(canceled, true);
+});
+
+test("incrementally cancels a chunked provider response once the raw byte limit is crossed", async () => {
+  let canceled = false;
+  let chunksSent = 0;
+  const chunk = new TextEncoder().encode("x".repeat(600 * 1024));
+  const body = new ReadableStream({
+    pull(controller) {
+      if (chunksSent < 4) {
+        controller.enqueue(chunk);
+        chunksSent += 1;
+      }
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  const runtime = createContentMatrixRuntime({
+    fetchImpl: async () =>
+      new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+  });
+
+  await assert.rejects(
+    runtime.testConnection(
+      config("openai-compatible", "https://api.example.com/v1", "gpt-example"),
+    ),
+    (error) => {
+      assert.equal(error.code, "PROVIDER_RESPONSE_TOO_LARGE");
+      assert.doesNotMatch(error.message, /api\.example|sk-fake|x{20}/);
+      return true;
+    },
+  );
+  assert.equal(canceled, true);
+  assert.equal(chunksSent, 4);
+});
+
+test("bounds provider model count and model ID length before matching", async () => {
+  const oversizedBodies = [
+    {
+      data: Array.from({ length: 1_001 }, (_, index) => ({
+        id: `model-${index}`,
+      })),
+    },
+    {
+      data: [{ id: "m".repeat(201) }],
+    },
+  ];
+
+  for (const body of oversizedBodies) {
+    const runtime = createContentMatrixRuntime({
+      fetchImpl: async () => jsonResponse(body),
+    });
+    await assert.rejects(
+      runtime.testConnection(
+        config("openai-compatible", "https://api.example.com/v1", "gpt-example"),
+      ),
+      (error) => {
+        assert.equal(error.code, "INVALID_PROVIDER_RESPONSE");
+        assert.doesNotMatch(error.message, /model-1000|m{20}|sk-fake/);
+        return true;
+      },
+    );
+  }
+});
+
+test("rejects oversized generated Markdown with a safe non-reflective error", async () => {
+  const runtime = createContentMatrixRuntime({
+    fetchImpl: async () =>
+      jsonResponse({
+        choices: [
+          {
+            message: {
+              content: `## 战略判断\n${"长".repeat(200_001)}${FAKE_KEY}`,
+            },
+          },
+        ],
+      }),
+  });
+
+  await assert.rejects(
+    runtime.runStage(validRunInput(2)),
+    (error) => {
+      assert.equal(error.code, "INVALID_PROVIDER_RESPONSE");
+      assert.doesNotMatch(error.message, /长{20}|sk-fake|api\.example/);
+      return true;
+    },
+  );
 });
 
 test("rejects API keys containing control characters as invalid configuration", async () => {

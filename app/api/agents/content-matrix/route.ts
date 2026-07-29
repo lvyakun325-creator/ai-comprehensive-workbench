@@ -12,14 +12,17 @@ const NO_STORE_HEADERS = {
 };
 
 export function createContentMatrixRoute(options: RouteOptions = {}) {
-  const runtime = createContentMatrixRuntime(options);
-
   return async function handleContentMatrixRequest(
     request: Request,
   ): Promise<Response> {
     try {
       const payload = await parseRequest(request);
       const action = payload.action;
+      const runtime = createContentMatrixRuntime({
+        ...options,
+        signal: request.signal,
+        egressMode: "server-proxy",
+      });
 
       if (action === "test") {
         const result = await runtime.testConnection(payload);
