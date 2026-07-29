@@ -5,6 +5,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -136,16 +137,26 @@ export function ChatRequestCoordinatorProvider({
     getCredentialRevision,
   });
 
-  sessionsRef.current = sessions;
-  for (const session of sessions) {
-    provisionalSessionIdsRef.current.delete(session.id);
-  }
-  registryRef.current = {
+  useLayoutEffect(() => {
+    sessionsRef.current = sessions;
+    for (const session of sessions) {
+      provisionalSessionIdsRef.current.delete(session.id);
+    }
+  }, [sessions]);
+
+  useLayoutEffect(() => {
+    registryRef.current = {
+      connectedModels,
+      chatSelectedModelId,
+      getCredential,
+      getCredentialRevision,
+    };
+  }, [
     connectedModels,
     chatSelectedModelId,
     getCredential,
     getCredentialRevision,
-  };
+  ]);
 
   const updateUserMessage = useCallback(
     (
