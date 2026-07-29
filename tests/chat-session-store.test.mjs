@@ -1,0 +1,225 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  createChatTitle,
+  createInitialChatSessionState,
+  createSession,
+  deleteSession,
+  getActiveSession,
+  getVisibleSessions,
+  selectSession,
+  updateSession,
+} from "../app/lib/chat-session-store.mjs";
+
+function createSessionRecord({
+  id,
+  title,
+  messages = [],
+  createdAt,
+  updatedAt = createdAt,
+  draft = "",
+  pendingRequest = null,
+  scrollOffset = 0,
+}) {
+  return {
+    id,
+    title,
+    messages,
+    createdAt,
+    updatedAt,
+    draft,
+    pendingRequest,
+    scrollOffset,
+  };
+}
+
+test("初始状态为空", () => {
+  assert.deepEqual(createInitialChatSessionState(), {
+    sessions: [],
+    activeSessionId: null,
+  });
+});
+
+test("标题取首条用户消息前 24 个可见字符并追加省略号", () => {
+  assert.equal(
+    createChatTitle("  这是一个超过二十四个字符的首次提问用于生成会话标题  "),
+    "这是一个超过二十四个字符的首次提问用于生成会话标…",
+  );
+});
+
+test("空白首条消息不能生成标题", () => {
+  assert.equal(createChatTitle(" \n\t "), "");
+});
+
+test("空会话不进入历史", () => {
+  const state = createSession(createInitialChatSessionState(), {
+    id: "session-empty",
+    now: 100,
+  });
+
+  assert.equal(state.activeSessionId, "session-empty");
+  assert.equal(getActiveSession(state)?.id, "session-empty");
+  assert.deepEqual(getVisibleSessions(state), []);
+});
+
+test("非空会话按 updatedAt 倒序显示", () => {
+  const state = {
+    sessions: [
+      createSessionRecord({
+        id: "session-old",
+        title: "旧会话",
+        messages: [{ id: "old-user", role: "user", content: "旧", createdAt: 100 }],
+        createdAt: 100,
+        updatedAt: 200,
+      }),
+      createSessionRecord({
+        id: "session-empty",
+        title: "空会话",
+        createdAt: 300,
+      }),
+      createSessionRecord({
+        id: "session-new",
+        title: "新会话",
+        messages: [{ id: "new-user", role: "user", content: "新", createdAt: 400 }],
+        createdAt: 400,
+        updatedAt: 500,
+      }),
+    ],
+    activeSessionId: "session-new",
+  };
+
+  assert.deepEqual(
+    getVisibleSessions(state).map((session) => session.id),
+    ["session-new", "session-old"],
+  );
+});
+
+test("草稿与消息只更新目标会话", () => {
+  const assistantMessage = {
+    id: "assistant-1",
+    role: "assistant",
+    content: "助手回复",
+    modelName: "可信模型",
+    status: "sent",
+    createdAt: 120,
+  };
+  const state = {
+    sessions: [
+      createSessionRecord({
+        id: "session-target",
+        title: "目标",
+        messages: [{ id: "user-1", role: "user", content: "问题", status: "sent", createdAt: 100 }],
+        createdAt: 100,
+      }),
+      createSessionRecord({
+        id: "session-other",
+        title: "其他",
+        messages: [assistantMessage],
+        createdAt: 110,
+      }),
+    ],
+    activeSessionId: "session-target",
+  };
+
+  const next = updateSession(state, "session-target", (session) => ({
+    ...session,
+    draft: "待发送内容",
+    messages: [...session.messages, assistantMessage],
+    updatedAt: 200,
+  }));
+
+  assert.equal(next.sessions[0].draft, "待发送内容");
+  assert.deepEqual(next.sessions[0].messages.at(-1), assistantMessage);
+  assert.deepEqual(next.sessions[1], state.sessions[1]);
+  assert.deepEqual(state.sessions[0].messages, [
+    { id: "user-1", role: "user", content: "问题", status: "sent", createdAt: 100 },
+  ]);
+});
+
+test("用户、助手消息状态与 modelName 原样保留", () => {
+  const messages = [
+    {
+      id: "user-1",
+      role: "user",
+      content: "正在发送的问题",
+      status: "sending",
+      createdAt: 100,
+    },
+    {
+      id: "assistant-1",
+      role: "assistant",
+      content: "已完成的回复",
+      modelName: "模型 A",
+      status: "sent",
+      createdAt: 101,
+    },
+  ];
+  const state = createSession(createInitialChatSessionState(), {
+    id: "session-messages",
+    now: 100,
+    title: "消息会话",
+    messages,
+  });
+
+  assert.deepEqual(getActiveSession(state)?.messages, messages);
+});
+
+test("删除当前会话后选择最近更新的剩余会话", () => {
+  const stateWithTwoSessions = {
+    sessions: [
+      createSessionRecord({
+        id: "session-old",
+        title: "旧会话",
+        messages: [{ id: "old-user", role: "user", content: "旧", createdAt: 100 }],
+        createdAt: 100,
+        updatedAt: 200,
+      }),
+      createSessionRecord({
+        id: "session-new",
+        title: "新会话",
+        messages: [{ id: "new-user", role: "user", content: "新", createdAt: 300 }],
+        createdAt: 300,
+        updatedAt: 400,
+      }),
+      createSessionRecord({
+        id: "session-older",
+        title: "更旧会话",
+        messages: [{ id: "older-user", role: "user", content: "更旧", createdAt: 50 }],
+        createdAt: 50,
+        updatedAt: 60,
+      }),
+    ],
+    activeSessionId: "session-new",
+  };
+
+  const next = deleteSession(stateWithTwoSessions, "session-new");
+
+  assert.equal(next.activeSessionId, "session-old");
+});
+
+test("删除非当前会话不改变当前选择", () => {
+  const state = {
+    sessions: [
+      createSessionRecord({ id: "session-current", title: "当前", createdAt: 100 }),
+      createSessionRecord({ id: "session-other", title: "其他", createdAt: 200 }),
+    ],
+    activeSessionId: "session-current",
+  };
+
+  const next = deleteSession(state, "session-other");
+
+  assert.equal(next.activeSessionId, "session-current");
+  assert.deepEqual(next.sessions.map((session) => session.id), ["session-current"]);
+});
+
+test("删除最后一个会话返回空态", () => {
+  const state = createSession(createInitialChatSessionState(), {
+    id: "session-only",
+    now: 100,
+  });
+
+  assert.deepEqual(deleteSession(state, "session-only"), {
+    sessions: [],
+    activeSessionId: null,
+  });
+});
