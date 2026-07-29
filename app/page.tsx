@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { ChatSessionProvider } from "./components/ChatSessionProvider";
 import { ControlDesk } from "./components/ControlDesk";
 import { AgentDirectory } from "./components/AgentDirectory";
 import { AgentWorkspace } from "./components/AgentWorkspace";
@@ -30,7 +31,9 @@ const VIEW_LABELS: Record<Exclude<WorkbenchView, "control" | "settings">, string
 export default function Home() {
   return (
     <ModelRegistryProvider>
-      <WorkbenchHome />
+      <ChatSessionProvider>
+        <WorkbenchHome />
+      </ChatSessionProvider>
     </ModelRegistryProvider>
   );
 }

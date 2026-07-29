@@ -2395,6 +2395,119 @@ test("keeps content matrix configuration separate while other Agents select enab
   assert.equal(screen.queryByRole("radio", { name: /Claude/ }), null);
 });
 
+test("聊天会话首次发送后进入独立区域，并在导航后保留当前会话", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-session-navigation",
+      provider: "OpenAI",
+      displayName: "会话测试模型",
+      modelId: "session-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-session-navigation",
+      revision: "revision-session-navigation",
+    },
+  ]);
+  const pending = deferredValue<Response>();
+  globalThis.fetch = (async () => pending.promise) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "第一条测试问题");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  assert.ok(
+    await screen.findByRole("region", { name: "聊天会话" }),
+  );
+  assert.ok(
+    await screen.findByRole("heading", { name: "第一条测试问题" }),
+  );
+  assert.ok(
+    within(screen.getByRole("navigation", { name: "聊天历史" }))
+      .getByRole("button", { name: "打开会话：第一条测试问题" }),
+  );
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+
+  assert.ok(screen.getByText("第一条测试问题"));
+  assert.ok(
+    within(screen.getByRole("log", { name: "聊天记录" }))
+      .getByText("第一条测试问题"),
+  );
+});
+
+test("聊天会话未发送的新会话在导航后不会进入历史", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-session-empty",
+      provider: "OpenAI",
+      displayName: "空会话测试模型",
+      modelId: "empty-session-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-session-empty",
+      revision: "revision-session-empty",
+    },
+  ]);
+  const pending = deferredValue<Response>();
+  globalThis.fetch = (async () => pending.promise) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "保留的历史会话");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await user.click(screen.getByRole("button", { name: "新建会话" }));
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+
+  const history = screen.getByRole("navigation", { name: "聊天历史" });
+  assert.ok(
+    within(history).getByRole("button", {
+      name: "打开会话：保留的历史会话",
+    }),
+  );
+  assert.equal(
+    within(history).queryByRole("button", { name: "打开会话：新对话" }),
+    null,
+  );
+});
+
+test("聊天会话状态只存在于当前 React 运行期", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-session-runtime",
+      provider: "OpenAI",
+      displayName: "运行期测试模型",
+      modelId: "runtime-session-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-session-runtime",
+      revision: "revision-session-runtime",
+    },
+  ]);
+  const pending = deferredValue<Response>();
+  globalThis.fetch = (async () => pending.promise) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "仅当前运行期可见");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  assert.ok(
+    await screen.findByRole("heading", { name: "仅当前运行期可见" }),
+  );
+
+  cleanup();
+  render(<Home />);
+
+  assert.equal(
+    screen.queryByRole("navigation", { name: "聊天历史" }),
+    null,
+  );
+  assert.equal(screen.queryByText("仅当前运行期可见"), null);
+  await waitFor(() =>
+    assert.ok(
+      screen.getByRole("button", { name: "选择模型，当前 运行期测试模型" }),
+    ),
+  );
+});
+
 test("home chat keeps blank send disabled, fills a quick prompt, and shows the submitted turn immediately", async () => {
   installConnectedChatModels([
     {
