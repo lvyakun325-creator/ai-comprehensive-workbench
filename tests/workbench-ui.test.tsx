@@ -2155,7 +2155,7 @@ test("home chat proxies other models without an egress override and keeps conver
   );
 });
 
-test("home chat bounds provider history to the latest 20 visible turns", async () => {
+test("home chat bounds history to complete exchanges plus the current user", async () => {
   installConnectedChatModels([
     {
       id: "chat-bounded",
@@ -2181,19 +2181,84 @@ test("home chat bounds provider history to the latest 20 visible turns", async (
   await waitFor(() =>
     assert.ok(screen.getByRole("button", { name: "选择模型，当前 上下文模型" })),
   );
-  for (let index = 1; index <= 12; index += 1) {
+  for (let index = 1; index <= 13; index += 1) {
     await user.type(screen.getByLabelText("聊天消息输入框"), `问题 ${index}`);
     await user.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => assert.ok(screen.getByText(`回复 ${index}`)));
   }
 
-  assert.equal(histories.length, 12);
+  assert.equal(histories.length, 13);
   assert.ok(histories.every((turns) => turns.length <= 20));
-  assert.equal(histories.at(-1)?.length, 20);
-  assert.deepEqual(histories.at(-1)?.at(-1), {
-    role: "user",
-    content: "问题 12",
-  });
+  assert.deepEqual(histories.at(-1), [
+    { role: "user", content: "问题 4" },
+    { role: "assistant", content: "回复 4" },
+    { role: "user", content: "问题 5" },
+    { role: "assistant", content: "回复 5" },
+    { role: "user", content: "问题 6" },
+    { role: "assistant", content: "回复 6" },
+    { role: "user", content: "问题 7" },
+    { role: "assistant", content: "回复 7" },
+    { role: "user", content: "问题 8" },
+    { role: "assistant", content: "回复 8" },
+    { role: "user", content: "问题 9" },
+    { role: "assistant", content: "回复 9" },
+    { role: "user", content: "问题 10" },
+    { role: "assistant", content: "回复 10" },
+    { role: "user", content: "问题 11" },
+    { role: "assistant", content: "回复 11" },
+    { role: "user", content: "问题 12" },
+    { role: "assistant", content: "回复 12" },
+    { role: "user", content: "问题 13" },
+  ]);
+});
+
+test("home chat omits an unanswered intermediate user instead of creating invalid role order", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-unanswered",
+      provider: "OpenAI",
+      displayName: "顺序模型",
+      modelId: "ordered-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-ordered",
+      revision: "revision-chat-ordered",
+    },
+  ]);
+  const firstPending = deferredValue<Response>();
+  const histories: Array<Array<{ role: string; content: string }>> = [];
+  let requestCount = 0;
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      turns: Array<{ role: string; content: string }>;
+    };
+    histories.push(body.turns);
+    requestCount += 1;
+    if (requestCount === 1) return firstPending.promise;
+    return Response.json({ ok: true, reply: `有效回复 ${requestCount - 1}` });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await waitFor(() =>
+    assert.ok(screen.getByRole("button", { name: "选择模型，当前 顺序模型" })),
+  );
+  await user.type(screen.getByLabelText("聊天消息输入框"), "未获回复的问题");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.equal(requestCount, 1));
+  await user.click(screen.getByRole("button", { name: "停止" }));
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "有效问题 1");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("有效回复 1")));
+  await user.type(screen.getByLabelText("聊天消息输入框"), "有效问题 2");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("有效回复 2")));
+
+  assert.deepEqual(histories[2], [
+    { role: "user", content: "有效问题 1" },
+    { role: "assistant", content: "有效回复 1" },
+    { role: "user", content: "有效问题 2" },
+  ]);
 });
 
 test("home chat stop aborts and rejects a late reply without removing visible turns", async () => {
@@ -2302,6 +2367,114 @@ test("home chat failure is safe and retry uses the currently selected model with
     within(screen.getByLabelText("聊天记录")).getByText("重试模型"),
   );
   assert.doesNotMatch(document.body.textContent ?? "", new RegExp(retryKey));
+});
+
+test("home chat stop during retry preserves retry state for another successful attempt", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-retry-stop",
+      provider: "OpenAI",
+      displayName: "可恢复模型",
+      modelId: "retry-stop-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-retry-stop",
+      revision: "revision-chat-retry-stop",
+    },
+  ]);
+  const retryPending = deferredValue<Response>();
+  const requestSignals: AbortSignal[] = [];
+  const turns: Array<Array<{ role: string; content: string }>> = [];
+  let requestCount = 0;
+  globalThis.fetch = (async (_input, init) => {
+    requestCount += 1;
+    requestSignals.push(init?.signal as AbortSignal);
+    turns.push(
+      (JSON.parse(String(init?.body)) as {
+        turns: Array<{ role: string; content: string }>;
+      }).turns,
+    );
+    if (requestCount === 1) {
+      return Response.json({ ok: false }, { status: 502 });
+    }
+    if (requestCount === 2) return retryPending.promise;
+    return Response.json({ ok: true, reply: "再次重试成功" });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await waitFor(() =>
+    assert.ok(screen.getByRole("button", { name: "选择模型，当前 可恢复模型" })),
+  );
+  await user.type(screen.getByLabelText("聊天消息输入框"), "需要恢复的消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByRole("button", { name: "重新发送" })));
+
+  await user.click(screen.getByRole("button", { name: "重新发送" }));
+  await waitFor(() => assert.equal(requestCount, 2));
+  assert.equal(
+    (screen.getByRole("button", { name: "重新发送" }) as HTMLButtonElement)
+      .disabled,
+    true,
+  );
+  await user.click(screen.getByRole("button", { name: "停止" }));
+
+  assert.equal(requestSignals[1]?.aborted, true);
+  assert.equal(
+    (screen.getByRole("button", { name: "重新发送" }) as HTMLButtonElement)
+      .disabled,
+    false,
+  );
+  await user.click(screen.getByRole("button", { name: "重新发送" }));
+  await waitFor(() => assert.ok(screen.getByText("再次重试成功")));
+
+  assert.equal(requestCount, 3);
+  assert.equal(screen.getAllByText("需要恢复的消息").length, 1);
+  assert.deepEqual(turns, [
+    [{ role: "user", content: "需要恢复的消息" }],
+    [{ role: "user", content: "需要恢复的消息" }],
+    [{ role: "user", content: "需要恢复的消息" }],
+  ]);
+  assert.equal(screen.queryByRole("button", { name: "重新发送" }), null);
+});
+
+test("home chat blocks ordinary sends while a failed turn still needs retry", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-failed-lock",
+      provider: "OpenAI",
+      displayName: "失败锁定模型",
+      modelId: "failed-lock-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-failed-lock",
+      revision: "revision-chat-failed-lock",
+    },
+  ]);
+  let requestCount = 0;
+  globalThis.fetch = (async () => {
+    requestCount += 1;
+    return Response.json({ ok: false }, { status: 502 });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await waitFor(() =>
+    assert.ok(
+      screen.getByRole("button", { name: "选择模型，当前 失败锁定模型" }),
+    ),
+  );
+  await user.type(screen.getByLabelText("聊天消息输入框"), "首次失败");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByRole("button", { name: "重新发送" })));
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "不应另发");
+  const send = screen.getByRole("button", { name: "发送" });
+  assert.equal((send as HTMLButtonElement).disabled, true);
+  (send as HTMLButtonElement).click();
+  assert.equal(requestCount, 1);
+  assert.equal(
+    within(screen.getByLabelText("聊天记录")).queryByText("不应另发"),
+    null,
+  );
 });
 
 test("leaving home chat aborts its active request and ignores its completion", async () => {

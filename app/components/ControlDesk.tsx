@@ -44,10 +44,28 @@ function createMessageId() {
 }
 
 function toProviderTurns(messages: ChatMessage[]): ChatTurn[] {
-  return messages
+  const turns = messages
     .filter((message) => message.role === "user" || message.role === "assistant")
-    .slice(-MAX_CONTEXT_TURNS)
     .map(({ role, content }) => ({ role, content }));
+  const currentUser = turns.at(-1);
+  if (!currentUser || currentUser.role !== "user") return [];
+
+  const exchanges: ChatTurn[][] = [];
+  let unmatchedUser: ChatTurn | null = null;
+  for (const turn of turns.slice(0, -1)) {
+    if (turn.role === "user") {
+      unmatchedUser = turn;
+    } else if (unmatchedUser) {
+      exchanges.push([unmatchedUser, turn]);
+      unmatchedUser = null;
+    }
+  }
+
+  const maxExchanges = Math.floor((MAX_CONTEXT_TURNS - 1) / 2);
+  return [
+    ...exchanges.slice(-maxExchanges).flat(),
+    currentUser,
+  ];
 }
 
 async function requestProxyReply(
@@ -161,7 +179,6 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
     };
     activeRequestRef.current = request;
     setPendingRequest(request);
-    setFailedRequest(null);
 
     const config = {
       baseUrl: selectedModel.baseUrl,
@@ -193,6 +210,11 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
           modelName: request.modelName,
         },
       ]);
+      setFailedRequest((currentFailure) =>
+        currentFailure?.userMessageId === request.userMessageId
+          ? null
+          : currentFailure,
+      );
     } catch (error) {
       if (
         controller.signal.aborted
@@ -220,7 +242,7 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
 
   function sendMessage() {
     const content = input.trim();
-    if (!content || !chatSelectedModel || pendingRequest) return;
+    if (!content || !chatSelectedModel || pendingRequest || failedRequest) return;
     const userMessage: ChatMessage = {
       id: createMessageId(),
       role: "user",
@@ -229,7 +251,6 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
     const nextMessages = [...messages, userMessage];
     setMessages(nextMessages);
     setInput("");
-    setFailedRequest(null);
     void requestReply(userMessage.id, nextMessages);
   }
 
@@ -407,6 +428,7 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
                 !input.trim()
                 || !chatSelectedModel
                 || Boolean(pendingRequest)
+                || Boolean(failedRequest)
               }
               onClick={sendMessage}
               type="button"
