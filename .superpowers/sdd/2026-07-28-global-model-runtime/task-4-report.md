@@ -71,3 +71,77 @@ Result: passed.
 - Credentials remain browser-local and origin-readable as disclosed by the existing global settings UI; Task 4 does not change the storage boundary.
 - APINebula browser-direct chat depends on the provider's live CORS policy and browser network conditions. It intentionally does not fall back to the server proxy.
 - The home transcript is intentionally in-memory for this task and is cleared when the user leaves the home view or reloads the page.
+
+---
+
+## Fix round 1 — exchange-safe context and recoverable retry state
+
+### Status
+
+DONE
+
+### Fix summary
+
+- Replaced single-message slicing with complete-exchange selection. Provider history now contains at most the latest nine complete `user`/`assistant` exchanges plus the current `user` turn, for a maximum of 19 valid turns under the 20-turn ceiling.
+- Unanswered historical user turns and stray assistants are omitted instead of producing consecutive users or an assistant-first payload. The newest complete exchanges and current user are always retained.
+- Made the minimal failure state explicit through the existing `failedRequest` and `pendingRequest` states: unresolved failure blocks ordinary send; retry preserves the failure while pending; retry success clears it; retry failure or stop leaves it retryable.
+- Retry continues to reuse the same visible user message and re-resolve the current selected model without inserting a duplicate turn.
+- Left the controller-deferred `aria-live` minor unchanged.
+
+### RED / GREEN evidence
+
+| Cycle | RED evidence | GREEN evidence |
+| --- | --- | --- |
+| Complete exchanges | `npx tsx --test --test-name-pattern="complete exchanges\|unanswered intermediate\|stop during retry\|blocks ordinary sends" tests/workbench-ui.test.tsx` failed 4/4. The long history began with orphaned `assistant: 回复 3`, and an unanswered historical user produced consecutive user roles. | The same focused suite passed 4/4 after exchange-aware selection. The 13th request contains exactly questions/replies 4 through 12 plus question 13, and the unanswered-user case emits one complete exchange plus the current user. |
+| Recoverable retry state | Before the fix, retry startup removed “重新发送”, stop could not restore it, and failed state left ordinary send enabled. | After the fix, failure → retry pending → stop → retry again → success passes, all three requests contain the same single user turn, and failed state blocks ordinary send without issuing another request. |
+
+### Final verification
+
+```bash
+npx tsx --test --test-name-pattern="home chat|leaving home chat" tests/workbench-ui.test.tsx
+```
+
+Result: 11 tests passed, 0 failed.
+
+```bash
+npx tsx --test tests/workbench-ui.test.tsx tests/global-model-runtime.test.mjs tests/global-model-route.test.mjs
+```
+
+Result: 80 tests passed, 0 failed.
+
+```bash
+npm test
+```
+
+Result: Vinext production build completed and all 201 tests passed, 0 failed.
+
+```bash
+npm run lint
+```
+
+Result: 0 errors. The same three pre-existing unused-variable warnings remain in `tests/model-registry.test.mjs`.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+### Commit
+
+- `376481c` (`fix: preserve valid home chat retry context`)
+
+### Self-review
+
+- Confirmed every emitted provider history begins with a user, ends with the current user, alternates roles inside complete historical exchanges, and stays below the 20-turn runtime limit.
+- Confirmed an unanswered historical user cannot be paired with a later unrelated assistant or retained beside the current user.
+- Confirmed retry startup no longer clears failure state; only a token-current successful reply for the same user clears it.
+- Confirmed stop invalidates and aborts the retry request while leaving the failure and original visible user message intact.
+- Confirmed failed state is enforced both by the send-button disabled condition and the send-handler guard.
+- Mutation check: raw `.slice(-20)`, retaining unmatched users, clearing failure at retry start, omitting failure from either send guard, or failing to clear it on success would each fail focused coverage.
+
+### Remaining concerns
+
+- The provider context maximum is intentionally 19 in the normal request shape because valid alternating history must both begin and end with a user; this remains within the required 20-turn ceiling.
+- Browser-local credential and APINebula CORS concerns from the original Task 4 report remain unchanged.
+- Transcript persistence and the deferred `aria-live` minor remain outside this fix round.
