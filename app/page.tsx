@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { ChatRequestCoordinatorProvider } from "./components/ChatRequestCoordinatorProvider";
 import { ChatSessionProvider } from "./components/ChatSessionProvider";
 import { ControlDesk } from "./components/ControlDesk";
 import { AgentDirectory } from "./components/AgentDirectory";
@@ -32,7 +33,9 @@ export default function Home() {
   return (
     <ModelRegistryProvider>
       <ChatSessionProvider>
-        <WorkbenchHome />
+        <ChatRequestCoordinatorProvider>
+          <WorkbenchHome />
+        </ChatRequestCoordinatorProvider>
       </ChatSessionProvider>
     </ModelRegistryProvider>
   );

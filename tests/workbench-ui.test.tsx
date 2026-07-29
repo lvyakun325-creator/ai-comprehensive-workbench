@@ -64,6 +64,11 @@ function assertSignalAborted(signal: AbortSignal | null) {
   assert.equal(signal.aborted, true);
 }
 
+function assertSignalNotAborted(signal: AbortSignal | null) {
+  assert.ok(signal);
+  assert.equal(signal.aborted, false);
+}
+
 type ConnectedChatModelFixture = {
   id: string;
   provider: string;
@@ -2663,6 +2668,128 @@ test("home chat proxies other models without an egress override and keeps conver
   );
 });
 
+test("同一会话连续对话三轮只携带本会话的完整问答", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-continuous",
+      provider: "OpenAI",
+      displayName: "连续对话模型",
+      modelId: "continuous-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-continuous",
+      revision: "revision-chat-continuous",
+    },
+  ]);
+  const requestBodies: Array<{
+    turns: Array<{ role: string; content: string }>;
+  }> = [];
+  globalThis.fetch = (async (_input, init) => {
+    requestBodies.push(JSON.parse(String(init?.body)));
+    return Response.json({
+      ok: true,
+      reply: ["第一答", "第二答", "第三答"][requestBodies.length - 1],
+    });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  for (const [question, answer] of [
+    ["第一问", "第一答"],
+    ["第二问", "第二答"],
+    ["第三问", "第三答"],
+  ]) {
+    await user.type(screen.getByLabelText("聊天消息输入框"), question);
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => assert.ok(screen.getByText(answer)));
+  }
+
+  assert.deepEqual(requestBodies[2].turns, [
+    { role: "user", content: "第一问" },
+    { role: "assistant", content: "第一答" },
+    { role: "user", content: "第二问" },
+    { role: "assistant", content: "第二答" },
+    { role: "user", content: "第三问" },
+  ]);
+});
+
+test("新会话第一次请求与旧会话隔离", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-isolated",
+      provider: "OpenAI",
+      displayName: "会话隔离模型",
+      modelId: "isolated-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-isolated",
+      revision: "revision-chat-isolated",
+    },
+  ]);
+  const requestBodies: Array<{
+    turns: Array<{ role: string; content: string }>;
+  }> = [];
+  globalThis.fetch = (async (_input, init) => {
+    requestBodies.push(JSON.parse(String(init?.body)));
+    return Response.json({
+      ok: true,
+      reply: requestBodies.length === 1 ? "旧会话回答" : "新会话回答",
+    });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "旧会话问题");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("旧会话回答")));
+  await user.click(screen.getByRole("button", { name: "新建会话" }));
+  await user.type(screen.getByLabelText("聊天消息输入框"), "新会话第一问");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("新会话回答")));
+
+  assert.deepEqual(requestBodies[1].turns, [
+    { role: "user", content: "新会话第一问" },
+  ]);
+});
+
+test("会话隔离下其他会话可编辑草稿但全局请求期间不能发送并显示活动会话提示", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-global-request",
+      provider: "OpenAI",
+      displayName: "全局请求模型",
+      modelId: "global-request-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-global-request",
+      revision: "revision-chat-global-request",
+    },
+  ]);
+  const pending = deferredValue<Response>();
+  let requestCount = 0;
+  globalThis.fetch = (async () => {
+    requestCount += 1;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "活动会话问题");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.equal(requestCount, 1));
+  await user.click(screen.getByRole("button", { name: "新建会话" }));
+  const input = screen.getByLabelText("聊天消息输入框");
+  await user.type(input, "另一个会话的草稿");
+
+  assert.equal((input as HTMLTextAreaElement).value, "另一个会话的草稿");
+  assert.equal(
+    (screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled,
+    true,
+  );
+  assert.match(
+    screen.getByRole("status", { name: "活动会话提示" }).textContent ?? "",
+    /活动会话问题.*正在回复.*可继续编辑草稿/,
+  );
+  assert.equal(requestCount, 1);
+});
+
 test("home chat bounds history to complete exchanges plus the current user", async () => {
   installConnectedChatModels([
     {
@@ -2769,7 +2896,7 @@ test("home chat omits an unanswered intermediate user instead of creating invali
   ]);
 });
 
-test("home chat stop aborts and rejects a late reply without removing visible turns", async () => {
+test("停止后用户消息标记为已停止并可立即发送新问题", async () => {
   installConnectedChatModels([
     {
       id: "chat-stop",
@@ -2783,9 +2910,12 @@ test("home chat stop aborts and rejects a late reply without removing visible tu
   ]);
   const pending = deferredValue<Response>();
   let requestSignal: AbortSignal | null = null;
+  let requestCount = 0;
   globalThis.fetch = (async (_input, init) => {
+    requestCount += 1;
     requestSignal = init?.signal as AbortSignal;
-    return pending.promise;
+    if (requestCount === 1) return pending.promise;
+    return Response.json({ ok: true, reply: "停止后的新回复" });
   }) as typeof fetch;
   const user = userEvent.setup({ document });
   render(<Home />);
@@ -2800,14 +2930,22 @@ test("home chat stop aborts and rejects a late reply without removing visible tu
 
   assertSignalAborted(requestSignal);
   assert.ok(screen.getByText("保留这条消息"));
+  assert.ok(screen.getByText("已停止"));
   assert.equal(screen.queryByRole("button", { name: "停止" }), null);
+  await user.type(screen.getByLabelText("聊天消息输入框"), "停止后的新问题");
+  assert.equal(
+    (screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled,
+    false,
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("停止后的新回复")));
   pending.resolve(Response.json({ ok: true, reply: "不应出现的旧回复" }));
   await waitFor(() =>
     assert.equal(screen.queryByText("不应出现的旧回复"), null),
   );
 });
 
-test("home chat failure is safe and retry uses the currently selected model without duplicating the user turn", async () => {
+test("失败后可重试且切换模型也不重复插入用户消息", async () => {
   const firstKey = "sk-chat-failure-full-secret";
   const retryKey = "sk-chat-retry-full-secret";
   const rawProviderBody = `upstream exploded with ${firstKey}`;
@@ -2856,6 +2994,7 @@ test("home chat failure is safe and retry uses the currently selected model with
   await waitFor(() => assert.ok(screen.getByRole("button", { name: "重新发送" })));
 
   assert.equal(screen.getAllByText("只保留一次").length, 1);
+  assert.ok(screen.getByText("发送失败"));
   assert.doesNotMatch(document.body.textContent ?? "", new RegExp(firstKey));
   assert.doesNotMatch(document.body.textContent ?? "", new RegExp(rawProviderBody));
   await user.click(screen.getByRole("button", { name: "选择模型，当前 失败模型" }));
@@ -2877,7 +3016,7 @@ test("home chat failure is safe and retry uses the currently selected model with
   assert.doesNotMatch(document.body.textContent ?? "", new RegExp(retryKey));
 });
 
-test("home chat stop during retry preserves retry state for another successful attempt", async () => {
+test("重试中的请求停止后标记为已停止且允许发送新问题", async () => {
   installConnectedChatModels([
     {
       id: "chat-retry-stop",
@@ -2905,7 +3044,7 @@ test("home chat stop during retry preserves retry state for another successful a
       return Response.json({ ok: false }, { status: 502 });
     }
     if (requestCount === 2) return retryPending.promise;
-    return Response.json({ ok: true, reply: "再次重试成功" });
+    return Response.json({ ok: true, reply: "停止重试后的新回复" });
   }) as typeof fetch;
   const user = userEvent.setup({ document });
   render(<Home />);
@@ -2919,33 +3058,28 @@ test("home chat stop during retry preserves retry state for another successful a
 
   await user.click(screen.getByRole("button", { name: "重新发送" }));
   await waitFor(() => assert.equal(requestCount, 2));
-  assert.equal(
-    (screen.getByRole("button", { name: "重新发送" }) as HTMLButtonElement)
-      .disabled,
-    true,
-  );
+  assert.equal(screen.queryByRole("button", { name: "重新发送" }), null);
+  assert.ok(screen.getByRole("button", { name: "停止" }));
   await user.click(screen.getByRole("button", { name: "停止" }));
 
   assert.equal(requestSignals[1]?.aborted, true);
-  assert.equal(
-    (screen.getByRole("button", { name: "重新发送" }) as HTMLButtonElement)
-      .disabled,
-    false,
-  );
-  await user.click(screen.getByRole("button", { name: "重新发送" }));
-  await waitFor(() => assert.ok(screen.getByText("再次重试成功")));
+  assert.ok(screen.getByText("已停止"));
+  assert.equal(screen.queryByRole("button", { name: "重新发送" }), null);
+  await user.type(screen.getByLabelText("聊天消息输入框"), "停止重试后的新问题");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("停止重试后的新回复")));
 
   assert.equal(requestCount, 3);
   assert.equal(screen.getAllByText("需要恢复的消息").length, 1);
   assert.deepEqual(turns, [
     [{ role: "user", content: "需要恢复的消息" }],
     [{ role: "user", content: "需要恢复的消息" }],
-    [{ role: "user", content: "需要恢复的消息" }],
+    [{ role: "user", content: "停止重试后的新问题" }],
   ]);
   assert.equal(screen.queryByRole("button", { name: "重新发送" }), null);
 });
 
-test("home chat blocks ordinary sends while a failed turn still needs retry", async () => {
+test("失败后可直接发送新问题且不会被旧失败锁死", async () => {
   installConnectedChatModels([
     {
       id: "chat-failed-lock",
@@ -2960,7 +3094,9 @@ test("home chat blocks ordinary sends while a failed turn still needs retry", as
   let requestCount = 0;
   globalThis.fetch = (async () => {
     requestCount += 1;
-    return Response.json({ ok: false }, { status: 502 });
+    return requestCount === 1
+      ? Response.json({ ok: false }, { status: 502 })
+      : Response.json({ ok: true, reply: "失败后的新回复" });
   }) as typeof fetch;
   const user = userEvent.setup({ document });
   render(<Home />);
@@ -2974,18 +3110,17 @@ test("home chat blocks ordinary sends while a failed turn still needs retry", as
   await user.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => assert.ok(screen.getByRole("button", { name: "重新发送" })));
 
-  await user.type(screen.getByLabelText("聊天消息输入框"), "不应另发");
+  await user.type(screen.getByLabelText("聊天消息输入框"), "失败后的新问题");
   const send = screen.getByRole("button", { name: "发送" });
-  assert.equal((send as HTMLButtonElement).disabled, true);
-  (send as HTMLButtonElement).click();
-  assert.equal(requestCount, 1);
-  assert.equal(
-    within(screen.getByLabelText("聊天记录")).queryByText("不应另发"),
-    null,
-  );
+  assert.equal((send as HTMLButtonElement).disabled, false);
+  await user.click(send);
+  await waitFor(() => assert.ok(screen.getByText("失败后的新回复")));
+  assert.equal(requestCount, 2);
+  assert.equal(screen.getAllByText("首次失败").length, 1);
+  assert.equal(screen.getAllByText("失败后的新问题").length, 1);
 });
 
-test("leaving home chat aborts its active request and ignores its completion", async () => {
+test("切换工作台页面不会丢会话且迟到响应更新原会话", async () => {
   installConnectedChatModels([
     {
       id: "chat-unmount",
@@ -3014,9 +3149,97 @@ test("leaving home chat aborts its active request and ignores its completion", a
   await waitFor(() => assert.ok(requestSignal));
   await user.click(screen.getByRole("button", { name: "Agent 项目" }));
 
-  assertSignalAborted(requestSignal);
-  pending.resolve(Response.json({ ok: true, reply: "卸载后的旧回复" }));
-  await waitFor(() => assert.equal(screen.queryByText("卸载后的旧回复"), null));
+  assertSignalNotAborted(requestSignal);
+  pending.resolve(Response.json({ ok: true, reply: "切换页面后的回复" }));
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+  await waitFor(() => assert.ok(screen.getByText("切换页面后的回复")));
+  assert.ok(screen.getByText("卸载前请求"));
+});
+
+test("删除请求中的会话会中止请求且迟到响应不会进入其他会话", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-delete-active",
+      provider: "OpenAI",
+      displayName: "删除会话模型",
+      modelId: "delete-active-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-delete-active",
+      revision: "revision-chat-delete-active",
+    },
+  ]);
+  const pending = deferredValue<Response>();
+  let requestCount = 0;
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestCount += 1;
+    if (requestCount === 1) {
+      requestSignal = init?.signal as AbortSignal;
+      return pending.promise;
+    }
+    return Response.json({ ok: true, reply: "其他会话回复" });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "请求中的会话");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.click(screen.getByRole("button", { name: "新建会话" }));
+  await user.type(screen.getByLabelText("聊天消息输入框"), "其他会话问题");
+  await user.click(
+    screen.getByRole("button", { name: "删除会话：请求中的会话" }),
+  );
+
+  await waitFor(() => assertSignalAborted(requestSignal));
+  assert.equal(
+    (screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled,
+    false,
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("其他会话回复")));
+  pending.resolve(Response.json({ ok: true, reply: "删除后的迟到响应" }));
+  await waitFor(() =>
+    assert.equal(screen.queryByText("删除后的迟到响应"), null),
+  );
+  assert.equal(screen.queryByText("请求中的会话"), null);
+});
+
+test("凭据修订变化会停止活动请求且聊天 DOM 不出现密钥", async () => {
+  const oldKey = "sk-chat-revision-old-secret";
+  const newKey = "sk-chat-revision-new-secret";
+  installConnectedChatModels([
+    {
+      id: "chat-revision-change",
+      provider: "OpenAI",
+      displayName: "凭据修订模型",
+      modelId: "revision-change-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: oldKey,
+      revision: "revision-chat-before-change",
+    },
+  ]);
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "凭据变化中的问题");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await user.type(screen.getByLabelText("文案模型 API Key"), newKey);
+  await user.click(screen.getByRole("button", { name: "保存设置" }));
+  await waitFor(() => assertSignalAborted(requestSignal));
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+
+  assert.ok(screen.getByText("已停止"));
+  assert.doesNotMatch(document.body.textContent ?? "", new RegExp(oldKey));
+  assert.doesNotMatch(document.body.textContent ?? "", new RegExp(newKey));
 });
 
 test("home chat and Agent A and B keep independent model selections", async () => {

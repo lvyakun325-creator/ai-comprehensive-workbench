@@ -1,12 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import {
-  generateChatReply,
-  safeModelErrorMessage,
-  usesBrowserDirectModelRoute,
-  type ChatTurn,
-  type GlobalTextConfig,
-} from "../lib/global-model-runtime";
-import type { ChatMessage } from "../lib/chat-session-store.mjs";
+import { useState } from "react";
+import { useChatRequestCoordinator } from "./ChatRequestCoordinatorProvider";
 import { useChatSessions } from "./ChatSessionProvider";
 import { useModelRegistry } from "./ModelRegistryProvider";
 
@@ -15,300 +8,66 @@ type ControlDeskProps = {
   onPreview: (message: string) => void;
 };
 
-type PendingRequest = {
-  token: symbol;
-  controller: AbortController;
-  sessionId: string;
-  modelId: string;
-  modelName: string;
-  credentialRevision: string;
-  userMessageId: string;
-};
-
-type FailedRequest = {
-  sessionId: string;
-  userMessageId: string;
-  message: string;
-};
-
-const MAX_CONTEXT_TURNS = 20;
-const SAFE_PROXY_ERROR = "模型请求失败，请检查网络或配置后重试。";
-let messageSequence = 0;
-
-function createMessageId() {
-  messageSequence += 1;
-  return `chat-message-${messageSequence}`;
-}
-
-function toProviderTurns(messages: ChatMessage[]): ChatTurn[] {
-  const turns = messages
-    .filter((message) => message.role === "user" || message.role === "assistant")
-    .map(({ role, content }) => ({ role, content }));
-  const currentUser = turns.at(-1);
-  if (!currentUser || currentUser.role !== "user") return [];
-
-  const exchanges: ChatTurn[][] = [];
-  let unmatchedUser: ChatTurn | null = null;
-  for (const turn of turns.slice(0, -1)) {
-    if (turn.role === "user") {
-      unmatchedUser = turn;
-    } else if (unmatchedUser) {
-      exchanges.push([unmatchedUser, turn]);
-      unmatchedUser = null;
-    }
-  }
-
-  const maxExchanges = Math.floor((MAX_CONTEXT_TURNS - 1) / 2);
-  return [
-    ...exchanges.slice(-maxExchanges).flat(),
-    currentUser,
-  ];
-}
-
-async function requestProxyReply(
-  config: GlobalTextConfig,
-  turns: ChatTurn[],
-  signal: AbortSignal,
-) {
-  const response = await fetch("/api/models/chat", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ config, turns }),
-    signal,
-  });
-  if (!response.ok) throw new Error(SAFE_PROXY_ERROR);
-
-  let body: unknown;
-  try {
-    body = await response.json();
-  } catch {
-    throw new Error(SAFE_PROXY_ERROR);
-  }
-  if (
-    !body
-    || typeof body !== "object"
-    || (body as { ok?: unknown }).ok !== true
-    || typeof (body as { reply?: unknown }).reply !== "string"
-    || !(body as { reply: string }).reply.trim()
-  ) {
-    throw new Error(SAFE_PROXY_ERROR);
-  }
-  return (body as { reply: string }).reply;
-}
-
 export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
   const {
     sessions,
     activeSession,
     visibleSessions,
     createEmptySession,
+    deleteSession,
     ensureSession,
     selectSession,
     updateSession,
   } = useChatSessions();
   const {
+    activeRequestSessionId,
+    retryMessage,
+    sendMessage,
+    stopRequest,
+  } = useChatRequestCoordinator();
+  const {
     connectedModels,
     chatSelectedModel,
     chatSelectedModelId,
     setChatSelectedModelId,
-    getCredential,
-    getCredentialRevision,
   } = useModelRegistry();
   const [isModelPickerOpen, setModelPickerOpen] = useState(false);
-  const [input, setInput] = useState("");
-  const [pendingRequest, setPendingRequest] = useState<PendingRequest | null>(null);
-  const [failedRequest, setFailedRequest] = useState<FailedRequest | null>(null);
-  const activeRequestRef = useRef<PendingRequest | null>(null);
-  const mountedRef = useRef(true);
+  const [initialDraft, setInitialDraft] = useState("");
   const messages = activeSession?.messages ?? [];
+  const input = activeSession?.draft ?? initialDraft;
+  const activeSessionRequest =
+    activeRequestSessionId === activeSession?.id
+      ? activeSession?.pendingRequest ?? null
+      : null;
+  const requestingSession = sessions.find(
+    (session) => session.id === activeRequestSessionId,
+  );
 
-  function cancelActiveRequest(updateState: boolean) {
-    const activeRequest = activeRequestRef.current;
-    if (!activeRequest) return;
-    activeRequestRef.current = null;
-    activeRequest.controller.abort();
-    if (updateState && mountedRef.current) {
-      setPendingRequest(null);
-    }
-  }
-
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      cancelActiveRequest(false);
-    };
-  }, []);
-
-  useEffect(() => {
-    const activeRequest = activeRequestRef.current;
-    if (!activeRequest) return;
-    const activeModel = connectedModels.find(
-      (model) => model.id === activeRequest.modelId,
-    );
-    if (
-      !activeModel
-      || getCredentialRevision(activeRequest.modelId)
-        !== activeRequest.credentialRevision
-    ) {
-      cancelActiveRequest(true);
-    }
-  }, [connectedModels, getCredentialRevision]);
-
-  async function requestReply(
-    sessionId: string,
-    userMessageId: string,
-    conversation: ChatMessage[],
-  ) {
-    if (activeRequestRef.current) return;
-    const selectedModel = connectedModels.find(
-      (model) => model.id === chatSelectedModelId,
-    );
-    if (!selectedModel) return;
-
-    const credential = getCredential(selectedModel.id);
-    if (!credential) {
-      setFailedRequest({
-        sessionId,
-        userMessageId,
-        message: "当前模型没有可用凭据，请重新配置后再试。",
-      });
-      return;
-    }
-
-    const controller = new AbortController();
-    const request: PendingRequest = {
-      token: Symbol("home-chat-request"),
-      controller,
-      sessionId,
-      modelId: selectedModel.id,
-      modelName: selectedModel.displayName,
-      credentialRevision: getCredentialRevision(selectedModel.id),
-      userMessageId,
-    };
-    activeRequestRef.current = request;
-    setPendingRequest(request);
-
-    const config = {
-      baseUrl: selectedModel.baseUrl,
-      apiKey: credential,
-      model: selectedModel.modelId,
-    };
-    const turns = toProviderTurns(conversation);
-
-    try {
-      const reply = usesBrowserDirectModelRoute(selectedModel.baseUrl)
-        ? await generateChatReply(config, turns, {
-            egressMode: "browser-direct",
-            fetchImpl: globalThis.fetch,
-            signal: controller.signal,
-          })
-        : await requestProxyReply(config, turns, controller.signal);
-      if (
-        !mountedRef.current
-        || activeRequestRef.current?.token !== request.token
-      ) {
-        return;
-      }
-      const now = Date.now();
-      updateSession(request.sessionId, (session) => ({
-        ...session,
-        messages: [
-          ...session.messages,
-          {
-            id: createMessageId(),
-            role: "assistant",
-            content: reply,
-            modelName: request.modelName,
-            createdAt: now,
-          },
-        ],
-        updatedAt: now,
-      }));
-      setFailedRequest((currentFailure) =>
-        currentFailure?.userMessageId === request.userMessageId
-          ? null
-          : currentFailure,
-      );
-    } catch (error) {
-      if (
-        controller.signal.aborted
-        || !mountedRef.current
-        || activeRequestRef.current?.token !== request.token
-      ) {
-        return;
-      }
-      setFailedRequest({
-        sessionId: request.sessionId,
-        userMessageId: request.userMessageId,
-        message: usesBrowserDirectModelRoute(selectedModel.baseUrl)
-          ? safeModelErrorMessage(error, credential)
-          : SAFE_PROXY_ERROR,
-      });
-    } finally {
-      if (
-        mountedRef.current
-        && activeRequestRef.current?.token === request.token
-      ) {
-        activeRequestRef.current = null;
-        setPendingRequest(null);
-      }
-    }
-  }
-
-  function sendMessage() {
+  function submitMessage() {
     const content = input.trim();
-    if (!content || !chatSelectedModel || pendingRequest || failedRequest) return;
+    if (!content || !chatSelectedModel || activeRequestSessionId) return;
     const sessionId = ensureSession(content);
-    const now = Date.now();
-    const userMessage: ChatMessage = {
-      id: createMessageId(),
-      role: "user",
-      content,
-      createdAt: now,
-    };
-    const nextMessages = [...messages, userMessage];
-    updateSession(sessionId, (session) => ({
-      ...session,
-      messages: nextMessages,
-      draft: "",
-      updatedAt: now,
-    }));
-    setInput("");
-    void requestReply(sessionId, userMessage.id, nextMessages);
+    setInitialDraft("");
+    void sendMessage(sessionId, content);
   }
 
-  function retryFailedMessage() {
-    if (
-      !failedRequest
-      || failedRequest.sessionId !== activeSession?.id
-      || !chatSelectedModel
-      || pendingRequest
-    ) {
+  function updateDraft(value: string) {
+    if (!activeSession) {
+      setInitialDraft(value);
       return;
     }
-    const failedIndex = messages.findIndex(
-      (message) => message.id === failedRequest.userMessageId,
-    );
-    if (failedIndex < 0) return;
-    void requestReply(
-      failedRequest.sessionId,
-      failedRequest.userMessageId,
-      messages.slice(0, failedIndex + 1),
-    );
+    updateSession(activeSession.id, (session) => ({
+      ...session,
+      draft: value,
+    }));
   }
 
   function startNewSession() {
-    cancelActiveRequest(true);
-    setFailedRequest(null);
-    setInput("");
+    setInitialDraft("");
     createEmptySession();
   }
 
   function openSession(id: string) {
-    cancelActiveRequest(true);
-    setFailedRequest(null);
-    setInput("");
     selectSession(id);
   }
 
@@ -323,16 +82,24 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
             新建会话
           </button>
           {visibleSessions.map((session) => (
-            <input
-              aria-current={
-                session.id === activeSession?.id ? "page" : undefined
-              }
-              aria-label={`打开会话：${session.title}`}
-              key={session.id}
-              onClick={() => openSession(session.id)}
-              type="button"
-              value={`会话 · ${session.title}`}
-            />
+            <span className="chat-session-history-item" key={session.id}>
+              <input
+                aria-current={
+                  session.id === activeSession?.id ? "page" : undefined
+                }
+                aria-label={`打开会话：${session.title}`}
+                onClick={() => openSession(session.id)}
+                type="button"
+                value={`会话 · ${session.title}`}
+              />
+              <button
+                aria-label={`删除会话：${session.title}`}
+                onClick={() => deleteSession(session.id)}
+                type="button"
+              >
+                ×
+              </button>
+            </span>
           ))}
         </nav>
       ) : null}
@@ -356,10 +123,15 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
         </div>
         <textarea
           aria-label="聊天消息输入框"
-          onChange={(event) => setInput(event.target.value)}
+          onChange={(event) => updateDraft(event.target.value)}
           placeholder="例如：帮我复盘上周经营数据，先找出最影响利润的三个问题…"
           value={input}
         />
+        {activeRequestSessionId && activeRequestSessionId !== activeSession?.id ? (
+          <div aria-label="活动会话提示" className="chat-pending" role="status">
+            会话「{requestingSession?.title || "其他会话"}」正在回复，当前会话可继续编辑草稿，发送需等待。
+          </div>
+        ) : null}
         {messages.length > 0 ? (
           <section
             aria-label="聊天记录"
@@ -377,30 +149,42 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
                   {message.role === "user" ? "你" : message.modelName}
                 </small>
                 <p>{message.content}</p>
+                {message.status === "stopped" ? (
+                  <small className="chat-message-status">已停止</small>
+                ) : null}
+                {message.status === "failed" ? (
+                  <div className="chat-error" role="alert">
+                    <span>
+                      <strong>发送失败</strong>
+                      {message.errorMessage ? `：${message.errorMessage}` : ""}
+                    </span>
+                    <button
+                      disabled={
+                        !chatSelectedModel || Boolean(activeRequestSessionId)
+                      }
+                      onClick={() => {
+                        if (activeSession) {
+                          void retryMessage(activeSession.id, message.id);
+                        }
+                      }}
+                      type="button"
+                    >
+                      重新发送
+                    </button>
+                  </div>
+                ) : null}
               </article>
             ))}
-            {pendingRequest ? (
+            {activeSessionRequest ? (
               <div
                 aria-label="聊天回复状态"
                 className="chat-pending"
                 role="status"
               >
-                {pendingRequest.modelName} 正在回复…
+                {activeSessionRequest.modelName} 正在回复…
               </div>
             ) : null}
           </section>
-        ) : null}
-        {failedRequest ? (
-          <div className="chat-error" role="alert">
-            <span>{failedRequest.message}</span>
-            <button
-              disabled={!chatSelectedModel || Boolean(pendingRequest)}
-              onClick={retryFailedMessage}
-              type="button"
-            >
-              重新发送
-            </button>
-          </div>
         ) : null}
         <div className="chat-toolbar">
           <div className="attach-actions">
@@ -505,18 +289,19 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
               disabled={
                 !input.trim()
                 || !chatSelectedModel
-                || Boolean(pendingRequest)
-                || Boolean(failedRequest)
+                || Boolean(activeRequestSessionId)
               }
-              onClick={sendMessage}
+              onClick={submitMessage}
               type="button"
             >
               发送
             </button>
-            {pendingRequest ? (
+            {activeSessionRequest ? (
               <button
                 className="chat-stop-button"
-                onClick={() => cancelActiveRequest(true)}
+                onClick={() => {
+                  if (activeSession) stopRequest(activeSession.id);
+                }}
                 type="button"
               >
                 停止
@@ -528,13 +313,13 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
 
       <div className="quick-prompts">
         <span>快捷开始</span>
-        <button onClick={() => setInput("规划本月内容")} type="button">
+        <button onClick={() => updateDraft("规划本月内容")} type="button">
           规划本月内容
         </button>
-        <button onClick={() => setInput("分析竞品账号")} type="button">
+        <button onClick={() => updateDraft("分析竞品账号")} type="button">
           分析竞品账号
         </button>
-        <button onClick={() => setInput("复盘上周数据")} type="button">
+        <button onClick={() => updateDraft("复盘上周数据")} type="button">
           复盘上周数据
         </button>
       </div>
