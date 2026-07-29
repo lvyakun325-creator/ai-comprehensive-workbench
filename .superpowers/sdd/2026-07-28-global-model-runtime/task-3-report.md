@@ -235,3 +235,65 @@ Result: passed.
 ### Remaining concerns
 
 - The deferred `model-registry.d.mts` export synchronization remains intentionally outside this fix-round gate, per controller direction.
+
+---
+
+## Fix round 4 — deleted-card probe settling before invalid save
+
+### Status
+
+DONE
+
+### Fix summary
+
+- Starting a text probe now captures the complete pre-test baseline even when the user retests an unchanged model with its already-saved credential.
+- Deleting a card with an active text probe now aborts the request token and immediately settles the persisted connection status from the prior tested fingerprint, current draft fields, credential revision, and credential availability before hiding the card.
+- An unrelated visible-card validation failure can therefore return without leaving the pending-deleted model at `testing`; the pending deletion remains cancelable and is still committed only by a later valid save.
+- Added deferred late-success and late-failure coverage for the exact sequence: retest Alpha, delete Alpha, invalidate visible Beta, save, then cancel. Both variants verify non-testing persisted metadata, unchanged credentials, ignored late completion, and exact model/credential/revision baseline restoration.
+
+### RED / GREEN evidence
+
+| Cycle | RED evidence | GREEN evidence |
+| --- | --- | --- |
+| Deleted probe plus invalid visible card | `npx tsx --test --test-name-pattern="deleting a pending text probe" tests/workbench-ui.test.tsx` failed 2/2 before the production fix. Both late-success and late-failure variants reported persisted Alpha status as actual `testing` instead of expected `connected`. | The same focused command passed 2/2 after the delete handler settled the active probe before hiding the card and text probe startup captured the cancel baseline. |
+
+### Final verification
+
+```bash
+npx tsx --test --test-name-pattern="deleting a pending text probe" tests/workbench-ui.test.tsx
+```
+
+Result: 2 tests passed, 0 failed.
+
+```bash
+npx tsx --test tests/model-registry-provider.test.tsx tests/workbench-ui.test.tsx
+```
+
+Result: 58 tests passed, 0 failed.
+
+```bash
+npm test
+```
+
+Result: production build completed and all 191 tests passed with 0 failures.
+
+```bash
+npm run lint
+```
+
+Result: 0 errors. The same three existing unused-variable warnings remain in `tests/model-registry.test.mjs`.
+
+```bash
+git diff --check
+```
+
+Result: passed.
+
+### Commit
+
+- `fix: settle deleted text probes before hiding`
+
+### Remaining concerns
+
+- Browser credential storage remains origin-readable and is not hardware-backed encryption; this round does not change that existing disclosure or storage boundary.
+- The deferred `model-registry.d.mts` export synchronization remains intentionally outside this fix-round scope.

@@ -1193,6 +1193,153 @@ test("deleting a tested text draft cannot leave an orphan credential", async () 
   assert.equal(requestSignal?.aborted, true);
 });
 
+for (const [lateResult, response] of [
+  ["success", () => Response.json({ ok: true })],
+  [
+    "failure",
+    () => Response.json(
+      { ok: false, message: "已删除模型的旧请求失败" },
+      { status: 401 },
+    ),
+  ],
+] as const) {
+  test(`deleting a pending text probe settles it before an invalid save and ignores late ${lateResult}`, async () => {
+    const originalModels = [
+      {
+        id: "model-alpha",
+        provider: "OpenAI",
+        displayName: "Alpha",
+        modelId: "alpha-1",
+        baseUrl: "https://api.alpha.example/v1",
+        enabled: true,
+        isDefault: true,
+        connectionStatus: "connected",
+        testedFingerprint:
+          "[\"https://api.alpha.example/v1\",\"alpha-1\",\"revision-alpha\"]",
+      },
+      {
+        id: "model-beta",
+        provider: "OpenAI",
+        displayName: "Beta",
+        modelId: "beta-1",
+        baseUrl: "https://api.beta.example/v1",
+        enabled: true,
+        isDefault: false,
+        connectionStatus: "connected",
+        testedFingerprint:
+          "[\"https://api.beta.example/v1\",\"beta-1\",\"revision-beta\"]",
+      },
+    ];
+    const originalCredentials = {
+      "model-alpha": "sk-original-alpha",
+      "model-beta": "sk-original-beta",
+    };
+    const originalRevisions = {
+      "model-alpha": "revision-alpha",
+      "model-beta": "revision-beta",
+    };
+    window.localStorage.setItem(
+      "ai-workbench:model-registry:v2",
+      JSON.stringify(originalModels),
+    );
+    window.localStorage.setItem(
+      "ai-workbench:model-credentials:v1",
+      JSON.stringify(originalCredentials),
+    );
+    window.localStorage.setItem(
+      "ai-workbench:model-credential-revisions:v1",
+      JSON.stringify(originalRevisions),
+    );
+    const pending = deferredValue<Response>();
+    let requestSignal: AbortSignal | null = null;
+    globalThis.fetch = (async (_input, init) => {
+      requestSignal = init?.signal as AbortSignal;
+      return pending.promise;
+    }) as typeof fetch;
+    const user = userEvent.setup({ document });
+    render(<Home />);
+
+    await user.click(screen.getByRole("button", { name: "模型配置" }));
+    const alphaCard = screen.getByRole("heading", { name: "Alpha" }).closest("article");
+    const betaCard = screen.getByRole("heading", { name: "Beta" }).closest("article");
+    assert.ok(alphaCard);
+    assert.ok(betaCard);
+    await user.click(
+      within(alphaCard).getByRole("button", { name: "测试文案模型" }),
+    );
+    await waitFor(() => assert.ok(requestSignal));
+    await user.click(screen.getByRole("button", { name: "删除 Alpha" }));
+    await user.clear(within(betaCard).getByLabelText("服务商"));
+    await user.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => {
+      assert.equal(requestSignal?.aborted, true);
+      assert.match(
+        screen.getByRole("alert").textContent ?? "",
+        /请填写每个文案模型/,
+      );
+      const storedModels = JSON.parse(
+        window.localStorage.getItem("ai-workbench:model-registry:v2") ?? "[]",
+      );
+      assert.equal(
+        storedModels.find((model: { id: string }) => model.id === "model-alpha")
+          ?.connectionStatus,
+        "connected",
+      );
+      assert.deepEqual(
+        JSON.parse(
+          window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "{}",
+        ),
+        originalCredentials,
+      );
+    });
+
+    pending.resolve(response());
+    await waitFor(() => {
+      const storedModels = JSON.parse(
+        window.localStorage.getItem("ai-workbench:model-registry:v2") ?? "[]",
+      );
+      assert.equal(
+        storedModels.find((model: { id: string }) => model.id === "model-alpha")
+          ?.connectionStatus,
+        "connected",
+      );
+      assert.deepEqual(
+        JSON.parse(
+          window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "{}",
+        ),
+        originalCredentials,
+      );
+    });
+
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => {
+      assert.ok(screen.getByRole("heading", { name: "Alpha" }));
+      assert.ok(screen.getByRole("heading", { name: "Beta" }));
+      assert.deepEqual(
+        JSON.parse(
+          window.localStorage.getItem("ai-workbench:model-registry:v2") ?? "[]",
+        ),
+        originalModels,
+      );
+      assert.deepEqual(
+        JSON.parse(
+          window.localStorage.getItem("ai-workbench:model-credentials:v1") ?? "{}",
+        ),
+        originalCredentials,
+      );
+      assert.deepEqual(
+        JSON.parse(
+          window.localStorage.getItem(
+            "ai-workbench:model-credential-revisions:v1",
+          ) ?? "{}",
+        ),
+        originalRevisions,
+      );
+    });
+  });
+}
+
 test("a newer text probe wins and an older failure cannot overwrite it", async () => {
   const first = deferredValue<Response>();
   const second = deferredValue<Response>();

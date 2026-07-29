@@ -386,6 +386,7 @@ export function GlobalModelSettings({
       return;
     }
 
+    ensureBaseline();
     let credentialRevision = textRevisionForDraft(model.id, draft);
     if (!credentialRevision) {
       credentialRevision = createCredentialRevision();
@@ -1030,7 +1031,24 @@ export function GlobalModelSettings({
                     className="danger"
                     onClick={() => {
                       ensureBaseline();
+                      const interruptedProbe = textProbes.current.has(model.id);
                       abortTextProbe(model.id);
+                      if (interruptedProbe) {
+                        saveModelConfig(model.id, {
+                          connectionStatus: settleConnectionStatus(
+                            "testing",
+                            model.testedFingerprint,
+                            draft.baseUrl,
+                            draft.modelId,
+                            textRevisionForDraft(model.id, draft),
+                            !draft.clearCredential
+                              && Boolean(
+                                draft.apiKeyDraft.trim()
+                                || getCredential(model.id),
+                              ),
+                          ),
+                        });
+                      }
                       setPendingDeletedIds((current) =>
                         new Set([...current, model.id]));
                     }}
