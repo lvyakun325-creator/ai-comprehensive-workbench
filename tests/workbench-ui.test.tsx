@@ -39,7 +39,7 @@ Object.assign(navigator, {
   clipboard: { writeText: async (value: string) => value },
 });
 
-const { cleanup, render, screen, waitFor } = await import("@testing-library/react");
+const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 const { within } = await import("@testing-library/dom");
 const { StrictMode, useState } = await import("react");
@@ -281,6 +281,10 @@ afterEach(() => {
   revokedMarkdownUrls.length = 0;
   clickedDownloadAnchors.length = 0;
   globalThis.fetch = originalFetch;
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 1024,
+  });
 });
 
 test("Markdown result lists only MD files and opens a read-only preview", async () => {
@@ -2433,11 +2437,301 @@ test("聊天会话首次发送后进入独立区域，并在导航后保留当�
   await user.click(screen.getByRole("button", { name: "模型配置" }));
   await user.click(screen.getByRole("button", { name: "AI 对话" }));
 
-  assert.ok(screen.getByText("第一条测试问题"));
   assert.ok(
     within(screen.getByRole("log", { name: "聊天记录" }))
       .getByText("第一条测试问题"),
   );
+});
+
+test("历史侧栏在首次发送后展示独立聊天区、截断标题并支持新建和切换", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-workspace-history",
+      provider: "OpenAI",
+      displayName: "历史侧栏模型",
+      modelId: "history-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-workspace-history",
+      revision: "revision-chat-workspace-history",
+    },
+  ]);
+  globalThis.fetch = (async () =>
+    Response.json({ ok: true, reply: "历史侧栏回复" })) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  const question = "123456789012345678901234567890";
+  const truncatedTitle = "123456789012345678901234…";
+  await user.type(screen.getByLabelText("聊天消息输入框"), question);
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  await waitFor(() => assert.ok(screen.getByText("历史侧栏回复")));
+  const workspace = screen.getByRole("region", { name: "聊天会话" });
+  assert.ok(workspace.classList.contains("chat-workspace"));
+  assert.ok(
+    within(workspace).getByRole("heading", { name: truncatedTitle }),
+  );
+  const history = within(workspace).getByRole("navigation", {
+    name: "聊天历史",
+  });
+  assert.ok(
+    within(history).getByRole("button", {
+      name: `打开会话：${truncatedTitle}`,
+    }),
+  );
+  assert.ok(within(history).getByText("发起新对话"));
+
+  const transcript = within(workspace).getByRole("log", { name: "聊天记录" });
+  assert.ok(
+    within(transcript).getByText(question).closest("article")
+      ?.classList.contains("user"),
+  );
+  assert.ok(
+    within(transcript).getByText("历史侧栏回复").closest("article")
+      ?.classList.contains("assistant"),
+  );
+  assert.ok(within(transcript).getByText("历史侧栏模型"));
+
+  await user.click(within(history).getByRole("button", { name: "新建会话" }));
+  assert.ok(
+    screen.getByRole("heading", {
+      name: "今天想聊什么，或推进什么任务？",
+    }),
+  );
+  await user.click(
+    within(screen.getByRole("navigation", { name: "聊天历史" })).getByRole(
+      "button",
+      { name: `打开会话：${truncatedTitle}` },
+    ),
+  );
+  assert.ok(screen.getByRole("heading", { name: truncatedTitle }));
+  assert.ok(screen.getByText("历史侧栏回复"));
+});
+
+test("删除会话必须确认并按非当前、当前和最后会话规则选择", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-workspace-delete",
+      provider: "OpenAI",
+      displayName: "删除规则模型",
+      modelId: "delete-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-workspace-delete",
+      revision: "revision-chat-workspace-delete",
+    },
+  ]);
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      turns: Array<{ role: string; content: string }>;
+    };
+    return Response.json({
+      ok: true,
+      reply: `回复：${body.turns.at(-1)?.content}`,
+    });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  for (const title of ["会话甲", "会话乙", "会话丙"]) {
+    await user.type(screen.getByLabelText("聊天消息输入框"), title);
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => assert.ok(screen.getByText(`回复：${title}`)));
+    if (title !== "会话丙") {
+      await user.click(screen.getByRole("button", { name: "新建会话" }));
+    }
+  }
+
+  await user.click(
+    screen.getByRole("button", { name: "删除会话：会话甲" }),
+  );
+  const canceledDialog = screen.getByRole("alertdialog", {
+    name: "确认删除会话：会话甲",
+  });
+  await user.click(within(canceledDialog).getByRole("button", { name: "取消" }));
+  assert.ok(screen.getByRole("heading", { name: "会话丙" }));
+  assert.ok(screen.getByRole("button", { name: "打开会话：会话甲" }));
+
+  await user.click(
+    screen.getByRole("button", { name: "删除会话：会话甲" }),
+  );
+  await user.click(
+    within(
+      screen.getByRole("alertdialog", { name: "确认删除会话：会话甲" }),
+    ).getByRole("button", { name: "确认删除" }),
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "打开会话：会话甲" }),
+    null,
+  );
+  assert.ok(screen.getByRole("heading", { name: "会话丙" }));
+
+  await user.click(
+    screen.getByRole("button", { name: "删除会话：会话丙" }),
+  );
+  await user.click(
+    within(
+      screen.getByRole("alertdialog", { name: "确认删除会话：会话丙" }),
+    ).getByRole("button", { name: "确认删除" }),
+  );
+  assert.ok(screen.getByRole("heading", { name: "会话乙" }));
+
+  await user.click(
+    screen.getByRole("button", { name: "删除会话：会话乙" }),
+  );
+  await user.click(
+    within(
+      screen.getByRole("alertdialog", { name: "确认删除会话：会话乙" }),
+    ).getByRole("button", { name: "确认删除" }),
+  );
+  assert.equal(screen.queryByRole("region", { name: "聊天会话" }), null);
+  assert.ok(
+    screen.getByRole("heading", {
+      name: "今天想聊什么，或推进什么任务？",
+    }),
+  );
+});
+
+test("键盘发送区分 Enter、Shift+Enter 和输入法组合并在发送后清空聚焦", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-workspace-keyboard",
+      provider: "OpenAI",
+      displayName: "键盘模型",
+      modelId: "keyboard-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-workspace-keyboard",
+      revision: "revision-chat-workspace-keyboard",
+    },
+  ]);
+  const pending = deferredValue<Response>();
+  let requestCount = 0;
+  globalThis.fetch = (async () => {
+    requestCount += 1;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  const input = screen.getByLabelText("聊天消息输入框") as HTMLTextAreaElement;
+  await user.type(input, "第一行");
+  await user.keyboard("{Shift>}{Enter}{/Shift}");
+  assert.equal(input.value, "第一行\n");
+  assert.equal(requestCount, 0);
+  await user.type(input, "第二行");
+
+  const composingEnter = new dom.window.KeyboardEvent("keydown", {
+    bubbles: true,
+    cancelable: true,
+    key: "Enter",
+  });
+  Object.defineProperty(composingEnter, "isComposing", { value: true });
+  fireEvent(input, composingEnter);
+  assert.equal(requestCount, 0);
+  assert.equal(input.value, "第一行\n第二行");
+
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(requestCount, 1));
+  const currentInput = screen.getByLabelText(
+    "聊天消息输入框",
+  ) as HTMLTextAreaElement;
+  assert.equal(currentInput.value, "");
+  assert.equal(document.activeElement, currentInput);
+  assert.match(
+    screen.getByRole("log", { name: "聊天记录" }).textContent ?? "",
+    /第一行\s+第二行/,
+  );
+});
+
+test("自动滚动只在接近底部时跟随新消息", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-workspace-scroll",
+      provider: "OpenAI",
+      displayName: "滚动模型",
+      modelId: "scroll-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-workspace-scroll",
+      revision: "revision-chat-workspace-scroll",
+    },
+  ]);
+  const replies = [deferredValue<Response>(), deferredValue<Response>()];
+  let requestCount = 0;
+  globalThis.fetch = (async () => {
+    const pending = replies[requestCount];
+    requestCount += 1;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "第一条滚动消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  const transcript = screen.getByRole("log", {
+    name: "聊天记录",
+  }) as HTMLElement;
+  let scrollHeight = 400;
+  Object.defineProperties(transcript, {
+    clientHeight: { configurable: true, get: () => 200 },
+    scrollHeight: { configurable: true, get: () => scrollHeight },
+  });
+  transcript.scrollTop = 120;
+  fireEvent.scroll(transcript);
+  scrollHeight = 560;
+  replies[0].resolve(Response.json({ ok: true, reply: "接近底部回复" }));
+  await waitFor(() => assert.ok(screen.getByText("接近底部回复")));
+  assert.equal(transcript.scrollTop, 560);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "第二条滚动消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.equal(requestCount, 2));
+  scrollHeight = 700;
+  transcript.scrollTop = 100;
+  fireEvent.scroll(transcript);
+  scrollHeight = 900;
+  replies[1].resolve(Response.json({ ok: true, reply: "阅读位置回复" }));
+  await waitFor(() => assert.ok(screen.getByText("阅读位置回复")));
+  assert.equal(transcript.scrollTop, 100);
+});
+
+test("移动端历史通过抽屉按钮开关并保护底部安全区", async () => {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 390,
+  });
+  installConnectedChatModels([
+    {
+      id: "chat-workspace-mobile",
+      provider: "OpenAI",
+      displayName: "移动端模型",
+      modelId: "mobile-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-workspace-mobile",
+      revision: "revision-chat-workspace-mobile",
+    },
+  ]);
+  globalThis.fetch = (async () =>
+    Response.json({ ok: true, reply: "移动端回复" })) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "移动端会话");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("移动端回复")));
+
+  const drawer = document.querySelector(".chat-history-drawer");
+  assert.ok(drawer);
+  assert.equal(drawer.classList.contains("open"), false);
+  await user.click(screen.getByRole("button", { name: "打开聊天历史" }));
+  assert.equal(drawer.classList.contains("open"), true);
+  await user.click(screen.getByRole("button", { name: "关闭聊天历史" }));
+  assert.equal(drawer.classList.contains("open"), false);
+
+  const css = readFileSync(
+    new URL("../app/globals.css", import.meta.url),
+    "utf8",
+  );
+  const mobileStyles = css.slice(css.indexOf("@media (max-width: 760px)"));
+  assert.match(mobileStyles, /env\(safe-area-inset-bottom\)/);
 });
 
 test("聊天会话未发送的新会话在导航后不会进入历史", async () => {
@@ -2542,8 +2836,14 @@ test("home chat keeps blank send disabled, fills a quick prompt, and shows the s
   assert.equal(transcript.getAttribute("aria-live"), "polite");
   assert.equal(transcript.getAttribute("aria-relevant"), "additions text");
   assert.ok(within(transcript).getByText("规划本月内容"));
-  assert.equal((input as HTMLTextAreaElement).value, "");
-  assert.equal((send as HTMLButtonElement).disabled, true);
+  assert.equal(
+    (screen.getByLabelText("聊天消息输入框") as HTMLTextAreaElement).value,
+    "",
+  );
+  assert.equal(
+    (screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled,
+    true,
+  );
   assert.ok(screen.getByRole("button", { name: "停止" }));
 });
 
@@ -2641,8 +2941,9 @@ test("home chat proxies other models without an egress override and keeps conver
 
   await user.click(screen.getByRole("button", { name: "选择模型，当前 Alpha 模型" }));
   await user.click(screen.getByRole("button", { name: /Beta 模型/ }));
-  assert.ok(screen.getByText("第一问"));
-  assert.ok(screen.getByText("Alpha 回复"));
+  const transcript = screen.getByRole("log", { name: "聊天记录" });
+  assert.ok(within(transcript).getByText("第一问"));
+  assert.ok(within(transcript).getByText("Alpha 回复"));
   await user.type(screen.getByLabelText("聊天消息输入框"), "第二问");
   await user.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => assert.ok(screen.getByText("Beta 回复")));
@@ -2929,7 +3230,10 @@ test("停止后用户消息标记为已停止并可立即发送新问题", async
   await user.click(screen.getByRole("button", { name: "停止" }));
 
   assertSignalAborted(requestSignal);
-  assert.ok(screen.getByText("保留这条消息"));
+  assert.ok(
+    within(screen.getByRole("log", { name: "聊天记录" }))
+      .getByText("保留这条消息"),
+  );
   assert.ok(screen.getByText("已停止"));
   assert.equal(screen.queryByRole("button", { name: "停止" }), null);
   await user.type(screen.getByLabelText("聊天消息输入框"), "停止后的新问题");
@@ -2993,7 +3297,11 @@ test("失败后可重试且切换模型也不重复插入用户消息", async ()
   await user.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => assert.ok(screen.getByRole("button", { name: "重新发送" })));
 
-  assert.equal(screen.getAllByText("只保留一次").length, 1);
+  assert.equal(
+    within(screen.getByRole("log", { name: "聊天记录" }))
+      .getAllByText("只保留一次").length,
+    1,
+  );
   assert.ok(screen.getByText("发送失败"));
   assert.doesNotMatch(document.body.textContent ?? "", new RegExp(firstKey));
   assert.doesNotMatch(document.body.textContent ?? "", new RegExp(rawProviderBody));
@@ -3002,7 +3310,11 @@ test("失败后可重试且切换模型也不重复插入用户消息", async ()
   await user.click(screen.getByRole("button", { name: "重新发送" }));
 
   await waitFor(() => assert.ok(screen.getByText("安全重试成功")));
-  assert.equal(screen.getAllByText("只保留一次").length, 1);
+  assert.equal(
+    within(screen.getByRole("log", { name: "聊天记录" }))
+      .getAllByText("只保留一次").length,
+    1,
+  );
   assert.deepEqual(bodies.map((body) => body.config), [
     { baseUrl: "https://api.openai.com/v1", apiKey: firstKey, model: "failure-chat" },
     { baseUrl: "https://api.openai.com/v1", apiKey: retryKey, model: "retry-chat" },
@@ -3070,7 +3382,11 @@ test("重试中的请求停止后标记为已停止且允许发送新问题", as
   await waitFor(() => assert.ok(screen.getByText("停止重试后的新回复")));
 
   assert.equal(requestCount, 3);
-  assert.equal(screen.getAllByText("需要恢复的消息").length, 1);
+  assert.equal(
+    within(screen.getByRole("log", { name: "聊天记录" }))
+      .getAllByText("需要恢复的消息").length,
+    1,
+  );
   assert.deepEqual(turns, [
     [{ role: "user", content: "需要恢复的消息" }],
     [{ role: "user", content: "需要恢复的消息" }],
@@ -3116,8 +3432,9 @@ test("失败后可直接发送新问题且不会被旧失败锁死", async () =>
   await user.click(send);
   await waitFor(() => assert.ok(screen.getByText("失败后的新回复")));
   assert.equal(requestCount, 2);
-  assert.equal(screen.getAllByText("首次失败").length, 1);
-  assert.equal(screen.getAllByText("失败后的新问题").length, 1);
+  const transcript = screen.getByRole("log", { name: "聊天记录" });
+  assert.equal(within(transcript).getAllByText("首次失败").length, 1);
+  assert.equal(within(transcript).getAllByText("失败后的新问题").length, 1);
 });
 
 test("切换工作台页面不会丢会话且迟到响应更新原会话", async () => {
@@ -3153,7 +3470,10 @@ test("切换工作台页面不会丢会话且迟到响应更新原会话", async
   pending.resolve(Response.json({ ok: true, reply: "切换页面后的回复" }));
   await user.click(screen.getByRole("button", { name: "AI 对话" }));
   await waitFor(() => assert.ok(screen.getByText("切换页面后的回复")));
-  assert.ok(screen.getByText("卸载前请求"));
+  assert.ok(
+    within(screen.getByRole("log", { name: "聊天记录" }))
+      .getByText("卸载前请求"),
+  );
 });
 
 test("删除请求中的会话会中止请求且迟到响应不会进入其他会话", async () => {
@@ -3189,6 +3509,13 @@ test("删除请求中的会话会中止请求且迟到响应不会进入其他�
   await user.type(screen.getByLabelText("聊天消息输入框"), "其他会话问题");
   await user.click(
     screen.getByRole("button", { name: "删除会话：请求中的会话" }),
+  );
+  await user.click(
+    within(
+      screen.getByRole("alertdialog", {
+        name: "确认删除会话：请求中的会话",
+      }),
+    ).getByRole("button", { name: "确认删除" }),
   );
 
   await waitFor(() => assertSignalAborted(requestSignal));
