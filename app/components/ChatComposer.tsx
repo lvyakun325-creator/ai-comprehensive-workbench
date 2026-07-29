@@ -16,6 +16,7 @@ type ChatComposerProps = {
   activeRequestSessionId: string | null;
   activeSessionRequest: ChatPendingRequestState | null;
   otherRequestTitle: string | null;
+  focusToken: number;
   variant: "welcome" | "workspace";
   onDraftChange(value: string): void;
   onSend(): void;
@@ -32,6 +33,7 @@ export function ChatComposer({
   activeRequestSessionId,
   activeSessionRequest,
   otherRequestTitle,
+  focusToken,
   variant,
   onDraftChange,
   onSend,
@@ -51,6 +53,11 @@ export function ChatComposer({
     textarea.style.height = "auto";
     textarea.style.height = `${textarea.scrollHeight}px`;
   }, [draft]);
+
+  useLayoutEffect(() => {
+    if (focusToken <= 0) return;
+    textareaRef.current?.focus();
+  }, [focusToken]);
 
   function refocusAfterSend() {
     const focus = () => textareaRef.current?.focus();

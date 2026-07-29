@@ -7,6 +7,10 @@ import type {
   ProjectTask,
   TaskStatusFilter,
 } from "../app/lib/agent-project-records.mjs";
+import type {
+  ChatSession,
+  ChatSessionHistoryItem,
+} from "../app/lib/chat-session-store.mjs";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost/",
@@ -49,6 +53,7 @@ const { AgentTaskList } = await import("../app/components/AgentTaskList");
 const { ChatHistorySidebar } = await import(
   "../app/components/ChatHistorySidebar"
 );
+const { ChatTranscript } = await import("../app/components/ChatTranscript");
 const { default: Home } = await import("../app/page");
 const originalFetch = globalThis.fetch;
 
@@ -70,6 +75,62 @@ function assertSignalAborted(signal: AbortSignal | null) {
 function assertSignalNotAborted(signal: AbortSignal | null) {
   assert.ok(signal);
   assert.equal(signal.aborted, false);
+}
+
+function readIndexedDbRequest<T>(request: IDBRequest<T>) {
+  return new Promise<T>((resolve, reject) => {
+    request.addEventListener("success", () => resolve(request.result), {
+      once: true,
+    });
+    request.addEventListener(
+      "error",
+      () => reject(request.error ?? new Error("IndexedDB read failed")),
+      { once: true },
+    );
+  });
+}
+
+async function snapshotIndexedDb(factory: IDBFactory) {
+  const databaseInfos = await factory.databases();
+  const snapshots: Array<{
+    database: string;
+    store: string;
+    keys: IDBValidKey[];
+    values: unknown[];
+  }> = [];
+
+  for (const databaseInfo of databaseInfos) {
+    if (!databaseInfo.name) continue;
+    const database = await readIndexedDbRequest(factory.open(databaseInfo.name));
+    try {
+      for (const storeName of Array.from(database.objectStoreNames)) {
+        const transaction = database.transaction(storeName, "readonly");
+        const store = transaction.objectStore(storeName);
+        const [keys, values] = await Promise.all([
+          readIndexedDbRequest(store.getAllKeys()),
+          readIndexedDbRequest(store.getAll()),
+        ]);
+        snapshots.push({
+          database: databaseInfo.name,
+          store: storeName,
+          keys,
+          values,
+        });
+      }
+    } finally {
+      database.close();
+    }
+  }
+
+  const seen = new WeakSet<object>();
+  return JSON.stringify(snapshots, (_key, value: unknown) => {
+    if (typeof value === "bigint") return value.toString();
+    if (value && typeof value === "object") {
+      if (seen.has(value)) return "[Circular]";
+      seen.add(value);
+    }
+    return value;
+  });
 }
 
 type ConnectedChatModelFixture = {
@@ -280,6 +341,7 @@ afterEach(() => {
   document.body.innerHTML = "";
   document.body.style.overflow = "";
   window.localStorage.clear();
+  window.sessionStorage.clear();
   createdMarkdownBlobs.length = 0;
   revokedMarkdownUrls.length = 0;
   clickedDownloadAnchors.length = 0;
@@ -2437,6 +2499,10 @@ test("聊天会话首次发送后进入独立区域，并在导航后保留当�
     within(screen.getByRole("navigation", { name: "聊天历史" }))
       .getByRole("button", { name: "打开会话：第一条测试问题" }),
   );
+  assert.equal(
+    screen.getByLabelText("当前模型").textContent?.replace(/\s+/g, ""),
+    "当前模型会话测试模型",
+  );
   await user.click(screen.getByRole("button", { name: "模型配置" }));
   await user.click(screen.getByRole("button", { name: "AI 对话" }));
 
@@ -2509,6 +2575,33 @@ test("历史侧栏在首次发送后展示独立聊天区、截断标题并支�
   );
   assert.ok(screen.getByRole("heading", { name: truncatedTitle }));
   assert.ok(screen.getByText("历史侧栏回复"));
+});
+
+test("桌面端发起新对话后显式聚焦新会话输入框", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-workspace-desktop-focus",
+      provider: "OpenAI",
+      displayName: "桌面聚焦模型",
+      modelId: "desktop-focus-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-workspace-desktop-focus",
+      revision: "revision-chat-workspace-desktop-focus",
+    },
+  ]);
+  globalThis.fetch = (async () =>
+    Response.json({ ok: true, reply: "桌面聚焦回复" })) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "桌面聚焦会话");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("桌面聚焦回复")));
+
+  await user.click(screen.getByRole("button", { name: "新建会话" }));
+
+  const input = screen.getByLabelText("聊天消息输入框");
+  assert.equal(document.activeElement === input, true);
 });
 
 test("删除会话必须确认并按非当前、当前和最后会话规则选择", async () => {
@@ -2592,6 +2685,119 @@ test("删除会话必须确认并按非当前、当前和最后会话规则选�
       name: "今天想聊什么，或推进什么任务？",
     }),
   );
+});
+
+test("删除确认支持键盘取消并在取消和确认后恢复合理焦点", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-workspace-delete-focus",
+      provider: "OpenAI",
+      displayName: "删除焦点模型",
+      modelId: "delete-focus-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-workspace-delete-focus",
+      revision: "revision-chat-workspace-delete-focus",
+    },
+  ]);
+  globalThis.fetch = (async () =>
+    Response.json({ ok: true, reply: "删除焦点回复" })) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "待删除焦点会话");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("删除焦点回复")));
+
+  const deleteTrigger = screen.getByRole("button", {
+    name: "删除会话：待删除焦点会话",
+  });
+  await user.click(deleteTrigger);
+  const firstDialog = screen.getByRole("alertdialog", {
+    name: "确认删除会话：待删除焦点会话",
+  });
+  const cancel = within(firstDialog).getByRole("button", { name: "取消" });
+  assert.equal(document.activeElement === cancel, true);
+
+  await user.click(cancel);
+  assert.equal(screen.queryByRole("alertdialog"), null);
+  assert.equal(document.activeElement === deleteTrigger, true);
+
+  await user.click(deleteTrigger);
+  const escapeDialog = screen.getByRole("alertdialog", {
+    name: "确认删除会话：待删除焦点会话",
+  });
+  assert.equal(
+    document.activeElement
+      === within(escapeDialog).getByRole("button", { name: "取消" }),
+    true,
+  );
+  await user.keyboard("{Escape}");
+  assert.equal(screen.queryByRole("alertdialog"), null);
+  assert.equal(document.activeElement === deleteTrigger, true);
+
+  await user.click(deleteTrigger);
+  const secondDialog = screen.getByRole("alertdialog", {
+    name: "确认删除会话：待删除焦点会话",
+  });
+  await user.click(
+    within(secondDialog).getByRole("button", { name: "确认删除" }),
+  );
+
+  const welcomeInput = screen.getByLabelText("聊天消息输入框");
+  assert.equal(document.activeElement === welcomeInput, true);
+});
+
+test("删除确认打开期间后台会话更新不会抢走当前确认按钮焦点", async () => {
+  const session: ChatSessionHistoryItem = {
+    id: "delete-rerender-focus",
+    title: "后台更新焦点会话",
+    displayTitle: "后台更新焦点会话",
+    isDraft: false,
+    messages: [
+      {
+        id: "delete-rerender-focus-message",
+        role: "user",
+        content: "后台更新焦点会话",
+        status: "sent",
+        createdAt: 100,
+      },
+    ],
+    createdAt: 100,
+    updatedAt: 100,
+    draft: "",
+    pendingRequest: null,
+    scrollOffset: 0,
+    scrollWasNearBottom: true,
+    scrollMessageCount: 1,
+  };
+  const renderSidebar = (updatedAt: number) => (
+    <ChatHistorySidebar
+      activeSessionId={session.id}
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onDelete={() => undefined}
+      onSelect={() => undefined}
+      open
+      sessions={[{ ...session, updatedAt }]}
+    />
+  );
+  const view = render(renderSidebar(100));
+  fireEvent.click(
+    screen.getByRole("button", { name: "删除会话：后台更新焦点会话" }),
+  );
+
+  const confirmation = screen.getByRole("alertdialog", {
+    name: "确认删除会话：后台更新焦点会话",
+  });
+  const confirmButton = within(confirmation).getByRole("button", {
+    name: "确认删除",
+  });
+  confirmButton.focus();
+  assert.equal(document.activeElement === confirmButton, true);
+
+  view.rerender(renderSidebar(101));
+
+  assert.equal(document.activeElement === confirmButton, true);
 });
 
 test("键盘发送区分 Enter、Shift+Enter 和输入法组合并在发送后清空聚焦", async () => {
@@ -2772,6 +2978,308 @@ test("自动滚动切换会话时分别恢复非零位置且不把近底部偏�
   );
 });
 
+test("会话在后台收到回复后通过 Provider 恢复近底部跟随状态", async () => {
+  const elementPrototype = dom.window.HTMLElement.prototype;
+  const originalClientHeight = Object.getOwnPropertyDescriptor(
+    elementPrototype,
+    "clientHeight",
+  );
+  const originalScrollHeight = Object.getOwnPropertyDescriptor(
+    elementPrototype,
+    "scrollHeight",
+  );
+  Object.defineProperty(elementPrototype, "clientHeight", {
+    configurable: true,
+    get() {
+      return this.getAttribute("role") === "log" ? 200 : 0;
+    },
+  });
+  Object.defineProperty(elementPrototype, "scrollHeight", {
+    configurable: true,
+    get() {
+      if (this.getAttribute("role") !== "log") return 0;
+      return this.textContent?.includes("甲会话后台长回复") ? 900 : 500;
+    },
+  });
+
+  try {
+    installConnectedChatModels([
+      {
+        id: "chat-workspace-scroll-provider",
+        provider: "OpenAI",
+        displayName: "滚动 Provider 模型",
+        modelId: "scroll-provider-chat",
+        baseUrl: "https://api.openai.com/v1",
+        apiKey: "sk-chat-workspace-scroll-provider",
+        revision: "revision-chat-workspace-scroll-provider",
+      },
+    ]);
+    const backgroundReply = deferredValue<Response>();
+    let requestCount = 0;
+    globalThis.fetch = (async () => {
+      requestCount += 1;
+      if (requestCount === 3) return backgroundReply.promise;
+      return Response.json({
+        ok: true,
+        reply: requestCount === 1 ? "甲会话初始回复" : "乙会话初始回复",
+      });
+    }) as typeof fetch;
+    const user = userEvent.setup({ document });
+    render(<Home />);
+
+    await user.type(screen.getByLabelText("聊天消息输入框"), "滚动会话甲");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => assert.ok(screen.getByText("甲会话初始回复")));
+    await user.click(screen.getByRole("button", { name: "新建会话" }));
+    await user.type(screen.getByLabelText("聊天消息输入框"), "滚动会话乙");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => assert.ok(screen.getByText("乙会话初始回复")));
+
+    await user.click(
+      screen.getByRole("button", { name: "打开会话：滚动会话甲" }),
+    );
+    await user.type(screen.getByLabelText("聊天消息输入框"), "甲会话后台问题");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => assert.equal(requestCount, 3));
+    const transcriptA = screen.getByRole("log", {
+      name: "聊天记录",
+    }) as HTMLElement;
+    transcriptA.scrollTop = 220;
+    fireEvent.scroll(transcriptA);
+    await user.click(
+      screen.getByRole("button", { name: "打开会话：滚动会话乙" }),
+    );
+
+    backgroundReply.resolve(
+      Response.json({ ok: true, reply: "甲会话后台长回复" }),
+    );
+    await waitFor(() =>
+      assert.equal(screen.queryByLabelText("活动会话提示") === null, true),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "打开会话：滚动会话甲" }),
+    );
+
+    const returnedTranscript = screen.getByRole("log", {
+      name: "聊天记录",
+    }) as HTMLElement;
+    assert.ok(within(returnedTranscript).getByText("甲会话后台长回复"));
+    assert.equal(returnedTranscript.scrollTop, 900);
+  } finally {
+    if (originalClientHeight) {
+      Object.defineProperty(
+        elementPrototype,
+        "clientHeight",
+        originalClientHeight,
+      );
+    } else {
+      delete (elementPrototype as { clientHeight?: number }).clientHeight;
+    }
+    if (originalScrollHeight) {
+      Object.defineProperty(
+        elementPrototype,
+        "scrollHeight",
+        originalScrollHeight,
+      );
+    } else {
+      delete (elementPrototype as { scrollHeight?: number }).scrollHeight;
+    }
+  }
+});
+
+test("返回后台增长的会话时仅在离开时接近底部才跟随新回复", () => {
+  const elementPrototype = dom.window.HTMLElement.prototype;
+  const originalClientHeight = Object.getOwnPropertyDescriptor(
+    elementPrototype,
+    "clientHeight",
+  );
+  const originalScrollHeight = Object.getOwnPropertyDescriptor(
+    elementPrototype,
+    "scrollHeight",
+  );
+  Object.defineProperty(elementPrototype, "clientHeight", {
+    configurable: true,
+    get() {
+      return this.getAttribute("role") === "log" ? 200 : 0;
+    },
+  });
+  Object.defineProperty(elementPrototype, "scrollHeight", {
+    configurable: true,
+    get() {
+      if (this.getAttribute("role") !== "log") return 0;
+      if (this.textContent?.includes("第二次后台新增回复")) return 1100;
+      if (this.textContent?.includes("后台新增回复")) return 900;
+      return this.textContent?.includes("旁观会话") ? 600 : 500;
+    },
+  });
+
+  try {
+    const savedPositions = new Map<
+      string,
+      {
+        scrollOffset: number;
+        wasNearBottom: boolean | undefined;
+        messageCount: number | undefined;
+      }
+    >();
+    const sessionA = {
+      id: "scroll-background-a",
+      title: "后台增长会话",
+      messages: [
+        {
+          id: "scroll-a-user",
+          role: "user",
+          content: "后台增长问题",
+          status: "sent",
+          createdAt: 100,
+        },
+        {
+          id: "scroll-a-assistant",
+          role: "assistant",
+          content: "初始回复",
+          modelName: "滚动模型",
+          createdAt: 101,
+        },
+      ],
+      createdAt: 100,
+      updatedAt: 101,
+      draft: "",
+      pendingRequest: null,
+      scrollOffset: 0,
+      scrollWasNearBottom: true,
+      scrollMessageCount: 2,
+    } as ChatSession;
+    const sessionB = {
+      ...sessionA,
+      id: "scroll-background-b",
+      title: "旁观会话",
+      messages: [
+        {
+          id: "scroll-b-user",
+          role: "user",
+          content: "旁观会话",
+          status: "sent",
+          createdAt: 200,
+        },
+      ],
+      createdAt: 200,
+      updatedAt: 200,
+      scrollMessageCount: 1,
+    } as ChatSession;
+    const onScrollOffsetChange = (
+      sessionId: string,
+      scrollOffset: number,
+      wasNearBottom?: boolean,
+      messageCount?: number,
+    ) => {
+      savedPositions.set(sessionId, {
+        scrollOffset,
+        wasNearBottom,
+        messageCount,
+      });
+    };
+    const renderTranscript = (session: ChatSession) => (
+      <ChatTranscript
+        isGenerating={false}
+        key={session.id}
+        onRetry={() => undefined}
+        onScrollOffsetChange={onScrollOffsetChange}
+        retryDisabled={false}
+        session={session}
+      />
+    );
+    const view = render(renderTranscript(sessionA));
+    const transcriptA = screen.getByRole("log", {
+      name: "聊天记录",
+    }) as HTMLElement;
+    transcriptA.scrollTop = 220;
+    fireEvent.scroll(transcriptA);
+
+    view.rerender(renderTranscript(sessionB));
+    const nearBottomPosition = savedPositions.get(sessionA.id);
+    assert.ok(nearBottomPosition);
+    assert.deepEqual(nearBottomPosition, {
+      scrollOffset: 220,
+      wasNearBottom: true,
+      messageCount: 2,
+    });
+
+    const sessionAWithBackgroundReply = {
+      ...sessionA,
+      messages: [
+        ...sessionA.messages,
+        {
+          id: "scroll-a-background-assistant",
+          role: "assistant",
+          content: "后台新增回复",
+          modelName: "滚动模型",
+          createdAt: 102,
+        },
+      ],
+      scrollOffset: nearBottomPosition.scrollOffset,
+      scrollWasNearBottom: nearBottomPosition.wasNearBottom,
+      scrollMessageCount: nearBottomPosition.messageCount,
+    } as ChatSession;
+    view.rerender(renderTranscript(sessionAWithBackgroundReply));
+    const returnedNearBottomTranscript = screen.getByRole("log", {
+      name: "聊天记录",
+    }) as HTMLElement;
+    assert.equal(returnedNearBottomTranscript.scrollTop, 900);
+
+    returnedNearBottomTranscript.scrollTop = 100;
+    fireEvent.scroll(returnedNearBottomTranscript);
+    view.rerender(renderTranscript(sessionB));
+    const readingPosition = savedPositions.get(sessionA.id);
+    assert.ok(readingPosition);
+    assert.deepEqual(readingPosition, {
+      scrollOffset: 100,
+      wasNearBottom: false,
+      messageCount: 3,
+    });
+
+    const sessionAWithSecondBackgroundReply = {
+      ...sessionAWithBackgroundReply,
+      messages: [
+        ...sessionAWithBackgroundReply.messages,
+        {
+          id: "scroll-a-second-background-assistant",
+          role: "assistant",
+          content: "第二次后台新增回复",
+          modelName: "滚动模型",
+          createdAt: 103,
+        },
+      ],
+      scrollOffset: readingPosition.scrollOffset,
+      scrollWasNearBottom: readingPosition.wasNearBottom,
+      scrollMessageCount: readingPosition.messageCount,
+    } as ChatSession;
+    view.rerender(renderTranscript(sessionAWithSecondBackgroundReply));
+    assert.equal(
+      (screen.getByRole("log", { name: "聊天记录" }) as HTMLElement).scrollTop,
+      100,
+    );
+  } finally {
+    if (originalClientHeight) {
+      Object.defineProperty(
+        elementPrototype,
+        "clientHeight",
+        originalClientHeight,
+      );
+    } else {
+      delete (elementPrototype as { clientHeight?: number }).clientHeight;
+    }
+    if (originalScrollHeight) {
+      Object.defineProperty(
+        elementPrototype,
+        "scrollHeight",
+        originalScrollHeight,
+      );
+    } else {
+      delete (elementPrototype as { scrollHeight?: number }).scrollHeight;
+    }
+  }
+});
+
 test("移动端历史通过抽屉按钮开关并保护底部安全区", async () => {
   Object.defineProperty(window, "innerWidth", {
     configurable: true,
@@ -2811,6 +3319,53 @@ test("移动端历史通过抽屉按钮开关并保护底部安全区", async ()
   );
   const mobileStyles = css.slice(css.indexOf("@media (max-width: 760px)"));
   assert.match(mobileStyles, /env\(safe-area-inset-bottom\)/);
+});
+
+test("移动端短动态视口不会被固定最小高度推出输入器", () => {
+  const css = readFileSync(
+    new URL("../app/globals.css", import.meta.url),
+    "utf8",
+  );
+  const mobileStyles = css.slice(css.indexOf("@media (max-width: 760px)"));
+  const workspaceRule = mobileStyles.match(
+    /\.chat-workspace\s*\{([^}]*)\}/,
+  )?.[1];
+
+  assert.ok(workspaceRule);
+  assert.match(workspaceRule, /height:\s*calc\(100dvh - 164px\)/);
+  assert.match(workspaceRule, /min-height:\s*0/);
+  assert.doesNotMatch(workspaceRule, /min-height:\s*[1-9]\d*px/);
+});
+
+test("移动端从历史发起新对话后聚焦输入框而不是历史入口", async () => {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 390,
+  });
+  installConnectedChatModels([
+    {
+      id: "chat-workspace-mobile-new-focus",
+      provider: "OpenAI",
+      displayName: "移动新会话聚焦模型",
+      modelId: "mobile-new-focus-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-workspace-mobile-new-focus",
+      revision: "revision-chat-workspace-mobile-new-focus",
+    },
+  ]);
+  globalThis.fetch = (async () =>
+    Response.json({ ok: true, reply: "移动新会话聚焦回复" })) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "移动新会话聚焦");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("移动新会话聚焦回复")));
+  await user.click(screen.getByRole("button", { name: "打开聊天历史" }));
+  await user.click(screen.getByRole("button", { name: "新建会话" }));
+
+  const input = screen.getByLabelText("聊天消息输入框");
+  assert.equal(document.activeElement === input, true);
 });
 
 test("移动端历史关闭时退出无障碍和焦点顺序并在打开关闭间管理焦点", async () => {
@@ -2880,6 +3435,145 @@ test("移动端历史关闭时退出无障碍和焦点顺序并在打开关闭�
     assert.equal(drawer.getAttribute("aria-hidden"), "true");
     assert.equal(document.activeElement, opener);
   });
+});
+
+test("移动端删除确认优先消费 Escape，再次 Escape 才关闭抽屉", async () => {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 390,
+  });
+  installConnectedChatModels([
+    {
+      id: "chat-workspace-mobile-delete-focus",
+      provider: "OpenAI",
+      displayName: "移动删除焦点模型",
+      modelId: "mobile-delete-focus-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-workspace-mobile-delete-focus",
+      revision: "revision-chat-workspace-mobile-delete-focus",
+    },
+  ]);
+  globalThis.fetch = (async () =>
+    Response.json({ ok: true, reply: "移动删除焦点回复" })) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "移动待删除会话");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("移动删除焦点回复")));
+  const opener = screen.getByRole("button", { name: "打开聊天历史" });
+  await user.click(opener);
+  const drawer = screen.getByRole("dialog", { name: "聊天历史抽屉" });
+  const deleteTrigger = screen.getByRole("button", {
+    name: "删除会话：移动待删除会话",
+  });
+  await user.click(deleteTrigger);
+  const confirmation = screen.getByRole("alertdialog", {
+    name: "确认删除会话：移动待删除会话",
+  });
+  const cancel = within(confirmation).getByRole("button", { name: "取消" });
+  assert.equal(document.activeElement === cancel, true);
+
+  await user.keyboard("{Escape}");
+  assert.equal(screen.queryByRole("alertdialog"), null);
+  assert.equal(drawer.classList.contains("open"), true);
+  assert.equal(document.activeElement === deleteTrigger, true);
+
+  await user.keyboard("{Escape}");
+  await waitFor(() => {
+    assert.equal(drawer.getAttribute("aria-hidden"), "true");
+    assert.equal(document.activeElement, opener);
+  });
+});
+
+test("移动端确认删除非最后会话后把焦点留在抽屉内控制项", async () => {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 390,
+  });
+  const historyItems: ChatSessionHistoryItem[] = [
+    {
+      id: "mobile-delete-first",
+      title: "移动删除甲",
+      displayTitle: "移动删除甲",
+      isDraft: false,
+      messages: [
+        {
+          id: "mobile-delete-first-message",
+          role: "user",
+          content: "移动删除甲",
+          status: "sent",
+          createdAt: 100,
+        },
+      ],
+      createdAt: 100,
+      updatedAt: 100,
+      draft: "",
+      pendingRequest: null,
+      scrollOffset: 0,
+      scrollWasNearBottom: true,
+      scrollMessageCount: 1,
+    },
+    {
+      id: "mobile-delete-second",
+      title: "移动删除乙",
+      displayTitle: "移动删除乙",
+      isDraft: false,
+      messages: [
+        {
+          id: "mobile-delete-second-message",
+          role: "user",
+          content: "移动删除乙",
+          status: "sent",
+          createdAt: 200,
+        },
+      ],
+      createdAt: 200,
+      updatedAt: 200,
+      draft: "",
+      pendingRequest: null,
+      scrollOffset: 0,
+      scrollWasNearBottom: true,
+      scrollMessageCount: 1,
+    },
+  ];
+  function MobileDeleteFocusHarness() {
+    const [sessions, setSessions] = useState(historyItems);
+    return (
+      <ChatHistorySidebar
+        activeSessionId="mobile-delete-second"
+        onClose={() => undefined}
+        onCreate={() => undefined}
+        onDelete={(sessionId) =>
+          setSessions((current) =>
+            current.filter((session) => session.id !== sessionId),
+          )}
+        onSelect={() => undefined}
+        open
+        sessions={sessions}
+      />
+    );
+  }
+  const user = userEvent.setup({ document });
+  render(<MobileDeleteFocusHarness />);
+
+  const drawer = await screen.findByRole("dialog", {
+    name: "聊天历史抽屉",
+  });
+  await user.click(
+    screen.getByRole("button", { name: "删除会话：移动删除甲" }),
+  );
+  await user.click(
+    within(
+      screen.getByRole("alertdialog", {
+        name: "确认删除会话：移动删除甲",
+      }),
+    ).getByRole("button", { name: "确认删除" }),
+  );
+
+  const createButton = screen.getByRole("button", { name: "新建会话" });
+  assert.equal(document.activeElement === createButton, true);
+  assert.equal(drawer.contains(document.activeElement), true);
 });
 
 test("移动端历史打开后父级重渲染不会抢走抽屉内当前焦点", async () => {
@@ -2991,6 +3685,49 @@ test("聊天会话未发送的新会话在导航后不会进入历史", async ()
   );
 });
 
+test("非空草稿会话在切换后作为草稿历史项重新打开并恢复输入", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-session-draft-history",
+      provider: "OpenAI",
+      displayName: "草稿历史模型",
+      modelId: "draft-history-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-session-draft-history",
+      revision: "revision-session-draft-history",
+    },
+  ]);
+  globalThis.fetch = (async () =>
+    Response.json({ ok: true, reply: "已发送会话回复" })) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.type(screen.getByLabelText("聊天消息输入框"), "已发送会话");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("已发送会话回复")));
+  await user.click(screen.getByRole("button", { name: "新建会话" }));
+
+  const draft = "这条草稿切换后必须完整恢复";
+  await user.type(screen.getByLabelText("聊天消息输入框"), draft);
+  const draftEntry = screen.getByRole("button", {
+    name: `打开草稿：${draft}`,
+  });
+  assert.match(draftEntry.textContent ?? "", /草稿/);
+
+  await user.click(
+    screen.getByRole("button", { name: "打开会话：已发送会话" }),
+  );
+  assert.ok(screen.getByText("已发送会话回复"));
+  await user.click(
+    screen.getByRole("button", { name: `打开草稿：${draft}` }),
+  );
+
+  assert.equal(
+    (screen.getByLabelText("聊天消息输入框") as HTMLTextAreaElement).value,
+    draft,
+  );
+});
+
 test("聊天会话状态只存在于当前 React 运行期", async () => {
   installConnectedChatModels([
     {
@@ -3027,6 +3764,108 @@ test("聊天会话状态只存在于当前 React 运行期", async () => {
       screen.getByRole("button", { name: "选择模型，当前 运行期测试模型" }),
     ),
   );
+});
+
+test("发送后聊天哨兵不会进入客户端存储、IndexedDB 或 console 调用", async () => {
+  const sentinel = "__CHAT_PRIVACY_SENTINEL_019fad36__";
+  installConnectedChatModels([
+    {
+      id: "chat-session-privacy-sentinel",
+      provider: "OpenAI",
+      displayName: "隐私回归模型",
+      modelId: "privacy-sentinel-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-session-privacy-regression",
+      revision: "revision-session-privacy-regression",
+    },
+  ]);
+  globalThis.fetch = (async () =>
+    Response.json({ ok: true, reply: "隐私回归回复" })) as typeof fetch;
+  const indexedDbAccesses: string[] = [];
+  const availableIndexedDb = window.indexedDB;
+  const canSnapshotIndexedDb =
+    Boolean(availableIndexedDb)
+    && typeof availableIndexedDb.databases === "function";
+  const originalIndexedDbDescriptor = Object.getOwnPropertyDescriptor(
+    window,
+    "indexedDB",
+  );
+  if (!canSnapshotIndexedDb) {
+    Object.defineProperty(window, "indexedDB", {
+      configurable: true,
+      get() {
+        indexedDbAccesses.push("indexedDB");
+        return undefined;
+      },
+    });
+  }
+  const consoleCalls: unknown[][] = [];
+  const consoleMethods = ["debug", "error", "info", "log", "warn"] as const;
+  const originalConsoleDescriptors = new Map<
+    (typeof consoleMethods)[number],
+    PropertyDescriptor | undefined
+  >();
+  for (const method of consoleMethods) {
+    originalConsoleDescriptors.set(
+      method,
+      Object.getOwnPropertyDescriptor(console, method),
+    );
+    Object.defineProperty(console, method, {
+      configurable: true,
+      writable: true,
+      value: (...args: unknown[]) => {
+        consoleCalls.push(args);
+      },
+    });
+  }
+
+  let serializedIndexedDb = "";
+  try {
+    const user = userEvent.setup({ document });
+    render(<Home />);
+    await user.type(screen.getByLabelText("聊天消息输入框"), sentinel);
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => assert.ok(screen.getByText("隐私回归回复")));
+    if (canSnapshotIndexedDb && availableIndexedDb) {
+      serializedIndexedDb = await snapshotIndexedDb(availableIndexedDb);
+    }
+  } finally {
+    for (const method of consoleMethods) {
+      const descriptor = originalConsoleDescriptors.get(method);
+      if (descriptor) Object.defineProperty(console, method, descriptor);
+    }
+    if (!canSnapshotIndexedDb) {
+      if (originalIndexedDbDescriptor) {
+        Object.defineProperty(window, "indexedDB", originalIndexedDbDescriptor);
+      } else {
+        delete (window as { indexedDB?: IDBFactory }).indexedDB;
+      }
+    }
+  }
+
+  const snapshotStorage = (storage: Storage) =>
+    JSON.stringify(
+      Array.from({ length: storage.length }, (_, index) => {
+        const key = storage.key(index);
+        return [key, key ? storage.getItem(key) : null];
+      }),
+    );
+  const serializedConsoleCalls = consoleCalls
+    .map((args) =>
+      args.map((argument) => {
+        try {
+          return JSON.stringify(argument);
+        } catch {
+          return String(argument);
+        }
+      }))
+    .join("\n");
+
+  assert.doesNotMatch(snapshotStorage(window.localStorage), new RegExp(sentinel));
+  assert.doesNotMatch(snapshotStorage(window.sessionStorage), new RegExp(sentinel));
+  assert.deepEqual(indexedDbAccesses, []);
+  assert.doesNotMatch(serializedIndexedDb, new RegExp(sentinel));
+  assert.doesNotMatch(serializedConsoleCalls, new RegExp(sentinel));
 });
 
 test("home chat keeps blank send disabled, fills a quick prompt, and shows the submitted turn immediately", async () => {
@@ -3163,6 +4002,10 @@ test("home chat proxies other models without an egress override and keeps conver
 
   await user.click(screen.getByRole("button", { name: "选择模型，当前 Alpha 模型" }));
   await user.click(screen.getByRole("button", { name: /Beta 模型/ }));
+  assert.equal(
+    screen.getByLabelText("当前模型").textContent?.replace(/\s+/g, ""),
+    "当前模型Beta模型",
+  );
   const transcript = screen.getByRole("log", { name: "聊天记录" });
   assert.ok(within(transcript).getByText("第一问"));
   assert.ok(within(transcript).getByText("Alpha 回复"));

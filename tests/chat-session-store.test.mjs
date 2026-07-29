@@ -47,6 +47,36 @@ test("标题取首条用户消息前 24 个可见字符并追加省略号", () =
   );
 });
 
+test("标题按完整 emoji 字形截断而不切断代理对", () => {
+  const emoji = "🙂";
+
+  assert.equal(
+    createChatTitle(`${emoji.repeat(24)}下一字`),
+    `${emoji.repeat(24)}…`,
+  );
+});
+
+test("标题按完整组合字形截断且 Segmenter 缺失时仍保留组合序列", () => {
+  const originalSegmenter = Intl.Segmenter;
+  Object.defineProperty(Intl, "Segmenter", {
+    configurable: true,
+    value: undefined,
+  });
+
+  try {
+    const combinedCharacter = "e\u0301";
+    assert.equal(
+      createChatTitle(`${combinedCharacter.repeat(24)}下一字`),
+      `${combinedCharacter.repeat(24)}…`,
+    );
+  } finally {
+    Object.defineProperty(Intl, "Segmenter", {
+      configurable: true,
+      value: originalSegmenter,
+    });
+  }
+});
+
 test("空白首条消息不能生成标题", () => {
   assert.equal(createChatTitle(" \n\t "), "");
 });
@@ -60,6 +90,81 @@ test("空会话不进入历史", () => {
   assert.equal(state.activeSessionId, "session-empty");
   assert.equal(getActiveSession(state)?.id, "session-empty");
   assert.deepEqual(getVisibleSessions(state), []);
+});
+
+test("新会话初始化可持久化的近底部与消息计数滚动元数据", () => {
+  const state = createSession(createInitialChatSessionState(), {
+    id: "session-scroll-metadata",
+    now: 100,
+  });
+  const session = getActiveSession(state);
+
+  assert.deepEqual(
+    {
+      scrollOffset: session?.scrollOffset,
+      scrollWasNearBottom: session?.scrollWasNearBottom,
+      scrollMessageCount: session?.scrollMessageCount,
+    },
+    {
+      scrollOffset: 0,
+      scrollWasNearBottom: true,
+      scrollMessageCount: 0,
+    },
+  );
+});
+
+test("非空草稿进入历史并带有明确草稿标记，纯空白草稿仍隐藏", () => {
+  const state = {
+    sessions: [
+      createSessionRecord({
+        id: "session-conversation",
+        title: "已发送会话",
+        messages: [
+          {
+            id: "conversation-user",
+            role: "user",
+            content: "已发送内容",
+            createdAt: 100,
+          },
+        ],
+        createdAt: 100,
+        updatedAt: 100,
+      }),
+      createSessionRecord({
+        id: "session-draft",
+        title: "",
+        draft: "  尚未发送但必须可恢复的草稿  ",
+        createdAt: 200,
+        updatedAt: 200,
+      }),
+      createSessionRecord({
+        id: "session-whitespace",
+        title: "",
+        draft: " \n\t ",
+        createdAt: 300,
+        updatedAt: 300,
+      }),
+    ],
+    activeSessionId: "session-draft",
+  };
+
+  assert.deepEqual(
+    getVisibleSessions(state).map(
+      ({ id, displayTitle, isDraft }) => ({ id, displayTitle, isDraft }),
+    ),
+    [
+      {
+        id: "session-draft",
+        displayTitle: "尚未发送但必须可恢复的草稿",
+        isDraft: true,
+      },
+      {
+        id: "session-conversation",
+        displayTitle: "已发送会话",
+        isDraft: false,
+      },
+    ],
+  );
 });
 
 test("非空会话按 updatedAt 倒序显示", () => {
@@ -193,7 +298,7 @@ test("变更 updater 不会改写更新前会话", () => {
   assert.equal(next.sessions[0].pendingRequest.modelName, "模型二");
 });
 
-test("用户、助手消息状态与 modelName 原样保留", () => {
+test("用户、助手的全部终态、errorMessage 与 modelName 原样保留", () => {
   const messages = [
     {
       id: "user-1",
@@ -210,6 +315,21 @@ test("用户、助手消息状态与 modelName 原样保留", () => {
       status: "sent",
       createdAt: 101,
     },
+    {
+      id: "user-failed",
+      role: "user",
+      content: "失败的问题",
+      status: "failed",
+      errorMessage: "安全失败提示",
+      createdAt: 102,
+    },
+    {
+      id: "user-stopped",
+      role: "user",
+      content: "停止的问题",
+      status: "stopped",
+      createdAt: 103,
+    },
   ];
   const state = createSession(createInitialChatSessionState(), {
     id: "session-messages",
@@ -219,6 +339,42 @@ test("用户、助手消息状态与 modelName 原样保留", () => {
   });
 
   assert.deepEqual(getActiveSession(state)?.messages, messages);
+});
+
+test("选择有效会话会更新当前选择", () => {
+  const state = {
+    sessions: [
+      createSessionRecord({
+        id: "session-first",
+        title: "第一条",
+        createdAt: 100,
+      }),
+      createSessionRecord({
+        id: "session-second",
+        title: "第二条",
+        createdAt: 200,
+      }),
+    ],
+    activeSessionId: "session-first",
+  };
+
+  const next = selectSession(state, "session-second");
+
+  assert.notEqual(next, state);
+  assert.equal(next.activeSessionId, "session-second");
+  assert.deepEqual(next.sessions, state.sessions);
+});
+
+test("选择不存在的会话保持原状态对象与当前选择", () => {
+  const state = createSession(createInitialChatSessionState(), {
+    id: "session-existing",
+    now: 100,
+  });
+
+  const next = selectSession(state, "session-missing");
+
+  assert.equal(next, state);
+  assert.equal(next.activeSessionId, "session-existing");
 });
 
 test("删除当前会话后选择最近更新的剩余会话", () => {

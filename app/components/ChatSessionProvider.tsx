@@ -17,6 +17,7 @@ import {
   getVisibleSessions,
   selectSession as selectChatSession,
   updateSession as updateChatSession,
+  type ChatSessionHistoryItem,
   type ChatSession,
 } from "../lib/chat-session-store.mjs";
 
@@ -24,7 +25,7 @@ export type ChatSessionContextValue = {
   sessions: ChatSession[];
   activeSessionId: string | null;
   activeSession: ChatSession | null;
-  visibleSessions: ChatSession[];
+  visibleSessions: ChatSessionHistoryItem[];
   createEmptySession(): string;
   ensureSession(firstMessage: string): string;
   selectSession(id: string): void;

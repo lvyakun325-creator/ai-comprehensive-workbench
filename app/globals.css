@@ -1209,13 +1209,33 @@ button {
   text-align: left;
 }
 
+.chat-history-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .chat-history-select strong {
+  min-width: 0;
   overflow: hidden;
+  flex: 1;
   color: #344054;
   font-size: 12px;
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.chat-history-title em {
+  padding: 2px 5px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #fff4d8;
+  color: #9a6a18;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 750;
 }
 
 .chat-history-select small {
@@ -1323,9 +1343,27 @@ button {
   white-space: nowrap;
 }
 
+.chat-workspace-model {
+  min-width: 0;
+  max-width: 220px;
+  margin-left: auto;
+  padding: 7px 10px;
+  border: 1px solid #e0e6ef;
+  border-radius: 10px;
+  background: #f8faff;
+}
+
+.chat-workspace-model strong {
+  overflow: hidden;
+  color: #4c5b73;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .chat-workspace-info {
   min-height: 34px;
-  margin-left: auto;
+  margin-left: 0;
   padding: 0 11px;
   flex: 0 0 auto;
   border: 1px solid #dde4ee;
@@ -3211,7 +3249,7 @@ button {
 @media (max-width: 760px) {
   .chat-workspace {
     height: calc(100dvh - 164px);
-    min-height: 520px;
+    min-height: 0;
     display: block;
     border-radius: 20px;
   }
@@ -3285,6 +3323,15 @@ button {
 
   .chat-workspace-header h1 {
     font-size: 16px;
+  }
+
+  .chat-workspace-model {
+    max-width: min(34vw, 132px);
+    padding: 6px 8px;
+  }
+
+  .chat-workspace-model span {
+    display: none;
   }
 
   .chat-workspace-info {

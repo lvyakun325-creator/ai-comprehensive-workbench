@@ -10,7 +10,12 @@ type ChatTranscriptProps = {
   isGenerating: boolean;
   retryDisabled: boolean;
   onRetry(userMessageId: string): void;
-  onScrollOffsetChange(sessionId: string, scrollOffset: number): void;
+  onScrollOffsetChange(
+    sessionId: string,
+    scrollOffset: number,
+    wasNearBottom: boolean,
+    messageCount: number,
+  ): void;
 };
 
 export function ChatTranscript({
@@ -21,24 +26,42 @@ export function ChatTranscript({
   onScrollOffsetChange,
 }: ChatTranscriptProps) {
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const initialOffsetRef = useRef(session.scrollOffset);
+  const initialWasNearBottomRef = useRef(session.scrollWasNearBottom);
+  const initialMessageCountRef = useRef(session.scrollMessageCount);
   const currentOffsetRef = useRef(session.scrollOffset);
-  const wasNearBottomRef = useRef(true);
+  const wasNearBottomRef = useRef(session.scrollWasNearBottom);
+  const messageCountRef = useRef(session.messages.length);
   const contentEffectReadyRef = useRef(false);
+
+  useLayoutEffect(() => {
+    messageCountRef.current = session.messages.length;
+  }, [session.messages.length]);
 
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
 
-    transcript.scrollTop = session.scrollOffset;
+    const followsBackgroundGrowth =
+      initialWasNearBottomRef.current
+      && messageCountRef.current > initialMessageCountRef.current;
+    transcript.scrollTop = followsBackgroundGrowth
+      ? transcript.scrollHeight
+      : initialOffsetRef.current;
     currentOffsetRef.current = transcript.scrollTop;
-    wasNearBottomRef.current =
-      transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop
-      <= NEAR_BOTTOM_THRESHOLD;
+    wasNearBottomRef.current = followsBackgroundGrowth
+      ? true
+      : initialWasNearBottomRef.current;
 
     return () => {
-      onScrollOffsetChange(session.id, currentOffsetRef.current);
+      onScrollOffsetChange(
+        session.id,
+        currentOffsetRef.current,
+        wasNearBottomRef.current,
+        messageCountRef.current,
+      );
     };
-  }, [onScrollOffsetChange, session.id, session.scrollOffset]);
+  }, [onScrollOffsetChange, session.id]);
 
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;

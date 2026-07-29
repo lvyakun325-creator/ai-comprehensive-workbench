@@ -37,6 +37,7 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
   } = useModelRegistry();
   const [initialDraft, setInitialDraft] = useState("");
   const [isHistoryOpen, setHistoryOpen] = useState(false);
+  const [composerFocusToken, setComposerFocusToken] = useState(0);
   const historyOpenerRef = useRef<HTMLButtonElement>(null);
   const hasWorkspace = visibleSessions.length > 0;
   const hasActiveConversation = Boolean(activeSession?.messages.length);
@@ -75,7 +76,8 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
   function startNewSession() {
     setInitialDraft("");
     createEmptySession();
-    closeHistory();
+    setComposerFocusToken((token) => token + 1);
+    closeHistory(false);
   }
 
   function openSession(id: string) {
@@ -83,17 +85,39 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
     closeHistory();
   }
 
-  function closeHistory() {
-    historyOpenerRef.current?.focus();
+  function removeSession(id: string) {
+    deleteSession(id);
+    if (
+      visibleSessions.length === 1
+      && visibleSessions[0]?.id === id
+    ) {
+      setComposerFocusToken((token) => token + 1);
+    }
+  }
+
+  function closeHistory(restoreFocus = true) {
+    if (restoreFocus) historyOpenerRef.current?.focus();
     setHistoryOpen(false);
   }
 
   const saveScrollOffset = useCallback(
-    (sessionId: string, scrollOffset: number) => {
+    (
+      sessionId: string,
+      scrollOffset: number,
+      scrollWasNearBottom: boolean,
+      scrollMessageCount: number,
+    ) => {
       updateSession(sessionId, (session) =>
         session.scrollOffset === scrollOffset
+          && session.scrollWasNearBottom === scrollWasNearBottom
+          && session.scrollMessageCount === scrollMessageCount
           ? session
-          : { ...session, scrollOffset },
+          : {
+              ...session,
+              scrollOffset,
+              scrollWasNearBottom,
+              scrollMessageCount,
+            },
       );
     },
     [updateSession],
@@ -105,6 +129,7 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
       activeSessionRequest={activeSessionRequest}
       connectedModels={connectedModels}
       draft={input}
+      focusToken={composerFocusToken}
       onDraftChange={updateDraft}
       onOpenModels={onOpenModels}
       onPreview={onPreview}
@@ -154,7 +179,7 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
         activeSessionId={activeSession?.id ?? null}
         onClose={closeHistory}
         onCreate={startNewSession}
-        onDelete={deleteSession}
+        onDelete={removeSession}
         onSelect={openSession}
         open={isHistoryOpen}
         sessions={visibleSessions}
@@ -177,6 +202,10 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
                 ? activeSession.title
                 : "新对话"}
             </h1>
+          </div>
+          <div aria-label="当前模型" className="chat-workspace-model">
+            <span>当前模型</span>
+            <strong>{chatSelectedModel?.displayName ?? "未选择模型"}</strong>
           </div>
           <button
             className="chat-workspace-info"

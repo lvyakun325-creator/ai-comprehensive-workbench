@@ -24,6 +24,13 @@ export type ChatSession = {
   draft: string;
   pendingRequest: ChatPendingRequestState | null;
   scrollOffset: number;
+  scrollWasNearBottom: boolean;
+  scrollMessageCount: number;
+};
+
+export type ChatSessionHistoryItem = ChatSession & {
+  displayTitle: string;
+  isDraft: boolean;
 };
 
 export type ChatSessionState = {
@@ -40,6 +47,8 @@ export type CreateChatSessionOptions = {
   draft?: string;
   pendingRequest?: ChatPendingRequestState | null;
   scrollOffset?: number;
+  scrollWasNearBottom?: boolean;
+  scrollMessageCount?: number;
 };
 
 export const CHAT_TITLE_MAX_LENGTH: 24;
@@ -62,5 +71,7 @@ export function updateSession(
   sessionId: string,
   updater: (session: ChatSession) => ChatSession,
 ): ChatSessionState;
-export function getVisibleSessions(state: ChatSessionState): ChatSession[];
+export function getVisibleSessions(
+  state: ChatSessionState,
+): ChatSessionHistoryItem[];
 export function getActiveSession(state: ChatSessionState): ChatSession | null;
