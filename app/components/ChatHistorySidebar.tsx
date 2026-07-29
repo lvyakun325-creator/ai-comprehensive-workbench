@@ -29,6 +29,7 @@ export function ChatHistorySidebar({
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [isMobile, setIsMobile] = useState(false);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
   const drawerHidden = isMobile && !open;
   const todaySessions = sessions.filter((session) =>
     isToday(session.updatedAt),
@@ -47,14 +48,44 @@ export function ChatHistorySidebar({
   useEffect(() => {
     if (!isMobile || !open) return;
     closeButtonRef.current?.focus();
+  }, [isMobile, open]);
 
-    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+  useEffect(() => {
+    if (!isMobile || !open) return;
+
+    const handleModalKeydown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const drawer = drawerRef.current;
+      if (!drawer) return;
+      const focusableElements = Array.from(
+        drawer.querySelectorAll<HTMLElement>(
+          'button:not([disabled]):not([tabindex="-1"]), [href]:not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      const firstFocusable = focusableElements[0];
+      const lastFocusable = focusableElements.at(-1);
+      if (!firstFocusable || !lastFocusable) return;
+
+      const activeElement = document.activeElement;
+      const focusEscapesBackward =
+        event.shiftKey &&
+        (activeElement === firstFocusable || !drawer.contains(activeElement));
+      const focusEscapesForward =
+        !event.shiftKey &&
+        (activeElement === lastFocusable || !drawer.contains(activeElement));
+      if (!focusEscapesBackward && !focusEscapesForward) return;
+
       event.preventDefault();
-      onClose();
+      (event.shiftKey ? lastFocusable : firstFocusable).focus();
     };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
+    document.addEventListener("keydown", handleModalKeydown);
+    return () => document.removeEventListener("keydown", handleModalKeydown);
   }, [isMobile, onClose, open]);
 
   function renderGroup(label: string, groupedSessions: ChatSession[]) {
@@ -140,6 +171,7 @@ export function ChatHistorySidebar({
       aria-modal={isMobile && open ? "true" : undefined}
       className={`chat-history-drawer ${open ? "open" : ""}`}
       inert={drawerHidden ? true : undefined}
+      ref={drawerRef}
       role={isMobile ? "dialog" : undefined}
     >
       <button

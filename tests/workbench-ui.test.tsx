@@ -46,6 +46,9 @@ const { StrictMode, useState } = await import("react");
 const { AGENT_PROJECTS } = await import("../app/lib/agent-catalog.mjs");
 const { AgentResultFiles } = await import("../app/components/AgentResultFiles");
 const { AgentTaskList } = await import("../app/components/AgentTaskList");
+const { ChatHistorySidebar } = await import(
+  "../app/components/ChatHistorySidebar"
+);
 const { default: Home } = await import("../app/page");
 const originalFetch = globalThis.fetch;
 
@@ -2877,6 +2880,80 @@ test("移动端历史关闭时退出无障碍和焦点顺序并在打开关闭�
     assert.equal(drawer.getAttribute("aria-hidden"), "true");
     assert.equal(document.activeElement, opener);
   });
+});
+
+test("移动端历史打开后父级重渲染不会抢走抽屉内当前焦点", async () => {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 390,
+  });
+  const renderSidebar = () => (
+    <ChatHistorySidebar
+      activeSessionId={null}
+      onClose={() => undefined}
+      onCreate={() => undefined}
+      onDelete={() => undefined}
+      onSelect={() => undefined}
+      open
+      sessions={[]}
+    />
+  );
+  const view = render(renderSidebar());
+
+  const closeButton = await screen.findByRole("button", {
+    name: "关闭聊天历史",
+  });
+  await waitFor(() => assert.equal(document.activeElement, closeButton));
+  const createButton = screen.getByRole("button", { name: "新建会话" });
+  createButton.focus();
+
+  view.rerender(renderSidebar());
+
+  assert.equal(document.activeElement, createButton);
+});
+
+test("移动端模态历史抽屉将正反向 Tab 焦点限制在抽屉内", async () => {
+  Object.defineProperty(window, "innerWidth", {
+    configurable: true,
+    value: 390,
+  });
+  const user = userEvent.setup({ document });
+  render(
+    <>
+      <button type="button">背景操作</button>
+      <ChatHistorySidebar
+        activeSessionId={null}
+        onClose={() => undefined}
+        onCreate={() => undefined}
+        onDelete={() => undefined}
+        onSelect={() => undefined}
+        open
+        sessions={[]}
+      />
+    </>,
+  );
+
+  const drawer = await screen.findByRole("dialog", {
+    name: "聊天历史抽屉",
+  });
+  const closeButton = screen.getByRole("button", {
+    name: "关闭聊天历史",
+  });
+  const createButton = screen.getByRole("button", { name: "新建会话" });
+
+  closeButton.focus();
+  await user.tab({ shift: true });
+  const reverseTabTarget = document.activeElement;
+  createButton.focus();
+  await user.tab();
+  const forwardTabTarget = document.activeElement;
+
+  assert.deepEqual(
+    [reverseTabTarget, forwardTabTarget],
+    [createButton, closeButton],
+  );
+  assert.equal(drawer.contains(reverseTabTarget), true);
+  assert.equal(drawer.contains(forwardTabTarget), true);
 });
 
 test("聊天会话未发送的新会话在导航后不会进入历史", async () => {
