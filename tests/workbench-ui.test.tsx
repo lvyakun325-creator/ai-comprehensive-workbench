@@ -59,6 +59,54 @@ function deferredValue<T>() {
   return { promise, reject, resolve };
 }
 
+type ConnectedChatModelFixture = {
+  id: string;
+  provider: string;
+  displayName: string;
+  modelId: string;
+  baseUrl: string;
+  apiKey: string;
+  revision: string;
+  isDefault?: boolean;
+};
+
+function installConnectedChatModels(
+  fixtures: readonly ConnectedChatModelFixture[],
+) {
+  window.localStorage.setItem(
+    "ai-workbench:model-registry:v2",
+    JSON.stringify(
+      fixtures.map((fixture, index) => ({
+        id: fixture.id,
+        provider: fixture.provider,
+        displayName: fixture.displayName,
+        modelId: fixture.modelId,
+        baseUrl: fixture.baseUrl,
+        enabled: true,
+        isDefault: fixture.isDefault ?? index === 0,
+        connectionStatus: "connected",
+        testedFingerprint: JSON.stringify([
+          fixture.baseUrl,
+          fixture.modelId,
+          fixture.revision,
+        ]),
+      })),
+    ),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credentials:v1",
+    JSON.stringify(
+      Object.fromEntries(fixtures.map((fixture) => [fixture.id, fixture.apiKey])),
+    ),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:model-credential-revisions:v1",
+    JSON.stringify(
+      Object.fromEntries(fixtures.map((fixture) => [fixture.id, fixture.revision])),
+    ),
+  );
+}
+
 const createdMarkdownBlobs: Array<{ blob: Blob; url: string }> = [];
 const revokedMarkdownUrls: string[] = [];
 const clickedDownloadAnchors: HTMLAnchorElement[] = [];
@@ -1951,6 +1999,343 @@ test("keeps content matrix configuration separate while other Agents select enab
     true,
   );
   assert.equal(screen.queryByRole("radio", { name: /Claude/ }), null);
+});
+
+test("home chat keeps blank send disabled, fills a quick prompt, and shows the submitted turn immediately", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-proxy",
+      provider: "OpenAI",
+      displayName: "真实聊天模型",
+      modelId: "gpt-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-immediate",
+      revision: "revision-chat-immediate",
+    },
+  ]);
+  const pending = deferredValue<Response>();
+  globalThis.fetch = (async () => pending.promise) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  const input = screen.getByLabelText("聊天消息输入框");
+  const send = screen.getByRole("button", { name: "发送" });
+  await waitFor(() => assert.equal((send as HTMLButtonElement).disabled, true));
+  await user.click(screen.getByRole("button", { name: "规划本月内容" }));
+  assert.equal((input as HTMLTextAreaElement).value, "规划本月内容");
+  assert.equal((send as HTMLButtonElement).disabled, false);
+
+  await user.click(send);
+  assert.ok(
+    within(screen.getByLabelText("聊天记录")).getByText("规划本月内容"),
+  );
+  assert.equal((input as HTMLTextAreaElement).value, "");
+  assert.equal((send as HTMLButtonElement).disabled, true);
+  assert.ok(screen.getByRole("button", { name: "停止" }));
+});
+
+test("home chat sends exact APINebula models browser-direct and labels the real reply model", async () => {
+  const apiKey = "sk-chat-direct-full-secret";
+  installConnectedChatModels([
+    {
+      id: "chat-direct",
+      provider: "APINebula",
+      displayName: "Nebula GPT",
+      modelId: "gpt-5.5",
+      baseUrl: "https://apinebula.ai/v1",
+      apiKey,
+      revision: "revision-chat-direct",
+    },
+  ]);
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = (async (input, init) => {
+    requests.push({
+      url: typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      init,
+    });
+    return Response.json({
+      choices: [{ message: { role: "assistant", content: "Nebula 真实回复" } }],
+    });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await waitFor(() =>
+    assert.ok(screen.getByRole("button", { name: "选择模型，当前 Nebula GPT" })),
+  );
+  await user.type(screen.getByLabelText("聊天消息输入框"), "直接请求");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  await waitFor(() => assert.ok(screen.getByText("Nebula 真实回复")));
+  assert.equal(requests[0]?.url, "https://apinebula.ai/v1/chat/completions");
+  assert.equal(
+    new Headers(requests[0]?.init?.headers).get("authorization"),
+    `Bearer ${apiKey}`,
+  );
+  assert.deepEqual(JSON.parse(String(requests[0]?.init?.body)), {
+    model: "gpt-5.5",
+    messages: [{ role: "user", content: "直接请求" }],
+    max_tokens: 2048,
+  });
+  assert.ok(
+    within(screen.getByLabelText("聊天记录")).getByText("Nebula GPT"),
+  );
+  assert.doesNotMatch(document.body.textContent ?? "", new RegExp(apiKey));
+});
+
+test("home chat proxies other models without an egress override and keeps conversation across model switches", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-alpha",
+      provider: "OpenAI",
+      displayName: "Alpha 模型",
+      modelId: "alpha-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-alpha",
+      revision: "revision-chat-alpha",
+    },
+    {
+      id: "chat-beta",
+      provider: "OpenAI",
+      displayName: "Beta 模型",
+      modelId: "beta-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-beta",
+      revision: "revision-chat-beta",
+    },
+  ]);
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+  globalThis.fetch = (async (input, init) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    requests.push({
+      url: typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+      body,
+    });
+    return Response.json({
+      ok: true,
+      reply: requests.length === 1 ? "Alpha 回复" : "Beta 回复",
+    });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await waitFor(() =>
+    assert.ok(screen.getByRole("button", { name: "选择模型，当前 Alpha 模型" })),
+  );
+  await user.type(screen.getByLabelText("聊天消息输入框"), "第一问");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("Alpha 回复")));
+
+  await user.click(screen.getByRole("button", { name: "选择模型，当前 Alpha 模型" }));
+  await user.click(screen.getByRole("button", { name: /Beta 模型/ }));
+  assert.ok(screen.getByText("第一问"));
+  assert.ok(screen.getByText("Alpha 回复"));
+  await user.type(screen.getByLabelText("聊天消息输入框"), "第二问");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByText("Beta 回复")));
+
+  assert.deepEqual(requests.map((request) => request.url), [
+    "/api/models/chat",
+    "/api/models/chat",
+  ]);
+  assert.equal("egressMode" in requests[0].body, false);
+  assert.deepEqual(requests[0].body, {
+    config: {
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-alpha",
+      model: "alpha-chat",
+    },
+    turns: [{ role: "user", content: "第一问" }],
+  });
+  assert.deepEqual(
+    within(screen.getByLabelText("聊天记录"))
+      .getAllByText(/Alpha 模型|Beta 模型/)
+      .map((node) => node.textContent),
+    ["Alpha 模型", "Beta 模型"],
+  );
+});
+
+test("home chat bounds provider history to the latest 20 visible turns", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-bounded",
+      provider: "OpenAI",
+      displayName: "上下文模型",
+      modelId: "bounded-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-bounded",
+      revision: "revision-chat-bounded",
+    },
+  ]);
+  const histories: Array<Array<{ role: string; content: string }>> = [];
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      turns: Array<{ role: string; content: string }>;
+    };
+    histories.push(body.turns);
+    return Response.json({ ok: true, reply: `回复 ${histories.length}` });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await waitFor(() =>
+    assert.ok(screen.getByRole("button", { name: "选择模型，当前 上下文模型" })),
+  );
+  for (let index = 1; index <= 12; index += 1) {
+    await user.type(screen.getByLabelText("聊天消息输入框"), `问题 ${index}`);
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => assert.ok(screen.getByText(`回复 ${index}`)));
+  }
+
+  assert.equal(histories.length, 12);
+  assert.ok(histories.every((turns) => turns.length <= 20));
+  assert.equal(histories.at(-1)?.length, 20);
+  assert.deepEqual(histories.at(-1)?.at(-1), {
+    role: "user",
+    content: "问题 12",
+  });
+});
+
+test("home chat stop aborts and rejects a late reply without removing visible turns", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-stop",
+      provider: "OpenAI",
+      displayName: "停止模型",
+      modelId: "stop-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-stop",
+      revision: "revision-chat-stop",
+    },
+  ]);
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await waitFor(() =>
+    assert.ok(screen.getByRole("button", { name: "选择模型，当前 停止模型" })),
+  );
+  await user.type(screen.getByLabelText("聊天消息输入框"), "保留这条消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.click(screen.getByRole("button", { name: "停止" }));
+
+  assert.equal(requestSignal?.aborted, true);
+  assert.ok(screen.getByText("保留这条消息"));
+  assert.equal(screen.queryByRole("button", { name: "停止" }), null);
+  pending.resolve(Response.json({ ok: true, reply: "不应出现的旧回复" }));
+  await waitFor(() =>
+    assert.equal(screen.queryByText("不应出现的旧回复"), null),
+  );
+});
+
+test("home chat failure is safe and retry uses the currently selected model without duplicating the user turn", async () => {
+  const firstKey = "sk-chat-failure-full-secret";
+  const retryKey = "sk-chat-retry-full-secret";
+  const rawProviderBody = `upstream exploded with ${firstKey}`;
+  installConnectedChatModels([
+    {
+      id: "chat-failure",
+      provider: "OpenAI",
+      displayName: "失败模型",
+      modelId: "failure-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: firstKey,
+      revision: "revision-chat-failure",
+    },
+    {
+      id: "chat-retry",
+      provider: "OpenAI",
+      displayName: "重试模型",
+      modelId: "retry-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: retryKey,
+      revision: "revision-chat-retry",
+    },
+  ]);
+  const bodies: Array<{
+    config: { apiKey: string; model: string };
+    turns: Array<{ role: string; content: string }>;
+  }> = [];
+  globalThis.fetch = (async (_input, init) => {
+    bodies.push(JSON.parse(String(init?.body)));
+    if (bodies.length === 1) {
+      return Response.json(
+        { ok: false, message: rawProviderBody },
+        { status: 502 },
+      );
+    }
+    return Response.json({ ok: true, reply: "安全重试成功" });
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await waitFor(() =>
+    assert.ok(screen.getByRole("button", { name: "选择模型，当前 失败模型" })),
+  );
+  await user.type(screen.getByLabelText("聊天消息输入框"), "只保留一次");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(screen.getByRole("button", { name: "重新发送" })));
+
+  assert.equal(screen.getAllByText("只保留一次").length, 1);
+  assert.doesNotMatch(document.body.textContent ?? "", new RegExp(firstKey));
+  assert.doesNotMatch(document.body.textContent ?? "", new RegExp(rawProviderBody));
+  await user.click(screen.getByRole("button", { name: "选择模型，当前 失败模型" }));
+  await user.click(screen.getByRole("button", { name: /重试模型/ }));
+  await user.click(screen.getByRole("button", { name: "重新发送" }));
+
+  await waitFor(() => assert.ok(screen.getByText("安全重试成功")));
+  assert.equal(screen.getAllByText("只保留一次").length, 1);
+  assert.deepEqual(bodies.map((body) => body.config), [
+    { baseUrl: "https://api.openai.com/v1", apiKey: firstKey, model: "failure-chat" },
+    { baseUrl: "https://api.openai.com/v1", apiKey: retryKey, model: "retry-chat" },
+  ]);
+  assert.deepEqual(bodies[1]?.turns, [
+    { role: "user", content: "只保留一次" },
+  ]);
+  assert.ok(
+    within(screen.getByLabelText("聊天记录")).getByText("重试模型"),
+  );
+  assert.doesNotMatch(document.body.textContent ?? "", new RegExp(retryKey));
+});
+
+test("leaving home chat aborts its active request and ignores its completion", async () => {
+  installConnectedChatModels([
+    {
+      id: "chat-unmount",
+      provider: "OpenAI",
+      displayName: "卸载模型",
+      modelId: "unmount-chat",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-chat-unmount",
+      revision: "revision-chat-unmount",
+    },
+  ]);
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await waitFor(() =>
+    assert.ok(screen.getByRole("button", { name: "选择模型，当前 卸载模型" })),
+  );
+  await user.type(screen.getByLabelText("聊天消息输入框"), "卸载前请求");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.click(screen.getByRole("button", { name: "Agent 项目" }));
+
+  assert.equal(requestSignal?.aborted, true);
+  pending.resolve(Response.json({ ok: true, reply: "卸载后的旧回复" }));
+  await waitFor(() => assert.equal(screen.queryByText("卸载后的旧回复"), null));
 });
 
 test("home chat and Agent A and B keep independent model selections", async () => {
