@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ChatSession } from "../lib/chat-session-store.mjs";
 
 export type ChatHistorySidebarProps = {
@@ -27,12 +27,35 @@ export function ChatHistorySidebar({
   onDelete,
 }: ChatHistorySidebarProps) {
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [isMobile, setIsMobile] = useState(false);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const drawerHidden = isMobile && !open;
   const todaySessions = sessions.filter((session) =>
     isToday(session.updatedAt),
   );
   const earlierSessions = sessions.filter(
     (session) => !isToday(session.updatedAt),
   );
+
+  useEffect(() => {
+    const updateViewport = () => setIsMobile(window.innerWidth <= 760);
+    updateViewport();
+    window.addEventListener("resize", updateViewport);
+    return () => window.removeEventListener("resize", updateViewport);
+  }, []);
+
+  useEffect(() => {
+    if (!isMobile || !open) return;
+    closeButtonRef.current?.focus();
+
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onClose();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [isMobile, onClose, open]);
 
   function renderGroup(label: string, groupedSessions: ChatSession[]) {
     if (groupedSessions.length === 0) return null;
@@ -53,6 +76,7 @@ export function ChatHistorySidebar({
                   aria-label={`打开会话：${session.title}`}
                   className="chat-history-select"
                   onClick={() => onSelect(session.id)}
+                  tabIndex={drawerHidden ? -1 : undefined}
                   type="button"
                 >
                   <strong>{session.title}</strong>
@@ -67,6 +91,7 @@ export function ChatHistorySidebar({
                   aria-label={`删除会话：${session.title}`}
                   className="chat-history-delete"
                   onClick={() => setPendingDeleteId(session.id)}
+                  tabIndex={drawerHidden ? -1 : undefined}
                   type="button"
                 >
                   ×
@@ -81,6 +106,7 @@ export function ChatHistorySidebar({
                     <div>
                       <button
                         onClick={() => setPendingDeleteId(null)}
+                        tabIndex={drawerHidden ? -1 : undefined}
                         type="button"
                       >
                         取消
@@ -91,6 +117,7 @@ export function ChatHistorySidebar({
                           setPendingDeleteId(null);
                           onDelete(session.id);
                         }}
+                        tabIndex={drawerHidden ? -1 : undefined}
                         type="button"
                       >
                         确认删除
@@ -107,7 +134,14 @@ export function ChatHistorySidebar({
   }
 
   return (
-    <div className={`chat-history-drawer ${open ? "open" : ""}`}>
+    <div
+      aria-hidden={drawerHidden ? "true" : undefined}
+      aria-label={isMobile ? "聊天历史抽屉" : undefined}
+      aria-modal={isMobile && open ? "true" : undefined}
+      className={`chat-history-drawer ${open ? "open" : ""}`}
+      inert={drawerHidden ? true : undefined}
+      role={isMobile ? "dialog" : undefined}
+    >
       <button
         aria-hidden="true"
         className="chat-history-backdrop"
@@ -125,6 +159,8 @@ export function ChatHistorySidebar({
             aria-label="关闭聊天历史"
             className="chat-history-close"
             onClick={onClose}
+            ref={closeButtonRef}
+            tabIndex={drawerHidden ? -1 : undefined}
             type="button"
           >
             ×
@@ -134,6 +170,7 @@ export function ChatHistorySidebar({
           aria-label="新建会话"
           className="chat-history-create"
           onClick={onCreate}
+          tabIndex={drawerHidden ? -1 : undefined}
           type="button"
         >
           <span>＋</span>

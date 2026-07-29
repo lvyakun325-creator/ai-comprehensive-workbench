@@ -21,26 +21,35 @@ export function ChatTranscript({
   onScrollOffsetChange,
 }: ChatTranscriptProps) {
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const currentOffsetRef = useRef(session.scrollOffset);
   const wasNearBottomRef = useRef(true);
+  const contentEffectReadyRef = useRef(false);
 
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
 
     transcript.scrollTop = session.scrollOffset;
+    currentOffsetRef.current = transcript.scrollTop;
     wasNearBottomRef.current =
       transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop
       <= NEAR_BOTTOM_THRESHOLD;
 
     return () => {
-      onScrollOffsetChange(session.id, transcript.scrollTop);
+      onScrollOffsetChange(session.id, currentOffsetRef.current);
     };
   }, [onScrollOffsetChange, session.id, session.scrollOffset]);
 
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
-    if (!transcript || !wasNearBottomRef.current) return;
+    if (!transcript) return;
+    if (!contentEffectReadyRef.current) {
+      contentEffectReadyRef.current = true;
+      return;
+    }
+    if (!wasNearBottomRef.current) return;
     transcript.scrollTop = transcript.scrollHeight;
+    currentOffsetRef.current = transcript.scrollTop;
   }, [isGenerating, session.messages.length]);
 
   return (
@@ -51,6 +60,7 @@ export function ChatTranscript({
       className="chat-transcript"
       onScroll={(event) => {
         const transcript = event.currentTarget;
+        currentOffsetRef.current = transcript.scrollTop;
         wasNearBottomRef.current =
           transcript.scrollHeight
             - transcript.clientHeight

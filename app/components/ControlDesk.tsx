@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { ChatComposer } from "./ChatComposer";
 import { ChatHistorySidebar } from "./ChatHistorySidebar";
 import { useChatRequestCoordinator } from "./ChatRequestCoordinatorProvider";
@@ -37,6 +37,7 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
   } = useModelRegistry();
   const [initialDraft, setInitialDraft] = useState("");
   const [isHistoryOpen, setHistoryOpen] = useState(false);
+  const historyOpenerRef = useRef<HTMLButtonElement>(null);
   const hasWorkspace = visibleSessions.length > 0;
   const hasActiveConversation = Boolean(activeSession?.messages.length);
   const input = activeSession?.draft ?? initialDraft;
@@ -74,11 +75,16 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
   function startNewSession() {
     setInitialDraft("");
     createEmptySession();
-    setHistoryOpen(false);
+    closeHistory();
   }
 
   function openSession(id: string) {
     selectSession(id);
+    closeHistory();
+  }
+
+  function closeHistory() {
+    historyOpenerRef.current?.focus();
     setHistoryOpen(false);
   }
 
@@ -146,7 +152,7 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
     <section aria-label="聊天会话" className="chat-workspace">
       <ChatHistorySidebar
         activeSessionId={activeSession?.id ?? null}
-        onClose={() => setHistoryOpen(false)}
+        onClose={closeHistory}
         onCreate={startNewSession}
         onDelete={deleteSession}
         onSelect={openSession}
@@ -159,6 +165,7 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
             aria-label="打开聊天历史"
             className="chat-history-open"
             onClick={() => setHistoryOpen(true)}
+            ref={historyOpenerRef}
             type="button"
           >
             ☰
@@ -182,6 +189,7 @@ export function ControlDesk({ onOpenModels, onPreview }: ControlDeskProps) {
         {hasActiveConversation && activeSession ? (
           <ChatTranscript
             isGenerating={Boolean(activeSessionRequest)}
+            key={activeSession.id}
             onRetry={(messageId) => {
               void retryMessage(activeSession.id, messageId);
             }}
