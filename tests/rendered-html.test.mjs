@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-async function render() {
+async function render({ headers = {} } = {}) {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
   const { default: worker } = await import(workerUrl.href);
 
   return worker.fetch(
     new Request("http://localhost/", {
-      headers: { accept: "text/html" },
+      headers: { accept: "text/html", ...headers },
     }),
     {
       ASSETS: {
@@ -22,6 +22,37 @@ async function render() {
     },
   );
 }
+
+test("server-renders a privacy-safe empty chat workspace", async () => {
+  const chatHistory = "SSR-历史会话-不应出现在首屏";
+  const apiKey = "sk-ssr-test-only-never-render";
+  const upstreamError =
+    "SSR-上游原始错误-https://internal.example/v1/chat/completions";
+  const chatStorageKey = "ai-workbench-chat-history";
+  const response = await render({
+    headers: {
+      cookie: [
+        `chatHistory=${encodeURIComponent(chatHistory)}`,
+        `apiKey=${encodeURIComponent(apiKey)}`,
+        `upstreamError=${encodeURIComponent(upstreamError)}`,
+        `chatStorageKey=${encodeURIComponent(chatStorageKey)}`,
+      ].join("; "),
+    },
+  });
+
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /今天想聊什么，或推进什么任务？/);
+  assert.match(html, /选择一个已启用模型，开始普通对话或处理具体工作。/);
+  assert.doesNotMatch(html, new RegExp(chatHistory));
+  assert.doesNotMatch(html, new RegExp(apiKey));
+  assert.doesNotMatch(html, new RegExp(upstreamError));
+  assert.doesNotMatch(html, new RegExp(chatStorageKey));
+  assert.doesNotMatch(
+    html,
+    /localStorage.{0,120}(?:chat|会话)|(?:chat|会话).{0,120}localStorage/is,
+  );
+});
 
 test("server-renders the AI workspace interface", async () => {
   const response = await render();
