@@ -1418,6 +1418,37 @@ test("rejects oversized generated Markdown with a safe non-reflective error", as
   );
 });
 
+test("rejects generated Markdown that exceeds the final bound only after API Key redaction", async () => {
+  const reflectedFakeKey = "fake";
+  const rawMarkdown = reflectedFakeKey.repeat(50_000);
+  assert.equal(rawMarkdown.length, 200_000);
+  const runtime = createContentMatrixRuntime({
+    fetchImpl: async () =>
+      jsonResponse({
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: rawMarkdown,
+            },
+          },
+        ],
+      }),
+  });
+
+  await assert.rejects(
+    runtime.runStage({
+      ...validRunInput(2),
+      apiKey: reflectedFakeKey,
+    }),
+    (error) => {
+      assert.equal(error.code, "INVALID_PROVIDER_RESPONSE");
+      assert.doesNotMatch(error.message, /fake|已隐藏敏感信息|api\.example/);
+      return true;
+    },
+  );
+});
+
 test("rejects API keys containing control characters as invalid configuration", async () => {
   let calls = 0;
   const runtime = createContentMatrixRuntime({

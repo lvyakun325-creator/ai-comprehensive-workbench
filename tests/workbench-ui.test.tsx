@@ -1927,6 +1927,85 @@ test("leaving during an image probe aborts it and returning shows the restored n
   });
 });
 
+test("leaving an unedited image probe restores the exact configured entry baseline", async () => {
+  const originalImageConfig = {
+    baseUrl: "https://api.openai.com/v1",
+    modelId: "image-no-edit-leave",
+    enabled: true,
+    connectionStatus: "connected",
+    testedFingerprint:
+      "[\"https://api.openai.com/v1\",\"image-no-edit-leave\",\"revision-image-no-edit\"]",
+  };
+  window.localStorage.setItem(
+    "ai-workbench:image-model-config:v1",
+    JSON.stringify(originalImageConfig),
+  );
+  window.localStorage.setItem(
+    "ai-workbench:image-model-credential:v1",
+    "sk-fake-image-no-edit",
+  );
+  window.localStorage.setItem(
+    "ai-workbench:image-model-credential-revision:v1",
+    "revision-image-no-edit",
+  );
+  const pending = deferredValue<Response>();
+  let requestSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_input, init) => {
+    requestSignal = init?.signal as AbortSignal;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "连接成功",
+    );
+  });
+  await user.click(screen.getByRole("button", { name: "测试生图模型" }));
+  await waitFor(() => assert.ok(requestSignal));
+  await user.click(screen.getByRole("button", { name: "AI 对话" }));
+
+  assertSignalAborted(requestSignal);
+  assert.deepEqual(
+    JSON.parse(
+      window.localStorage.getItem("ai-workbench:image-model-config:v1") ?? "null",
+    ),
+    originalImageConfig,
+  );
+  assert.equal(
+    window.localStorage.getItem("ai-workbench:image-model-credential:v1"),
+    "sk-fake-image-no-edit",
+  );
+  assert.equal(
+    window.localStorage.getItem(
+      "ai-workbench:image-model-credential-revision:v1",
+    ),
+    "revision-image-no-edit",
+  );
+
+  pending.resolve(Response.json({ ok: true }));
+  await user.click(screen.getByRole("button", { name: "模型配置" }));
+  await waitFor(() => {
+    assert.equal(
+      screen.getByRole("status", { name: "生图模型连接状态" }).textContent,
+      "连接成功",
+    );
+    assert.equal(
+      (screen.getByLabelText("生图模型名称") as HTMLInputElement).value,
+      "image-no-edit-leave",
+    );
+    assert.deepEqual(
+      JSON.parse(
+        window.localStorage.getItem("ai-workbench:image-model-config:v1") ?? "null",
+      ),
+      originalImageConfig,
+    );
+  });
+});
+
 test("saving during an image probe aborts it and persists a settled non-testing state", async () => {
   const pending = deferredValue<Response>();
   let requestSignal: AbortSignal | null = null;

@@ -542,6 +542,7 @@ export function GlobalModelSettings({
       return;
     }
 
+    ensureBaseline();
     let credentialRevision = imageRevisionForDraft(draft);
     if (!credentialRevision) {
       credentialRevision = createCredentialRevision();

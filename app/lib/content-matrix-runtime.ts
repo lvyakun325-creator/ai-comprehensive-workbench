@@ -203,6 +203,9 @@ export function createContentMatrixRuntime(options: RuntimeOptions = {}) {
       validateApinebulaFinishReason(runInput, body);
       const markdown = parseGeneratedMarkdown(runInput.protocol, body);
       const safeMarkdown = redactSecret(markdown, runInput.apiKey);
+      if (safeMarkdown.length > MAX_GENERATED_MARKDOWN_LENGTH) {
+        throw new ContentMatrixRuntimeError("INVALID_PROVIDER_RESPONSE");
+      }
       validateStageOutput(runInput.stage, safeMarkdown);
 
       return {
