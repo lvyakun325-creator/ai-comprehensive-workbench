@@ -136,6 +136,63 @@ test("草稿与消息只更新目标会话", () => {
   ]);
 });
 
+test("变更 updater 不会改写更新前会话", () => {
+  const originalMessage = {
+    id: "user-1",
+    role: "user",
+    content: "原始问题",
+    status: "sent",
+    createdAt: 100,
+  };
+  const state = {
+    sessions: [
+      createSessionRecord({
+        id: "session-target",
+        title: "目标",
+        messages: [originalMessage],
+        createdAt: 100,
+        pendingRequest: {
+          modelId: "model-1",
+          modelName: "模型一",
+          userMessageId: "user-1",
+          credentialRevision: "revision-1",
+        },
+      }),
+    ],
+    activeSessionId: "session-target",
+  };
+
+  const next = updateSession(state, "session-target", (session) => {
+    session.draft = "新草稿";
+    session.messages[0].content = "变更后的问题";
+    session.messages.push({
+      id: "assistant-1",
+      role: "assistant",
+      content: "新回复",
+      createdAt: 101,
+    });
+    session.pendingRequest.modelName = "模型二";
+    return session;
+  });
+
+  assert.deepEqual(state.sessions[0], createSessionRecord({
+    id: "session-target",
+    title: "目标",
+    messages: [originalMessage],
+    createdAt: 100,
+    pendingRequest: {
+      modelId: "model-1",
+      modelName: "模型一",
+      userMessageId: "user-1",
+      credentialRevision: "revision-1",
+    },
+  }));
+  assert.equal(next.sessions[0].draft, "新草稿");
+  assert.equal(next.sessions[0].messages[0].content, "变更后的问题");
+  assert.equal(next.sessions[0].messages.length, 2);
+  assert.equal(next.sessions[0].pendingRequest.modelName, "模型二");
+});
+
 test("用户、助手消息状态与 modelName 原样保留", () => {
   const messages = [
     {

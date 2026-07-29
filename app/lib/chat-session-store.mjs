@@ -58,12 +58,20 @@ export function deleteSession(state, sessionId) {
   };
 }
 
+function createSessionUpdateDraft(session) {
+  return {
+    ...session,
+    messages: session.messages.map((message) => ({ ...message })),
+    pendingRequest: session.pendingRequest ? { ...session.pendingRequest } : null,
+  };
+}
+
 export function updateSession(state, sessionId, updater) {
   let updated = false;
   const sessions = state.sessions.map((session) => {
     if (session.id !== sessionId) return session;
     updated = true;
-    return updater(session);
+    return updater(createSessionUpdateDraft(session));
   });
   return updated ? { ...state, sessions } : state;
 }
