@@ -6,7 +6,7 @@
 
 ## 状态
 
-**通过，未发现由 Tasks 1–4 引入的真实回归。** 未修改产品代码或测试；本报告是唯一 Task 5 新增跟踪文件。控制器 `progress.md` 原有未提交变更按要求保留且不提交。
+**通过，未发现由 Tasks 1–4 引入的真实回归。** 未修改产品代码或测试；初版报告已由 `209c4d0 docs: record task 5 regression verification` 提交。本轮仅修正本报告的事实与时态，控制器 `progress.md` 原有未提交变更按要求保留且不提交。
 
 ## 安全扫描
 
@@ -20,9 +20,9 @@ rg -n "console\\.(log|error)|localStorage|apiKey|authorization" \
 结论：
 
 - 未发现模型相关的 `console.log` / `console.error`。
-- 凭据只在运行时配置、受控输入和 `Authorization: Bearer` 请求头中使用；`model-credential-store.mjs` 将凭据与普通模型元数据分离。
+- 凭据持久化在独立、版本化的 browser `localStorage` credential store，不进入普通模型元数据；调用时才进入运行时配置、受控输入和 `Authorization: Bearer` 请求头。该浏览器存储不是硬件加密边界，已在安全口径中明确披露。
 - 三个 `/api/models/*` 路由仅返回最小 `no-store` JSON；不返回 Key、供应商原始响应或模型列表。
-- 对明显 fake credential 的 live `/api/models/test-text` 请求返回安全的 `502 PROVIDER_UNAVAILABLE` 和通用中文提示，响应中不含凭据，`cache-control: no-store`。本次运行未向页面源码或开发服务日志写入 fake credential。
+- fake credential 的 live `/api/models/test-text` 脱敏复现摘要：HTTP `502`；响应固定字段为 `ok`、`code`、`message`（`false`、`PROVIDER_UNAVAILABLE`、通用中文提示）；`cache-control: no-store`；响应序列化结果不含该 fake credential。日志检索范围为本 worktree 下所有 `*/wrangler.log` 以及 live 页面源码快照，均未匹配该 fake credential；本报告不记录完整 fake Key。
 
 补充代码/测试核验：
 
@@ -45,7 +45,7 @@ git status --short
 - `npm test`：通过，构建成功，201/201 tests passed。
 - `npm run lint`：0 errors；保留 3 个既有 warning，均在 `tests/model-registry.test.mjs:18` 的未使用解构变量，与本任务无关。
 - `git diff --check`：通过，无空白错误。
-- 初始状态仅有控制器 `progress.md` 的未提交变更；本报告新增后会作为唯一 Task 5 跟踪文件提交。
+- 本轮报告修正提交后，将在新 HEAD 上实际执行最终命令；完整 post-commit 证据仅记录在忽略的 workspace 文件 `task-5-postcommit-verification.md`，不再产生 tracked 产品或测试变更。
 
 补充聚焦 UI 验证：
 
@@ -88,7 +88,7 @@ npm run dev -- --port 3105
 ## 变更与交接
 
 - 产品代码/测试修改：无。
-- Task 5 提交：本报告将单独提交；不包含 `progress.md`。
+- Task 5 提交：初版报告已由 `209c4d0` 提交；本轮只提交本报告修正，不包含 `progress.md`。新 HEAD 的完整验证证据写入忽略文件 `task-5-postcommit-verification.md`。
 - 当前 integration 选择：保持 `codex/multi-agent-ui` 未合并，等待主任务选择本地合并或创建 PR。
 
 ## 顾虑与 deferred minors
