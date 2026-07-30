@@ -276,6 +276,28 @@ function hasCredentialKey(value) {
   );
 }
 
+function migrateObsoleteApinebulaPlaceholder(model) {
+  const baseUrl = text(model.baseUrl).replace(/\/+$/, "").toLowerCase();
+  if (
+    text(model.id) !== "openai-gpt-5-6"
+    || text(model.provider).toLowerCase() !== "openai"
+    || text(model.modelId).toLowerCase() !== "gpt-5.6"
+    || baseUrl !== "https://apinebula.ai/v1"
+  ) {
+    return model;
+  }
+
+  return {
+    ...model,
+    provider: "APINebula",
+    displayName: "GPT-5.6 SOL",
+    modelId: "gpt-5.6-sol",
+    baseUrl: "https://api.yhlxj.ai/v1",
+    connectionStatus: "changed",
+    testedFingerprint: "",
+  };
+}
+
 export function parseStoredModels(raw) {
   let parsed;
   try {
@@ -288,6 +310,8 @@ export function parseStoredModels(raw) {
     return DEFAULT_MODELS;
   }
 
-  const normalized = normalizeModels(parsed);
+  const normalized = normalizeModels(
+    parsed.map(migrateObsoleteApinebulaPlaceholder),
+  );
   return normalized.length === parsed.length ? normalized : DEFAULT_MODELS;
 }

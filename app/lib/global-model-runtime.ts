@@ -104,9 +104,10 @@ export class SafeModelError extends Error {
 export function usesBrowserDirectModelRoute(baseUrl: string): boolean {
   try {
     const url = new URL(baseUrl);
+    const hostname = url.hostname.toLowerCase();
     return (
       url.protocol === "https:"
-      && url.hostname.toLowerCase() === "apinebula.ai"
+      && (hostname === "apinebula.ai" || hostname === "api.yhlxj.ai")
       && url.port === ""
       && url.username === ""
       && url.password === ""
@@ -592,7 +593,7 @@ async function readBoundedProviderJson(
   let aborted = false;
   const abortRead = () => {
     aborted = true;
-    void reader.cancel();
+    void reader.cancel().catch(() => undefined);
   };
   signal.addEventListener("abort", abortRead, { once: true });
 

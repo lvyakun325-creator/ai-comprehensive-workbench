@@ -51,9 +51,14 @@ function streamedJsonResponse(value, chunkSize = 128 * 1024) {
 
 test("APINebula direct routing requires the exact HTTPS hostname", () => {
   assert.equal(usesBrowserDirectModelRoute("https://apinebula.ai/v1"), true);
+  assert.equal(usesBrowserDirectModelRoute("https://api.yhlxj.ai/v1"), true);
   assert.equal(usesBrowserDirectModelRoute("https://APINEBULA.AI/v1"), true);
   assert.equal(
     usesBrowserDirectModelRoute("https://apinebula.ai.evil.test/v1"),
+    false,
+  );
+  assert.equal(
+    usesBrowserDirectModelRoute("https://api.yhlxj.ai.evil.test/v1"),
     false,
   );
   assert.equal(usesBrowserDirectModelRoute("http://apinebula.ai/v1"), false);
@@ -430,6 +435,42 @@ test("runtime turns its own deadline into a safe timeout", async () => {
     }),
     (error) => error instanceof SafeModelError && error.code === "PROVIDER_TIMEOUT",
   );
+});
+
+test("runtime contains response-stream cancellation failures after timeout", async () => {
+  const unhandled = [];
+  const onUnhandledRejection = (error) => {
+    unhandled.push(error);
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+
+  try {
+    await assert.rejects(
+      testTextConnection(textConfig(), {
+        timeoutMs: 10,
+        fetchImpl: async () =>
+          new Response(
+            new ReadableStream({
+              pull() {
+                return new Promise(() => {});
+              },
+              cancel() {
+                return Promise.reject(
+                  new Error(`response cancel failed ${FAKE_KEY}`),
+                );
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          ),
+      }),
+      (error) =>
+        error instanceof SafeModelError && error.code === "PROVIDER_TIMEOUT",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandledRejection);
+  }
 });
 
 test("runtime distinguishes caller cancellation from timeout", async () => {

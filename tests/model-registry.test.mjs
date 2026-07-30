@@ -14,6 +14,35 @@ import {
   setModelEnabled,
 } from "../app/lib/model-registry.mjs";
 
+test("migrates the obsolete APINebula placeholder without retaining a stale connection", () => {
+  const parsed = parseStoredModels(JSON.stringify([
+    {
+      id: "openai-gpt-5-6",
+      provider: "OpenAI",
+      displayName: "gpt-5.6",
+      baseUrl: "https://apinebula.ai/v1",
+      modelId: "gpt-5.6",
+      enabled: true,
+      isDefault: true,
+      connectionStatus: "connected",
+      testedFingerprint:
+        "[\"https://apinebula.ai/v1\",\"gpt-5.6\",\"legacy-revision\"]",
+    },
+  ]));
+
+  assert.deepEqual(parsed[0], {
+    id: "openai-gpt-5-6",
+    provider: "APINebula",
+    displayName: "GPT-5.6 SOL",
+    baseUrl: "https://api.yhlxj.ai/v1",
+    modelId: "gpt-5.6-sol",
+    enabled: true,
+    isDefault: true,
+    connectionStatus: "changed",
+    testedFingerprint: "",
+  });
+});
+
 test("migrates v1 records with untested connection metadata", () => {
   const v1Model = {
     id: DEFAULT_MODELS[0].id,
