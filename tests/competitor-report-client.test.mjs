@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { afterEach, test } from "node:test";
 
 import {
@@ -33,10 +34,19 @@ function evidenceReadyFixture() {
     ok: true,
     stage: "evidence_ready",
     evidenceId: "0123456789abcdef",
-    account: { nickname: "测试账号" },
+    account: {
+      nickname: "测试账号",
+      followers: 100,
+      signature: "分享日常生活与健康管理常识",
+    },
     completeness: { missingFields: [], warnings: [] },
     batchInputs: {
       strategy: {
+        account: {
+          nickname: "测试账号",
+          followers: 100,
+          signature: "分享日常生活与健康管理常识",
+        },
         availability: { comments: true, collects: true, shares: true },
         rankings: { overall: ranking, startup: ranking },
         evidence,
@@ -238,4 +248,42 @@ test("ranking availability follows the strict service contract", async () => {
   unavailableMismatch.batchInputs.execution.availability.comments = false;
   globalThis.fetch = async () => Response.json(unavailableMismatch);
   await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
+});
+
+test("account context is exact bounded and strategy-only before model use", async () => {
+  globalThis.fetch = async () => Response.json(evidenceReadyFixture());
+  const accepted = await analyze();
+  assert.deepEqual(accepted.batchInputs.strategy.account, {
+    nickname: "测试账号",
+    followers: 100,
+    signature: "分享日常生活与健康管理常识",
+  });
+
+  for (const mutate of [
+    (fixture) => { fixture.account.extra = "forbidden"; },
+    (fixture) => { fixture.batchInputs.strategy.account.signature = "超".repeat(1001); },
+    (fixture) => { fixture.batchInputs.performance.account = fixture.account; },
+    (fixture) => { fixture.batchInputs.strategy.account.followers = "100"; },
+  ]) {
+    const fixture = structuredClone(evidenceReadyFixture());
+    mutate(fixture);
+    globalThis.fetch = async () => Response.json(fixture);
+    await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
+  }
+});
+
+test("report bridge endpoint is 8768 and matches the Python fixed port", async () => {
+  let requestedUrl = "";
+  globalThis.fetch = async (input) => {
+    requestedUrl = String(input);
+    return Response.json(evidenceReadyFixture());
+  };
+  await analyze();
+  assert.equal(requestedUrl, "http://127.0.0.1:8768/analyze-path");
+
+  const pythonSource = await readFile(
+    new URL("../agents/competitor-insight/runtime/bridge_server.py", import.meta.url),
+    "utf8",
+  );
+  assert.match(pythonSource, /^PORT = 8768$/mu);
 });

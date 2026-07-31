@@ -4978,13 +4978,22 @@ function evidenceReadyFixture() {
     ok: true,
     stage: "evidence_ready",
     evidenceId: "0123456789abcdef",
-    account: { nickname: "测试账号" },
+    account: {
+      nickname: "测试账号",
+      followers: 100,
+      signature: "分享日常生活与健康管理常识",
+    },
     completeness: {
       missingFields: ["粉丝数"],
       warnings: ["公开互动不等于成交"],
     },
     batchInputs: {
       strategy: {
+        account: {
+          nickname: "测试账号",
+          followers: 100,
+          signature: "分享日常生活与健康管理常识",
+        },
         availability: { comments: true, collects: true, shares: true },
         rankings: { overall: ranking, startup: ranking },
         evidence,
@@ -5142,7 +5151,7 @@ test("竞品洞察抓取并分析仅对抖音账号 Excel 自动生成证据包"
     requests.map(({ url }) => url),
     [
       "http://127.0.0.1:8765/scrape",
-      "http://127.0.0.1:8767/analyze-path",
+      "http://127.0.0.1:8768/analyze-path",
     ],
   );
   assert.deepEqual(requests[1]?.body, {
@@ -5233,7 +5242,7 @@ test("竞品洞察报告上传后按三批生成校验并只组装一次", async
     requests.map(({ url }) =>
       url === "/api/agents/competitor-insight"
         ? "model"
-        : url.replace("http://127.0.0.1:8767", ""),
+        : url.replace("http://127.0.0.1:8768", ""),
     ),
     [
       "/analyze-upload",
@@ -5302,7 +5311,7 @@ test("竞品洞察报告未配置 Agent 模型时停在证据包已生成", asyn
       /证据包已生成[\s\S]*选择已连接/u,
     ),
   );
-  assert.deepEqual(requests, ["http://127.0.0.1:8767/analyze-upload"]);
+  assert.deepEqual(requests, ["http://127.0.0.1:8768/analyze-upload"]);
   assert.ok(screen.getByRole("button", { name: "继续生成报告" }));
 });
 
@@ -5639,7 +5648,7 @@ test("竞品洞察报告凭据修订变化会中止请求并丢弃迟到响应",
     ),
   );
   assert.deepEqual(requestedUrls, [
-    "http://127.0.0.1:8767/analyze-path",
+    "http://127.0.0.1:8768/analyze-path",
     "/api/agents/competitor-insight",
   ]);
   assert.equal(
@@ -5769,6 +5778,135 @@ test("竞品洞察报告失败批次重试从原批次继续且不重复上传",
     "performance",
     "execution",
   ]);
+});
+
+test("竞品报告模型首次格式错误会自动重试一次且携带账号上下文", async () => {
+  installCompetitorReportModel();
+  const modelBatchIds: string[] = [];
+  let strategyAttempts = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      modelBatchIds.push(body?.batchId);
+      if (body?.batchId === "strategy") {
+        assert.deepEqual(body.input.account, evidenceReadyFixture().account);
+        strategyAttempts += 1;
+        if (strategyAttempts === 1) {
+          return Response.json({ ok: true, batch: {} });
+        }
+      } else {
+        assert.equal(body.input.account, undefined);
+      }
+      return Response.json({ ok: true, batch: competitorBatchFixture(body.batchId) });
+    }
+    if (url.endsWith("/validate-section")) {
+      return Response.json({
+        ok: true,
+        stage: "section_validated",
+        evidenceId: "0123456789abcdef",
+        batchId: body.batch.batchId,
+        batch: body.batch,
+      });
+    }
+    if (url.endsWith("/assemble-report")) return Response.json(reportReadyFixture());
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
+    target: { files: [new File(["PK fixture"], "account.xlsx")] },
+  });
+
+  await screen.findByRole("heading", { name: "Markdown 报告预览" });
+  assert.deepEqual(modelBatchIds, ["strategy", "strategy", "performance", "execution"]);
+});
+
+test("竞品报告章节校验首次失败会只自动重试当前批次", async () => {
+  installCompetitorReportModel();
+  const modelBatchIds: string[] = [];
+  let validationAttempts = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      modelBatchIds.push(body.batchId);
+      return Response.json({ ok: true, batch: competitorBatchFixture(body.batchId) });
+    }
+    if (url.endsWith("/validate-section")) {
+      validationAttempts += 1;
+      if (validationAttempts === 1) {
+        return Response.json({ ok: false, error: "INVALID_SECTION", message: "safe" }, { status: 400 });
+      }
+      return Response.json({ ok: true, stage: "section_validated", evidenceId: "0123456789abcdef", batchId: body.batch.batchId, batch: body.batch });
+    }
+    if (url.endsWith("/assemble-report")) return Response.json(reportReadyFixture());
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), { target: { files: [new File(["PK"], "account.xlsx")] } });
+
+  await screen.findByRole("heading", { name: "Markdown 报告预览" });
+  assert.deepEqual(modelBatchIds, ["strategy", "strategy", "performance", "execution"]);
+});
+
+test("竞品报告同一批两次格式错误后失败且不进入后续批次", async () => {
+  installCompetitorReportModel();
+  let modelCalls = 0;
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      modelCalls += 1;
+      return Response.json({ ok: true, batch: {} });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), { target: { files: [new File(["PK"], "account.xlsx")] } });
+
+  await screen.findByRole("button", { name: "重试失败批次" });
+  assert.equal(modelCalls, 2);
+});
+
+test("竞品报告运营错误不自动重试", async () => {
+  installCompetitorReportModel();
+  let modelCalls = 0;
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      modelCalls += 1;
+      return new Response("rate limited", { status: 429 });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), { target: { files: [new File(["PK"], "account.xlsx")] } });
+
+  await screen.findByRole("button", { name: "重试失败批次" });
+  assert.equal(modelCalls, 1);
+});
+
+test("竞品报告两次尝试之间停止会阻止第二次请求", async () => {
+  installCompetitorReportModel();
+  let modelCalls = 0;
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      modelCalls += 1;
+      fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+      return Response.json({ ok: true, batch: {} });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), { target: { files: [new File(["PK"], "account.xlsx")] } });
+
+  await waitFor(() => assert.match(document.body.textContent ?? "", /已停止/));
+  assert.equal(modelCalls, 1);
 });
 
 test("renders the compliance status required by each Agent output", async () => {

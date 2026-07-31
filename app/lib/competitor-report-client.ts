@@ -1,4 +1,4 @@
-const REPORT_BRIDGE_ORIGIN = "http://127.0.0.1:8767";
+const REPORT_BRIDGE_ORIGIN = "http://127.0.0.1:8768";
 const MAX_EXCEL_BYTES = 50 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_PATH_CHARACTERS = 4_096;
@@ -165,7 +165,7 @@ async function postReportBridge<T>(
     if (signal.aborted || isAbortError(error)) throw abortError();
     throw new CompetitorReportClientError(
       "BRIDGE_UNAVAILABLE",
-      "无法连接本地报告服务，请确认 8767 服务已启动。",
+      "无法连接本地报告服务，请确认 8768 服务已启动。",
     );
   }
   const body = await readBoundedJson(response, signal);
@@ -283,9 +283,13 @@ function parseEvidenceReady(value: unknown): EvidenceReadyResponse {
     || body.stage !== "evidence_ready"
     || typeof body.evidenceId !== "string"
     || !/^[0-9a-f]{16}$/u.test(body.evidenceId)
-    || !isRecord(body.account)
+    || !validAccount(body.account)
     || !isRecord(body.completeness)
     || !validBatchInputs(body.batchInputs)
+    || !sameAccount(
+      (body.batchInputs as Record<string, Record<string, unknown>>).strategy.account,
+      body.account,
+    )
   ) {
     throw invalidResponse();
   }
@@ -309,15 +313,18 @@ function validBatchInput(
   value: unknown,
 ): boolean {
   if (!isRecord(value)) return false;
-  const expectedKeys = batchId === "performance"
-    ? ["availability", "evidence", "metrics", "rankings"]
-    : ["availability", "evidence", "rankings"];
+  const expectedKeys = batchId === "strategy"
+    ? ["account", "availability", "evidence", "rankings"]
+    : batchId === "performance"
+      ? ["availability", "evidence", "metrics", "rankings"]
+      : ["availability", "evidence", "rankings"];
   if (
     !hasExactKeys(value, expectedKeys)
     || !validAvailability(value.availability)
   ) {
     return false;
   }
+  if (batchId === "strategy" && !validAccount(value.account)) return false;
   const evidenceIds = validEvidenceIdSet(value.evidence);
   if (
     !evidenceIds
@@ -331,6 +338,44 @@ function validBatchInput(
     return false;
   }
   return batchId !== "performance" || validMetrics(value.metrics);
+}
+
+function validAccount(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const allowed = ["accountId", "followers", "nickname", "signature"];
+  if (Object.keys(value).some((key) => !allowed.includes(key))) return false;
+  const nickname = value.nickname;
+  const accountId = value.accountId;
+  if (
+    nickname !== undefined
+    && (typeof nickname !== "string" || !nickname.trim() || nickname.length > 200)
+  ) return false;
+  if (
+    accountId !== undefined
+    && (typeof accountId !== "string" || !accountId.trim() || accountId.length > 256)
+  ) return false;
+  if (nickname === undefined && accountId === undefined) return false;
+  if (
+    value.followers !== undefined
+    && (
+      typeof value.followers !== "number"
+      || !Number.isSafeInteger(value.followers)
+      || value.followers < 0
+    )
+  ) return false;
+  return value.signature === undefined || (
+    typeof value.signature === "string"
+    && Boolean(value.signature.trim())
+    && value.signature.length <= 1000
+  );
+}
+
+function sameAccount(left: unknown, right: unknown): boolean {
+  if (!validAccount(left) || !validAccount(right)) return false;
+  const leftAccount = left as Record<string, unknown>;
+  const rightAccount = right as Record<string, unknown>;
+  const keys = ["accountId", "followers", "nickname", "signature"];
+  return keys.every((key) => leftAccount[key] === rightAccount[key]);
 }
 
 function validAvailability(value: unknown): boolean {

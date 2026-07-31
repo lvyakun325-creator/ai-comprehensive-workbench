@@ -79,7 +79,11 @@ class BridgeServerTests(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(headers["content-type"], "application/json; charset=utf-8")
-        self.assertEqual(json.loads(body), {"ok": True, "stage": "healthy"})
+        self.assertEqual(json.loads(body), {
+            "ok": True,
+            "stage": "healthy",
+            "service": "competitor-insight-report",
+        })
 
     def test_write_endpoints_reject_missing_or_malicious_origins(self) -> None:
         payload = json.dumps({"filename": "sample.xlsx", "contentBase64": ""}).encode()

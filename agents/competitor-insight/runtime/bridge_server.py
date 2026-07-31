@@ -12,7 +12,7 @@ import service
 
 
 HOST = "127.0.0.1"
-PORT = 8767
+PORT = 8768
 MAX_REQUEST_BYTES = ((service.MAX_EXCEL_BYTES + 2) // 3) * 4 + 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 ALLOWED_ORIGINS = {
@@ -27,6 +27,7 @@ WRITE_ENDPOINTS = {
 }
 
 _ERRORS = {
+    "unsafe_output_path": (503, "INTERNAL_SECURITY_BOUNDARY", "报告输出目录未通过安全校验。"),
     "path_outside_douyin_output": (400, "PATH_NOT_ALLOWED", "只能读取受控抖音输出目录中的 Excel。"),
     "symlink_not_allowed": (400, "SYMLINK_NOT_ALLOWED", "不允许读取符号链接。"),
     "secure_nofollow_unavailable": (503, "INTERNAL_SECURITY_BOUNDARY", "当前系统缺少安全路径读取能力。"),
@@ -38,6 +39,9 @@ _ERRORS = {
     "invalid_workbook": (400, "INVALID_WORKBOOK", "Excel 中没有可用的作品数据。"),
     "missing_title_field": (400, "INVALID_WORKBOOK", "Excel 中没有可用的作品数据。"),
     "no_work_rows": (400, "INVALID_WORKBOOK", "Excel 中没有可用的作品数据。"),
+    "missing_account_sheet": (400, "INVALID_WORKBOOK", "Excel 中没有独立的抖音账号信息表。"),
+    "missing_account_identity": (400, "INVALID_WORKBOOK", "Excel 中没有可验证的抖音账号身份。"),
+    "invalid_account_identity": (400, "INVALID_WORKBOOK", "Excel 账号信息超出安全边界。"),
     "excel_too_large": (413, "EXCEL_TOO_LARGE", "Excel 文件超过 50 MB 上限。"),
     "invalid_filename": (400, "INVALID_REQUEST", "上传文件名无效。"),
     "invalid_upload_content": (400, "INVALID_REQUEST", "上传内容无效。"),
@@ -146,7 +150,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 },
             )
             return
-        self._send_json(200, {"ok": True, "stage": "healthy"}, origin=origin)
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "stage": "healthy",
+                "service": "competitor-insight-report",
+            },
+            origin=origin,
+        )
 
     def _read_json(self) -> dict[str, object] | None:
         content_type = self.headers.get("Content-Type", "")

@@ -208,8 +208,6 @@ export function CompetitorReportRunner({
     for (let index = completed.length; index < BATCH_IDS.length; index += 1) {
       const batchId = BATCH_IDS[index];
       try {
-        setReportStage("generating");
-        setStatusMessage(`正在生成${BATCH_LABELS[batchId]}…`);
         const batchInput = recordValue(readyEvidence.batchInputs[batchId]);
         if (!batchInput) {
           throw new CompetitorReportClientError(
@@ -222,35 +220,54 @@ export function CompetitorReportRunner({
           apiKey: selectedCredential,
           model: selectedModel.modelId,
         };
-        const generated = usesBrowserDirectModelRoute(selectedModel.baseUrl)
-          ? await generateCompetitorBatch(config, batchInput, {
-            batchId,
-            signal: run.controller.signal,
-            egressMode: "browser-direct",
-          })
-          : await generateCompetitorBatchViaProxy(config, batchInput, {
-            batchId,
-            signal: run.controller.signal,
-          });
-        if (!isCurrent(run)) return;
+        let validated: Awaited<ReturnType<typeof validateReportBatch>> | null = null;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            setReportStage("generating");
+            setStatusMessage(
+              attempt === 0
+                ? `正在生成${BATCH_LABELS[batchId]}…`
+                : `${BATCH_LABELS[batchId]}格式或证据校验未通过，正在自动重试一次…`,
+            );
+            const generated = usesBrowserDirectModelRoute(selectedModel.baseUrl)
+              ? await generateCompetitorBatch(config, batchInput, {
+                batchId,
+                signal: run.controller.signal,
+                egressMode: "browser-direct",
+              })
+              : await generateCompetitorBatchViaProxy(config, batchInput, {
+                batchId,
+                signal: run.controller.signal,
+              });
+            if (!isCurrent(run)) return;
 
-        setReportStage("validating");
-        setStatusMessage(`正在校验${BATCH_LABELS[batchId]}的证据引用…`);
-        const validated = await validateReportBatch(
-          readyEvidence.evidenceId,
-          generated,
-          run.controller.signal,
-        );
-        if (!isCurrent(run)) return;
-        if (
-          validated.evidenceId !== readyEvidence.evidenceId
-          || validated.batchId !== batchId
-        ) {
-          throw new CompetitorReportClientError(
-            "INVALID_BRIDGE_RESPONSE",
-            "本地报告服务返回了无效响应。",
-          );
+            setReportStage("validating");
+            setStatusMessage(`正在校验${BATCH_LABELS[batchId]}的证据引用…`);
+            validated = await validateReportBatch(
+              readyEvidence.evidenceId,
+              generated,
+              run.controller.signal,
+            );
+            if (!isCurrent(run)) return;
+            if (
+              validated.evidenceId !== readyEvidence.evidenceId
+              || validated.batchId !== batchId
+            ) {
+              throw new CompetitorReportClientError(
+                "INVALID_BRIDGE_RESPONSE",
+                "本地报告服务返回了无效响应。",
+              );
+            }
+            break;
+          } catch (error) {
+            if (!isCurrent(run)) return;
+            if (attempt === 0 && isRetryableBatchError(error)) {
+              continue;
+            }
+            throw error;
+          }
         }
+        if (!validated) return;
         completed.push(validated.batch);
         batchesRef.current = [...completed];
         run.completedBatchIds = completed.map(
@@ -636,6 +653,16 @@ function sameBatchIds(
   return (
     current.length === expected.length
     && current.every((batchId, index) => batchId === expected[index])
+  );
+}
+
+function isRetryableBatchError(error: unknown): boolean {
+  return (
+    error instanceof CompetitorReportRuntimeError
+    && error.code === "INVALID_MODEL_OUTPUT"
+  ) || (
+    error instanceof CompetitorReportClientError
+    && error.code === "INVALID_SECTION"
   );
 }
 

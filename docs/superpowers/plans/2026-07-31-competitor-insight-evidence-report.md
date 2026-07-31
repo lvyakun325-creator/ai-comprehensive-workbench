@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - 首期只分析抖音账号 Excel；小红书继续使用现有抓取路由，不复用抖音字段或报告模板。
-- Python 报告桥固定监听 `127.0.0.1:8767`，只允许 `http://localhost:3000` 与 `http://127.0.0.1:3000`。
+- Python 报告桥固定监听 `127.0.0.1:8768`，只允许 `http://localhost:3000` 与 `http://127.0.0.1:3000`；`8767` 保留给已占用的无关服务。
 - Excel 上传上限固定为 50 MB，只接受 `.xlsx` 扩展名和有效 ZIP/XLSX 文件签名。
 - 路径分析只接受 `outputs/competitor-insight/douyin/` 下的普通 `.xlsx` 文件，拒绝路径穿越和符号链接逃逸。
 - 原始 Excel 永不改写；上传副本在证据包生成后删除。
@@ -63,7 +63,7 @@
 - `agents/competitor-insight/runtime/tests/`
   - Python 单元和服务安全测试。
 - `app/lib/competitor-report-client.ts`
-  - 浏览器到 `127.0.0.1:8767` 的类型安全客户端。
+  - 浏览器到 `127.0.0.1:8768` 的类型安全客户端。
 - `app/lib/competitor-report-runtime.ts`
   - 三批模型提示、结构化响应解析、取消和安全错误。
 - `app/api/agents/competitor-insight/route.ts`
@@ -723,8 +723,8 @@ agents/competitor-insight/.venv/bin/python \
 另一个终端验证：
 
 ```bash
-curl -i http://127.0.0.1:8767/health
-curl -i -X OPTIONS http://127.0.0.1:8767/analyze-upload \
+curl -i http://127.0.0.1:8768/health
+curl -i -X OPTIONS http://127.0.0.1:8768/analyze-upload \
   -H 'Origin: https://evil.example'
 ```
 
@@ -1180,7 +1180,7 @@ Expected: 构建、类型检查、Lint 和全部 Node/React 测试通过。
 ```bash
 curl -sS http://127.0.0.1:8765/health
 curl -sS http://127.0.0.1:8766/health
-curl -sS http://127.0.0.1:8767/health
+curl -sS http://127.0.0.1:8768/health
 ```
 
 并验证恶意 Origin 对三个桥均返回 403。

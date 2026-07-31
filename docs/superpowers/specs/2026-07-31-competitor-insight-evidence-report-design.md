@@ -63,7 +63,7 @@
     ↓
 平台路由 → douyin-scraper → Excel 精确路径
                               ↓
-已有 Excel 文件 ─────────→ 本地报告桥 127.0.0.1:8767
+已有 Excel 文件 ─────────→ 本地报告桥 127.0.0.1:8768
                               ↓
                     Excel 解析与确定性计算
                               ↓
@@ -84,7 +84,7 @@
 - 新增项目内的竞品报告运行时，源代码放在 `agents/competitor-insight/runtime/`。
 - 报告规则以 `agents/competitor-insight/reporting/report-policy.md` 和结构化响应 Schema 版本化保存；用户确认的 656 行提示词是首版规则来源。
 - Python 独立环境放在 `agents/competitor-insight/.venv/`，加入忽略规则，不提交依赖目录。
-- 本地报告桥只监听 `127.0.0.1:8767`。
+- 本地报告桥只监听 `127.0.0.1:8768`；`8767` 由无关本地服务占用，不停止也不复用。
 - 模型凭据只经过现有模型注册表和安全请求链路，不传给 Python、本地报告桥、Excel 或证据包。
 
 ## 5. 界面设计

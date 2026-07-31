@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 from datetime import datetime
+from contextlib import contextmanager
 import errno
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
-from tempfile import TemporaryDirectory
-from typing import cast
+from typing import BinaryIO, Iterator, cast
 import zipfile
 
 from contracts import EvidenceBundle, ReportArtifact
-from evidence_bundle import build_evidence_bundle, write_evidence_bundle
+from evidence_bundle import build_evidence_bundle
 from report_renderer import assemble_report, validate_final_report
 from section_validator import validate_section_batch
 from workbook_reader import read_account_workbook
@@ -52,27 +53,19 @@ _METRIC_KEYS = (
     "maxToAverageMultiple",
 )
 _KNOWN_WORKBOOK_VALUE_ERRORS = {
+    "invalid_account_identity",
+    "missing_account_identity",
+    "missing_account_sheet",
     "missing_title_field",
     "no_work_rows",
 }
 
 
+_REPORT_COMPONENTS = ("outputs", "competitor-insight", "reports")
+
+
 def _reports_root() -> Path:
-    path = PROJECT_ROOT / "outputs" / "competitor-insight" / "reports"
-    path.mkdir(parents=True, exist_ok=True)
-    return path.resolve()
-
-
-def _temporary_root() -> Path:
-    path = _reports_root() / ".tmp"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _evidence_root() -> Path:
-    path = _reports_root() / "evidence"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return PROJECT_ROOT.resolve() / "outputs" / "competitor-insight" / "reports"
 
 
 def _validate_extension(filename: str) -> None:
@@ -99,7 +92,7 @@ def _normalized_xlsx_member_name(name: str) -> str:
     return normalized
 
 
-def _validate_xlsx_archive(source: Path) -> None:
+def _validate_xlsx_archive(source: Path | BinaryIO) -> None:
     try:
         with zipfile.ZipFile(source) as archive:
             infos = archive.infolist()
@@ -149,11 +142,22 @@ def _secure_nofollow_flag() -> int:
     return nofollow
 
 
+def _secure_directory_flag() -> int:
+    directory = getattr(os, "O_DIRECTORY", None)
+    if (
+        isinstance(directory, bool)
+        or not isinstance(directory, int)
+        or directory <= 0
+    ):
+        raise ValueError("secure_directory_unavailable")
+    return directory
+
+
 def _open_flags(*, directory: bool) -> int:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     flags |= _secure_nofollow_flag()
     if directory:
-        flags |= getattr(os, "O_DIRECTORY", 0)
+        flags |= _secure_directory_flag()
     return flags
 
 
@@ -206,6 +210,98 @@ def _opened_component(
     return descriptor
 
 
+def _opened_output_component(
+    parent_fd: int | None,
+    component: str | Path,
+    *,
+    create: bool,
+) -> int:
+    stat_kwargs = (
+        {"dir_fd": parent_fd, "follow_symlinks": False}
+        if parent_fd is not None
+        else {"follow_symlinks": False}
+    )
+    try:
+        before = os.stat(component, **stat_kwargs)
+    except FileNotFoundError:
+        if not create or parent_fd is None:
+            raise ValueError("unsafe_output_path") from None
+        try:
+            os.mkdir(component, 0o700, dir_fd=parent_fd)
+            before = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+        except (FileExistsError, OSError, TypeError):
+            try:
+                before = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            except (OSError, TypeError):
+                raise ValueError("unsafe_output_path") from None
+    except (OSError, TypeError):
+        raise ValueError("unsafe_output_path") from None
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+        raise ValueError("unsafe_output_path")
+    try:
+        descriptor = os.open(
+            component,
+            _open_flags(directory=True),
+            **({"dir_fd": parent_fd} if parent_fd is not None else {}),
+        )
+    except (OverflowError, OSError, TypeError, ValueError):
+        raise ValueError("unsafe_output_path") from None
+    opened = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        os.close(descriptor)
+        raise ValueError("unsafe_output_path")
+    return descriptor
+
+
+def _open_output_directory(*extra_components: str) -> tuple[int, Path]:
+    _secure_nofollow_flag()
+    try:
+        _secure_directory_flag()
+    except ValueError:
+        raise ValueError("unsafe_output_path") from None
+    descriptor = _opened_output_component(None, PROJECT_ROOT, create=False)
+    components = (*_REPORT_COMPONENTS, *extra_components)
+    try:
+        for component in components:
+            next_descriptor = _opened_output_component(
+                descriptor,
+                component,
+                create=True,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor, _reports_root().joinpath(*extra_components)
+
+
+@contextmanager
+def _snapshot_file() -> Iterator[int]:
+    directory_fd, _path = _open_output_directory(".tmp")
+    name = f"snapshot-{secrets.token_hex(16)}.xlsx"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        yield descriptor
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.close(directory_fd)
+
+
 def _open_controlled_workbook(path_text: str) -> tuple[int, str]:
     _secure_nofollow_flag()
     candidate = Path(path_text)
@@ -253,29 +349,28 @@ def _metadata_identity(value: os.stat_result) -> tuple[int, int, int, int]:
     )
 
 
-def _copy_open_workbook(descriptor: int, snapshot: Path) -> None:
+def _copy_open_workbook(descriptor: int, snapshot_descriptor: int) -> None:
     before = os.fstat(descriptor)
     copied = 0
     duplicate = os.dup(descriptor)
     try:
-        with os.fdopen(duplicate, "rb") as source, snapshot.open("xb") as destination:
+        with os.fdopen(duplicate, "rb") as source:
             source.seek(0)
             while True:
                 chunk = source.read(1024 * 1024)
                 if not chunk:
                     break
-                destination.write(chunk)
+                _write_all(snapshot_descriptor, chunk)
                 copied += len(chunk)
     except Exception:
-        snapshot.unlink(missing_ok=True)
         raise
     after = os.fstat(descriptor)
     if (
         copied != before.st_size
         or _metadata_identity(before) != _metadata_identity(after)
     ):
-        snapshot.unlink(missing_ok=True)
         raise ValueError("workbook_changed_during_read")
+    os.lseek(snapshot_descriptor, 0, os.SEEK_SET)
 
 
 def _safe_source_name(filename: str) -> str:
@@ -284,12 +379,11 @@ def _safe_source_name(filename: str) -> str:
 
 
 def _persist_bundle(
-    workbook_path: Path,
+    workbook: BinaryIO,
     source: dict[str, str],
-    staging_dir: Path | None = None,
 ) -> EvidenceBundle:
     try:
-        parsed = read_account_workbook(workbook_path)
+        parsed = read_account_workbook(workbook)
     except ValueError as error:
         if str(error) in _KNOWN_WORKBOOK_VALUE_ERRORS:
             raise
@@ -301,15 +395,65 @@ def _persist_bundle(
     if not _EVIDENCE_ID.fullmatch(evidence_id):
         raise ValueError("invalid_evidence_bundle")
 
-    if staging_dir is not None:
-        staged = write_evidence_bundle(bundle, staging_dir)
-        os.replace(staged, _evidence_root() / f"{evidence_id}.json")
-        return bundle
-
-    with TemporaryDirectory(dir=_temporary_root()) as directory:
-        staged = write_evidence_bundle(bundle, Path(directory))
-        os.replace(staged, _evidence_root() / f"{evidence_id}.json")
+    _write_evidence_bundle(bundle)
     return bundle
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    view = memoryview(content)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short_write")
+        view = view[written:]
+
+
+def _write_evidence_bundle(bundle: EvidenceBundle) -> None:
+    directory_fd, _path = _open_output_directory("evidence")
+    evidence_id = str(bundle["evidenceId"])
+    final_name = f"{evidence_id}.json"
+    temp_name = f".{evidence_id}-{secrets.token_hex(16)}.tmp"
+    content = (json.dumps(bundle, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        _write_all(descriptor, content)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        try:
+            os.link(
+                temp_name,
+                final_name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            existing = os.open(
+                final_name,
+                _open_flags(directory=False),
+                dir_fd=directory_fd,
+            )
+            try:
+                with os.fdopen(os.dup(existing), "rb") as source:
+                    if source.read(len(content) + 1) != content:
+                        raise ValueError("invalid_evidence_bundle")
+            finally:
+                os.close(existing)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(temp_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.close(directory_fd)
 
 
 def _bounded_evidence_item(item: dict[str, object]) -> dict[str, object]:
@@ -380,6 +524,8 @@ def _batch_inputs(bundle: EvidenceBundle) -> dict[str, object]:
             "rankings": rankings,
             "evidence": [_bounded_evidence_item(by_row[row]) for row in unique_rows],
         }
+        if batch_id == "strategy":
+            batch_input["account"] = dict(cast(dict[str, object], bundle.get("account", {})))
         if batch_id == "performance":
             batch_input["metrics"] = dict(metrics)
         result[batch_id] = batch_input
@@ -403,16 +549,15 @@ def analyze_path(path_text: str) -> dict[str, object]:
         raise ValueError("invalid_path")
     descriptor, source_name = _open_controlled_workbook(path_text)
     try:
-        with TemporaryDirectory(dir=_temporary_root()) as directory:
-            staging_dir = Path(directory)
-            workbook_path = staging_dir / "workbook.xlsx"
-            _copy_open_workbook(descriptor, workbook_path)
-            _validate_xlsx_archive(workbook_path)
-            bundle = _persist_bundle(
-                workbook_path,
-                {"kind": "path", "name": source_name},
-                staging_dir,
-            )
+        with _snapshot_file() as snapshot_descriptor:
+            _copy_open_workbook(descriptor, snapshot_descriptor)
+            with os.fdopen(os.dup(snapshot_descriptor), "rb") as snapshot:
+                _validate_xlsx_archive(snapshot)
+                snapshot.seek(0)
+                bundle = _persist_bundle(
+                    snapshot,
+                    {"kind": "path", "name": source_name},
+                )
     finally:
         os.close(descriptor)
     return _evidence_ready(bundle)
@@ -427,31 +572,42 @@ def analyze_upload(filename: str, content: bytes) -> dict[str, object]:
     _validate_extension(filename)
     _validate_size(len(content))
 
-    with TemporaryDirectory(dir=_temporary_root()) as directory:
-        staging_dir = Path(directory)
-        workbook_path = staging_dir / "upload.xlsx"
-        workbook_path.write_bytes(content)
-        _validate_xlsx_archive(workbook_path)
-        bundle = _persist_bundle(
-            workbook_path,
-            {"kind": "upload", "name": _safe_source_name(filename)},
-            staging_dir,
-        )
+    with _snapshot_file() as snapshot_descriptor:
+        _write_all(snapshot_descriptor, content)
+        os.lseek(snapshot_descriptor, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(snapshot_descriptor), "rb") as snapshot:
+            _validate_xlsx_archive(snapshot)
+            snapshot.seek(0)
+            bundle = _persist_bundle(
+                snapshot,
+                {"kind": "upload", "name": _safe_source_name(filename)},
+            )
     return _evidence_ready(bundle)
 
 
 def _load_evidence(evidence_id: str) -> EvidenceBundle:
     if not isinstance(evidence_id, str) or not _EVIDENCE_ID.fullmatch(evidence_id):
         raise ValueError("invalid_evidence_id")
-    path = _evidence_root() / f"{evidence_id}.json"
-    if path.is_symlink():
-        raise ValueError("invalid_evidence_bundle")
-    if not path.is_file():
-        raise ValueError("evidence_not_found")
+    directory_fd, _path = _open_output_directory("evidence")
     try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
+        descriptor = os.open(
+            f"{evidence_id}.json",
+            _open_flags(directory=False),
+            dir_fd=directory_fd,
+        )
+    except FileNotFoundError:
+        os.close(directory_fd)
+        raise ValueError("evidence_not_found") from None
+    except OSError:
+        os.close(directory_fd)
+        raise ValueError("invalid_evidence_bundle") from None
+    try:
+        with os.fdopen(descriptor, "r", encoding="utf-8") as source:
+            loaded = json.load(source)
     except (OSError, UnicodeError, json.JSONDecodeError):
         raise ValueError("invalid_evidence_bundle") from None
+    finally:
+        os.close(directory_fd)
     required = {
         "evidenceVersion",
         "evidenceId",
@@ -513,26 +669,36 @@ def _safe_nickname(value: object) -> str:
 
 
 def _write_report(filename: str, markdown: str) -> Path:
-    reports_root = _reports_root()
+    reports_fd, reports_root = _open_output_directory()
     base = Path(filename)
     for attempt in range(1000):
         suffix = "" if attempt == 0 else f"_{attempt:02d}"
         target = reports_root / f"{base.stem}{suffix}{base.suffix}"
         try:
             descriptor = os.open(
-                target,
+                target.name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
                 0o600,
+                dir_fd=reports_fd,
             )
         except FileExistsError:
             continue
+        except Exception:
+            os.close(reports_fd)
+            raise
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as output:
                 output.write(markdown)
         except Exception:
-            target.unlink(missing_ok=True)
+            try:
+                os.unlink(target.name, dir_fd=reports_fd)
+            except FileNotFoundError:
+                pass
+            os.close(reports_fd)
             raise
+        os.close(reports_fd)
         return target
+    os.close(reports_fd)
     raise ValueError("report_filename_exhausted")
 
 

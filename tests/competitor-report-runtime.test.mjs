@@ -22,7 +22,11 @@ function config(overrides = {}) {
 
 function fixtureInput() {
   return {
-    account: { nickname: "示例账号" },
+    account: {
+      nickname: "示例账号",
+      followers: 12000,
+      signature: "记录日常生活与健康管理常识",
+    },
     evidence: [
       {
         evidenceId: "DY-E0001",
@@ -30,6 +34,12 @@ function fixtureInput() {
       },
     ],
   };
+}
+
+function performanceInput() {
+  const input = fixtureInput();
+  delete input.account;
+  return input;
 }
 
 function validBatch(batchId = "strategy") {
@@ -149,16 +159,34 @@ test("strategy prompt isolates untrusted evidence and states the exact validated
 });
 
 test("performance and execution prompts enforce their distinct section and recommendation shapes", () => {
-  const performance = buildCompetitorBatchPrompt("performance", fixtureInput());
+  const performance = buildCompetitorBatchPrompt("performance", performanceInput());
   assert.match(performance[0].content, /traffic、data/);
 
-  const execution = buildCompetitorBatchPrompt("execution", fixtureInput());
+  const execution = buildCompetitorBatchPrompt("execution", performanceInput());
   assert.match(execution[0].content, /claims 必须为空数组/);
   assert.match(execution[0].content, /topicDirections 必须恰好 5 项/);
   assert.match(execution[0].content, /filmingTemplates 必须恰好 3 项/);
   assert.match(execution[0].content, /executionDays 必须覆盖 day 1 到 7/);
   assert.match(execution[0].content, /structure.*非空字符串数组/);
   assert.match(execution[0].content, /complianceNotes.*非空字符串数组/);
+});
+
+test("batch prompt exact-validates bounded strategy account context", () => {
+  const valid = buildCompetitorBatchPrompt("strategy", fixtureInput());
+  assert.match(valid[1].content, /"signature":"记录日常生活与健康管理常识"/);
+
+  for (const [batchId, input] of [
+    ["strategy", { ...fixtureInput(), account: { nickname: "示例", extra: "forbidden" } }],
+    ["strategy", { ...fixtureInput(), account: { nickname: "超".repeat(201) } }],
+    ["performance", fixtureInput()],
+    ["execution", fixtureInput()],
+  ]) {
+    assert.throws(
+      () => buildCompetitorBatchPrompt(batchId, input),
+      (error) => error instanceof CompetitorReportRuntimeError
+        && error.code === "INVALID_REQUEST",
+    );
+  }
 });
 
 test("prompt rejects unknown batches and sanitized input above 80000 characters", () => {
@@ -171,6 +199,7 @@ test("prompt rejects unknown batches and sanitized input above 80000 characters"
   assert.throws(
     () =>
       buildCompetitorBatchPrompt("strategy", {
+        account: { nickname: "示例账号" },
         evidence: "x".repeat(80_001),
       }),
     (error) =>
@@ -354,6 +383,35 @@ test("proxy errors never reflect response bodies, endpoints, evidence or API key
       error instanceof CompetitorReportRuntimeError
       && error.code === "PROVIDER_UNAVAILABLE"
       && !/sk-|api\.openai|DY-E0001/u.test(error.message),
+  );
+});
+
+test("same-origin proxy preserves only retryable invalid-model-output classification", async () => {
+  await assert.rejects(
+    generateCompetitorBatchViaProxy(config(), fixtureInput(), {
+      batchId: "strategy",
+      fetchImpl: async () => Response.json({
+        ok: false,
+        error: {
+          code: "INVALID_MODEL_OUTPUT",
+          message: "模型输出未满足报告结构要求，请重试。",
+        },
+      }, { status: 502 }),
+    }),
+    (error) => error instanceof CompetitorReportRuntimeError
+      && error.code === "INVALID_MODEL_OUTPUT",
+  );
+
+  await assert.rejects(
+    generateCompetitorBatchViaProxy(config(), fixtureInput(), {
+      batchId: "strategy",
+      fetchImpl: async () => Response.json({
+        ok: false,
+        error: { code: "AUTH_FAILED", message: "safe" },
+      }, { status: 401 }),
+    }),
+    (error) => error instanceof CompetitorReportRuntimeError
+      && error.code === "AUTH_FAILED",
   );
 });
 

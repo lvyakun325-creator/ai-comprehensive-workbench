@@ -26,6 +26,7 @@ def workbook_bytes(nickname: str = "测试账号") -> bytes:
     overview.title = "账号概览"
     overview.append(["昵称", nickname])
     overview.append(["粉丝数", 100])
+    overview.append(["签名", "分享日常生活与健康管理常识"])
     works = workbook.create_sheet("作品数据")
     works.append(["标题", "点赞", "评论", "收藏", "分享", "发布时间", "链接"])
     works.append(["第一条作品", 20, 2, 3, 1, "2026-07-01 10:00:00", "https://example.com/1"])
@@ -321,6 +322,65 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["stage"], "evidence_ready")
         self.assertEqual(result["account"]["nickname"], "测试账号")
 
+    def test_output_roots_reject_symlinks_without_writing_outside(self) -> None:
+        for component in ("reports", "evidence", ".tmp"):
+            with self.subTest(component=component), TemporaryDirectory() as outside_dir:
+                outside = Path(outside_dir)
+                base = self.project_root / "outputs" / "competitor-insight"
+                reports = base / "reports"
+                if component == "reports":
+                    base.mkdir(parents=True, exist_ok=True)
+                    reports.symlink_to(outside, target_is_directory=True)
+                else:
+                    reports.mkdir(parents=True, exist_ok=True)
+                    candidate = reports / component
+                    if candidate.is_dir() and not candidate.is_symlink():
+                        candidate.rmdir()
+                    (reports / component).symlink_to(outside, target_is_directory=True)
+
+                try:
+                    with self.assertRaisesRegex(ValueError, r"^unsafe_output_path$"):
+                        service.analyze_upload("sample.xlsx", workbook_bytes())
+                    self.assertEqual(list(outside.iterdir()), [])
+                finally:
+                    link = reports if component == "reports" else reports / component
+                    if link.is_symlink():
+                        link.unlink()
+
+    def test_output_component_swap_to_symlink_is_rejected_without_external_write(self) -> None:
+        outside = self.project_root / "outside-output"
+        outside.mkdir()
+        base = self.project_root / "outputs" / "competitor-insight"
+        base.mkdir(parents=True)
+        reports = base / "reports"
+        reports.mkdir()
+        real_open = os.open
+        swapped = False
+
+        def swap_before_open(
+            path: str | Path,
+            flags: int,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> int:
+            nonlocal swapped
+            if path == "reports" and dir_fd is not None and not swapped:
+                reports.rmdir()
+                reports.symlink_to(outside, target_is_directory=True)
+                swapped = True
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with patch.object(service.os, "open", side_effect=swap_before_open):
+            with self.assertRaisesRegex(ValueError, r"^unsafe_output_path$"):
+                service.analyze_upload("sample.xlsx", workbook_bytes())
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_output_writes_fail_closed_without_directory_open_support(self) -> None:
+        with patch.object(service.os, "O_DIRECTORY", 0):
+            with self.assertRaisesRegex(ValueError, r"^unsafe_output_path$"):
+                service.analyze_upload("sample.xlsx", workbook_bytes())
+
     def test_evidence_ready_returns_bounded_deterministic_batch_inputs(self) -> None:
         first = service.analyze_upload("sample.xlsx", workbook_bytes())
         second = service.analyze_upload("sample.xlsx", workbook_bytes())
@@ -344,6 +404,13 @@ class ServiceTests(unittest.TestCase):
                 )
                 self.assertNotIn("url", batch_input["evidence"][0])
                 self.assertNotIn("sourceRow", batch_input["evidence"][0])
+        self.assertEqual(first["batchInputs"]["strategy"]["account"], {
+            "nickname": "测试账号",
+            "followers": 100,
+            "signature": "分享日常生活与健康管理常识",
+        })
+        self.assertNotIn("account", first["batchInputs"]["performance"])
+        self.assertNotIn("account", first["batchInputs"]["execution"])
 
     def test_analyze_path_reads_without_modifying_the_original_workbook(self) -> None:
         workbook_path = self._douyin_root() / "account.xlsx"
@@ -447,11 +514,13 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), artifact["markdown"])
 
     def test_unknown_workbook_value_error_is_normalized(self) -> None:
-        with self.assertRaisesRegex(ValueError, r"^invalid_workbook$"):
-            service.analyze_upload(
-                "malformed.xlsx",
-                malformed_account_workbook_bytes(),
-            )
+        with patch.object(
+            service,
+            "read_account_workbook",
+            side_effect=ValueError("unexpected-parser-detail"),
+        ):
+            with self.assertRaisesRegex(ValueError, r"^invalid_workbook$"):
+                service.analyze_upload("malformed.xlsx", workbook_bytes())
 
 
 if __name__ == "__main__":

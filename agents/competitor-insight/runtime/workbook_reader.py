@@ -1,7 +1,7 @@
 """Read local competitor account Excel exports into a stable evidence input."""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from openpyxl import load_workbook
 
@@ -25,6 +25,19 @@ _ACCOUNT_KEY_ALIASES = {
     "粉丝": "followers",
     "粉丝数": "followers",
     "粉丝数量": "followers",
+    "签名": "signature",
+    "个人签名": "signature",
+    "简介": "signature",
+    "sec_uid": "accountId",
+    "secuid": "accountId",
+    "抖音号": "accountId",
+    "unique_id": "accountId",
+}
+
+_ACCOUNT_TEXT_LIMITS = {
+    "nickname": 200,
+    "accountId": 256,
+    "signature": 1000,
 }
 
 
@@ -61,11 +74,14 @@ def _read_account(workbook: Any, works_sheet: Any) -> dict[str, object]:
     preferred = next((sheet for sheet in workbook.worksheets if sheet.title == "账号概览"), None)
     sheets = [preferred] if preferred is not None else []
     sheets.extend(sheet for sheet in workbook.worksheets if sheet is not works_sheet and sheet is not preferred)
-    sheets.extend([sheet for sheet in workbook.worksheets if sheet is works_sheet])
+    if not sheets:
+        raise ValueError("missing_account_sheet")
 
     account: dict[str, object] = {}
     for sheet in sheets:
-        for key, value, *_rest in sheet.iter_rows(values_only=True):
+        for row in sheet.iter_rows(values_only=True):
+            key = row[0] if row else None
+            value = row[1] if len(row) > 1 else None
             normalized_key = _normalized_text(key)
             if not normalized_key or value is None:
                 continue
@@ -74,11 +90,18 @@ def _read_account(workbook: Any, works_sheet: Any) -> dict[str, object]:
                 if field == "followers":
                     account[field] = parse_metric(value)[0]
                 else:
-                    account[field] = str(value).strip()
+                    text = str(value).strip()
+                    if not text:
+                        continue
+                    if len(text) > _ACCOUNT_TEXT_LIMITS[field]:
+                        raise ValueError("invalid_account_identity")
+                    account[field] = text
+    if not account.get("nickname") and not account.get("accountId"):
+        raise ValueError("missing_account_identity")
     return account
 
 
-def read_account_workbook(path: Path) -> dict[str, object]:
+def read_account_workbook(path: Path | BinaryIO) -> dict[str, object]:
     """Read a single workbook and return the stable account/works input shape."""
     workbook = load_workbook(filename=path, data_only=True, read_only=True)
     try:

@@ -17,6 +17,7 @@ function payload(overrides = {}) {
     },
     batchId: "strategy",
     input: {
+      account: { nickname: "示例账号" },
       evidence: [{ evidenceId: "DY-E0001", title: "示例作品" }],
     },
     ...overrides,

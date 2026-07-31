@@ -51,6 +51,72 @@ class ReadAccountWorkbookTests(unittest.TestCase):
         self.assertEqual(parsed["fieldMap"]["likes"], "点赞")
         self.assertEqual(parsed["works"][0]["likes"], 8000)
 
+    def test_reads_real_douyin_export_account_shape_with_bounded_context(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = self._write_workbook(
+                directory,
+                [
+                    ("", ""),
+                    ("", ""),
+                    ("昵称", "真实导出形状"),
+                    ("sec_uid", "MS4wLjABAAAA-test-account"),
+                    ("粉丝数", "1.2w"),
+                    ("签名", "记录日常生活与健康管理常识"),
+                ],
+                ["标题", "点赞", "评论", "收藏", "分享", "发布时间", "视频链接"],
+                [["第一条作品", 20, 2, 3, 1, "2026-07-01 10:00", "https://example.com/1"]],
+            )
+
+            parsed = read_account_workbook(path)
+
+        self.assertEqual(parsed["account"], {
+            "nickname": "真实导出形状",
+            "accountId": "MS4wLjABAAAA-test-account",
+            "followers": 12000,
+            "signature": "记录日常生活与健康管理常识",
+        })
+
+    def test_rejects_works_only_and_single_work_templates(self) -> None:
+        with TemporaryDirectory() as directory:
+            for sheet_name in ("随机数据", "单作品导出"):
+                with self.subTest(sheet_name=sheet_name):
+                    workbook = Workbook()
+                    sheet = workbook.active
+                    sheet.title = sheet_name
+                    sheet.append(["标题", "点赞", "评论", "发布时间"])
+                    sheet.append(["只有作品", 10, 2, "2026-07-31 12:30"])
+                    path = Path(directory) / f"{sheet_name}.xlsx"
+                    workbook.save(path)
+                    workbook.close()
+
+                    with self.assertRaisesRegex(ValueError, r"^missing_account_sheet$"):
+                        read_account_workbook(path)
+
+    def test_rejects_account_sheet_without_douyin_identity(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = self._write_workbook(
+                directory,
+                [("小红书号", "red-123"), ("签名", "错误平台")],
+                ["标题", "点赞"],
+                [["错误平台作品", 10]],
+                overview_name="账号信息",
+            )
+
+            with self.assertRaisesRegex(ValueError, r"^missing_account_identity$"):
+                read_account_workbook(path)
+
+    def test_rejects_unbounded_account_identity_and_signature(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = self._write_workbook(
+                directory,
+                [("昵称", "账" * 201), ("签名", "签" * 1001)],
+                ["标题", "点赞"],
+                [["正常作品", 10]],
+            )
+
+            with self.assertRaisesRegex(ValueError, r"^invalid_account_identity$"):
+                read_account_workbook(path)
+
     def test_recognizes_english_aliases(self) -> None:
         with TemporaryDirectory() as directory:
             path = self._write_workbook(
