@@ -5,6 +5,7 @@ import {
   CompetitorReportRuntimeError,
   buildCompetitorBatchPrompt,
   generateCompetitorBatch,
+  generateCompetitorBatchViaProxy,
   parseCompetitorBatchResponse,
 } from "../app/lib/competitor-report-runtime.ts";
 
@@ -295,6 +296,65 @@ test("generation sends a fixed bounded request with redirects disabled and parse
     ["system", "user"],
   );
   assert.doesNotMatch(captured.init.body, /api[_-]?key|authorization|secret/i);
+});
+
+test("official generation uses the same-origin proxy with the caller signal", async () => {
+  const caller = new AbortController();
+  let captured;
+  const batch = await generateCompetitorBatchViaProxy(
+    config(),
+    fixtureInput(),
+    {
+      batchId: "strategy",
+      signal: caller.signal,
+      fetchImpl: async (url, init) => {
+        captured = { url: String(url), init };
+        return Response.json({ ok: true, batch: validBatch() });
+      },
+    },
+  );
+
+  assert.deepEqual(batch, validBatch());
+  assert.equal(captured.url, "/api/agents/competitor-insight");
+  assert.equal(captured.init.credentials, "same-origin");
+  assert.equal(captured.init.signal.aborted, false);
+  assert.deepEqual(Object.keys(JSON.parse(captured.init.body)).sort(), [
+    "batchId",
+    "config",
+    "input",
+  ]);
+});
+
+test("proxy success is minimal and binds the returned batch to the request", async () => {
+  for (const body of [
+    { ok: true, batch: validBatch(), extra: true },
+    { ok: true, batch: validBatch("performance") },
+    { ok: true },
+  ]) {
+    await assert.rejects(
+      generateCompetitorBatchViaProxy(config(), fixtureInput(), {
+        batchId: "strategy",
+        fetchImpl: async () => Response.json(body),
+      }),
+      (error) => error instanceof CompetitorReportRuntimeError,
+    );
+  }
+});
+
+test("proxy errors never reflect response bodies, endpoints, evidence or API keys", async () => {
+  await assert.rejects(
+    generateCompetitorBatchViaProxy(config(), fixtureInput(), {
+      batchId: "strategy",
+      fetchImpl: async () => new Response(
+        `provider ${FAKE_KEY} api.openai.com DY-E0001`,
+        { status: 502 },
+      ),
+    }),
+    (error) =>
+      error instanceof CompetitorReportRuntimeError
+      && error.code === "PROVIDER_UNAVAILABLE"
+      && !/sk-|api\.openai|DY-E0001/u.test(error.message),
+  );
 });
 
 test("generation binds the returned batch to the requested batch", async () => {

@@ -34,6 +34,23 @@ _REQUIRED_XLSX_MEMBERS = {
     "xl/workbook.xml",
 }
 _EXPECTED_BATCH_IDS = ("strategy", "performance", "execution")
+_BATCH_RANKINGS = {
+    "strategy": ("overall", "startup"),
+    "performance": ("overall", "startup", "collect", "share", "comment"),
+    "execution": ("overall", "collect", "share", "comment"),
+}
+_METRIC_KEYS = (
+    "workCount",
+    "averageLikes",
+    "averageComments",
+    "averageCollects",
+    "averageShares",
+    "averageInteractions",
+    "maxInteractions",
+    "aboveAverageInteractionCount",
+    "top10InteractionShare",
+    "maxToAverageMultiple",
+)
 _KNOWN_WORKBOOK_VALUE_ERRORS = {
     "missing_title_field",
     "no_work_rows",
@@ -295,6 +312,80 @@ def _persist_bundle(
     return bundle
 
 
+def _bounded_evidence_item(item: dict[str, object]) -> dict[str, object]:
+    return {
+        "evidenceId": str(item.get("evidenceId", "")),
+        "title": str(item.get("title", ""))[:500],
+        "likes": int(item.get("likes", 0)),
+        "comments": int(item.get("comments", 0)),
+        "collects": int(item.get("collects", 0)),
+        "shares": int(item.get("shares", 0)),
+        "totalInteractions": int(item.get("totalInteractions", 0)),
+        "publishedAt": str(item.get("publishedAt", ""))[:64],
+    }
+
+
+def _batch_inputs(bundle: EvidenceBundle) -> dict[str, object]:
+    items = cast(list[dict[str, object]], bundle.get("items", []))
+    by_row = {
+        int(item.get("sourceRow", 0)): item
+        for item in items
+    }
+    completeness = cast(dict[str, object], bundle.get("completeness", {}))
+    raw_availability = cast(
+        dict[str, object],
+        completeness.get("availability", {}),
+    )
+    availability = {
+        key: bool(raw_availability.get(key, False))
+        for key in ("comments", "collects", "shares")
+    }
+    raw_rankings = cast(
+        dict[str, dict[str, object]],
+        bundle.get("rankings", {}),
+    )
+    raw_metrics = cast(dict[str, object], bundle.get("metrics", {}))
+    metrics = {key: raw_metrics.get(key) for key in _METRIC_KEYS}
+
+    result: dict[str, object] = {}
+    for batch_id, ranking_names in _BATCH_RANKINGS.items():
+        rankings: dict[str, object] = {}
+        selected_rows: list[int] = []
+        for name in ranking_names:
+            ranking = raw_rankings.get(name, {})
+            status = (
+                ranking.get("status")
+                if ranking.get("status") in {"available", "unavailable"}
+                else "unavailable"
+            )
+            rows = [
+                int(row)
+                for row in cast(list[object], ranking.get("rows", []))[:10]
+                if isinstance(row, (int, float)) and not isinstance(row, bool)
+            ]
+            evidence_ids = [
+                str(by_row[row].get("evidenceId", ""))
+                for row in rows
+                if row in by_row
+            ]
+            rankings[name] = {
+                "status": status,
+                "evidenceIds": evidence_ids,
+            }
+            selected_rows.extend(row for row in rows if row in by_row)
+
+        unique_rows = list(dict.fromkeys(selected_rows))[:30]
+        batch_input: dict[str, object] = {
+            "availability": dict(availability),
+            "rankings": rankings,
+            "evidence": [_bounded_evidence_item(by_row[row]) for row in unique_rows],
+        }
+        if batch_id == "performance":
+            batch_input["metrics"] = dict(metrics)
+        result[batch_id] = batch_input
+    return result
+
+
 def _evidence_ready(bundle: EvidenceBundle) -> dict[str, object]:
     return {
         "ok": True,
@@ -302,7 +393,7 @@ def _evidence_ready(bundle: EvidenceBundle) -> dict[str, object]:
         "evidenceId": bundle["evidenceId"],
         "account": bundle.get("account", {}),
         "completeness": bundle.get("completeness", {}),
-        "batchInputs": {},
+        "batchInputs": _batch_inputs(bundle),
     }
 
 

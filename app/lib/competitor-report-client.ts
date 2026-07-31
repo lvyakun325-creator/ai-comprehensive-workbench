@@ -2,6 +2,7 @@ const REPORT_BRIDGE_ORIGIN = "http://127.0.0.1:8767";
 const MAX_EXCEL_BYTES = 50 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_PATH_CHARACTERS = 4_096;
+const MAX_BATCH_INPUT_CHARACTERS = 80_000;
 const BASE64_ALPHABET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -11,7 +12,10 @@ export type EvidenceReadyResponse = {
   evidenceId: string;
   account: Record<string, unknown>;
   completeness: Record<string, unknown>;
-  batchInputs: Record<string, unknown>;
+  batchInputs: Record<
+    "strategy" | "performance" | "execution",
+    Record<string, unknown>
+  >;
 };
 
 export type ValidatedBatchResponse = {
@@ -192,10 +196,23 @@ async function readBoundedJson(
   const decoder = new TextDecoder();
   const chunks: string[] = [];
   let received = 0;
+  let rejectAbort!: (reason: DOMException) => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const abortRead = () => {
+    rejectAbort(abortError());
+    try {
+      void reader.cancel().catch(() => undefined);
+    } catch {
+      // Cleanup failure must not replace the stable abort result.
+    }
+  };
+  if (signal.aborted) abortRead();
+  else signal.addEventListener("abort", abortRead, { once: true });
   try {
     while (true) {
-      assertNotAborted(signal);
-      const { done, value } = await reader.read();
+      const { done, value } = await Promise.race([reader.read(), aborted]);
       if (done) break;
       received += value.byteLength;
       if (received > MAX_RESPONSE_BYTES) {
@@ -206,6 +223,7 @@ async function readBoundedJson(
     }
     chunks.push(decoder.decode());
   } finally {
+    signal.removeEventListener("abort", abortRead);
     try {
       reader.releaseLock();
     } catch {
@@ -267,11 +285,150 @@ function parseEvidenceReady(value: unknown): EvidenceReadyResponse {
     || !/^[0-9a-f]{16}$/u.test(body.evidenceId)
     || !isRecord(body.account)
     || !isRecord(body.completeness)
-    || !isRecord(body.batchInputs)
+    || !validBatchInputs(body.batchInputs)
   ) {
     throw invalidResponse();
   }
   return body as EvidenceReadyResponse;
+}
+
+function validBatchInputs(value: unknown): value is EvidenceReadyResponse["batchInputs"] {
+  if (!isRecord(value)) return false;
+  const batchIds = ["strategy", "performance", "execution"] as const;
+  if (!hasExactKeys(value, batchIds)) return false;
+  try {
+    if (JSON.stringify(value).length > MAX_BATCH_INPUT_CHARACTERS) return false;
+  } catch {
+    return false;
+  }
+  return batchIds.every((batchId) => validBatchInput(batchId, value[batchId]));
+}
+
+function validBatchInput(
+  batchId: "strategy" | "performance" | "execution",
+  value: unknown,
+): boolean {
+  if (!isRecord(value)) return false;
+  const expectedKeys = batchId === "performance"
+    ? ["availability", "evidence", "metrics", "rankings"]
+    : ["availability", "evidence", "rankings"];
+  if (
+    !hasExactKeys(value, expectedKeys)
+    || !validAvailability(value.availability)
+    || !validRankings(batchId, value.rankings)
+    || !validEvidenceItems(value.evidence)
+  ) {
+    return false;
+  }
+  return batchId !== "performance" || validMetrics(value.metrics);
+}
+
+function validAvailability(value: unknown): boolean {
+  return (
+    isRecord(value)
+    && hasExactKeys(value, ["comments", "collects", "shares"])
+    && [value.comments, value.collects, value.shares]
+      .every((item) => typeof item === "boolean")
+  );
+}
+
+function validRankings(
+  batchId: "strategy" | "performance" | "execution",
+  value: unknown,
+): boolean {
+  if (!isRecord(value)) return false;
+  const expected = batchId === "strategy"
+    ? ["overall", "startup"]
+    : batchId === "performance"
+      ? ["overall", "startup", "collect", "share", "comment"]
+      : ["overall", "collect", "share", "comment"];
+  if (!hasExactKeys(value, expected)) return false;
+  return expected.every((name) => {
+    const ranking = value[name];
+    return (
+      isRecord(ranking)
+      && hasExactKeys(ranking, ["status", "evidenceIds"])
+      && ["available", "unavailable"].includes(String(ranking.status))
+      && Array.isArray(ranking.evidenceIds)
+      && ranking.evidenceIds.length <= 10
+      && ranking.evidenceIds.every(validEvidenceId)
+    );
+  });
+}
+
+function validEvidenceItems(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 30) {
+    return false;
+  }
+  const keys = [
+    "evidenceId",
+    "title",
+    "likes",
+    "comments",
+    "collects",
+    "shares",
+    "totalInteractions",
+    "publishedAt",
+  ];
+  return value.every((item) => (
+    isRecord(item)
+    && hasExactKeys(item, keys)
+    && validEvidenceId(item.evidenceId)
+    && typeof item.title === "string"
+    && item.title.length <= 500
+    && typeof item.publishedAt === "string"
+    && item.publishedAt.length <= 64
+    && [
+      item.likes,
+      item.comments,
+      item.collects,
+      item.shares,
+      item.totalInteractions,
+    ].every((metric) => (
+      typeof metric === "number"
+      && Number.isSafeInteger(metric)
+      && metric >= 0
+    ))
+  ));
+}
+
+function validMetrics(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const keys = [
+    "workCount",
+    "averageLikes",
+    "averageComments",
+    "averageCollects",
+    "averageShares",
+    "averageInteractions",
+    "maxInteractions",
+    "aboveAverageInteractionCount",
+    "top10InteractionShare",
+    "maxToAverageMultiple",
+  ];
+  return (
+    hasExactKeys(value, keys)
+    && keys.every((key) => (
+      value[key] === null
+      || (typeof value[key] === "number" && Number.isFinite(value[key]))
+    ))
+  );
+}
+
+function validEvidenceId(value: unknown): value is string {
+  return typeof value === "string" && /^DY-E\d{4,8}$/u.test(value);
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return (
+    actual.length === expected.length
+    && actual.every((key, index) => key === expected[index])
+  );
 }
 
 function parseValidatedBatch(value: unknown): ValidatedBatchResponse {

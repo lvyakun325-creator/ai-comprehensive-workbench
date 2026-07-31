@@ -20,6 +20,7 @@ import {
 import {
   CompetitorReportRuntimeError,
   generateCompetitorBatch,
+  generateCompetitorBatchViaProxy,
   type CompetitorBatchId,
 } from "../lib/competitor-report-runtime";
 import { usesBrowserDirectModelRoute } from "../lib/global-model-runtime";
@@ -200,23 +201,28 @@ export function CompetitorReportRunner({
       try {
         setStage("generating");
         setStatusMessage(`正在生成${BATCH_LABELS[batchId]}…`);
-        const batchInput = recordValue(readyEvidence.batchInputs[batchId])
-          ?? readyEvidence.batchInputs;
-        const generated = await generateCompetitorBatch(
-          {
-            baseUrl: selectedModel.baseUrl,
-            apiKey: selectedCredential,
-            model: selectedModel.modelId,
-          },
-          batchInput,
-          {
+        const batchInput = recordValue(readyEvidence.batchInputs[batchId]);
+        if (!batchInput) {
+          throw new CompetitorReportClientError(
+            "INVALID_BRIDGE_RESPONSE",
+            "本地报告服务返回了无效响应。",
+          );
+        }
+        const config = {
+          baseUrl: selectedModel.baseUrl,
+          apiKey: selectedCredential,
+          model: selectedModel.modelId,
+        };
+        const generated = usesBrowserDirectModelRoute(selectedModel.baseUrl)
+          ? await generateCompetitorBatch(config, batchInput, {
             batchId,
             signal: run.controller.signal,
-            egressMode: usesBrowserDirectModelRoute(selectedModel.baseUrl)
-              ? "browser-direct"
-              : "server-proxy",
-          },
-        );
+            egressMode: "browser-direct",
+          })
+          : await generateCompetitorBatchViaProxy(config, batchInput, {
+            batchId,
+            signal: run.controller.signal,
+          });
         if (!isCurrent(run)) return;
 
         setStage("validating");
@@ -351,27 +357,39 @@ export function CompetitorReportRunner({
     );
   }, [stage]);
 
+  const failFileSelection = useCallback((message: string) => {
+    tokenRef.current += 1;
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    evidenceRef.current = null;
+    batchesRef.current = [];
+    setEvidence(null);
+    setValidatedBatches([]);
+    setReport(null);
+    setCopyMessage("");
+    setFailedBatchId(null);
+    setErrorMessage(message);
+    setStage("failed");
+    setStatusMessage("新选文件未通过校验，未复用上一次证据或报告。");
+  }, []);
+
   const selectExcel = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
     event.target.value = "";
     if (!file) return;
     if (!/\.xlsx$/iu.test(file.name)) {
-      setErrorMessage("仅支持 .xlsx 文件，请重新选择。");
-      setStage("failed");
-      setFailedBatchId(null);
+      failFileSelection("仅支持 .xlsx 文件，请重新选择。");
       return;
     }
     if (file.size > MAX_EXCEL_BYTES) {
-      setErrorMessage("Excel 文件超过 50 MB 上限，未发送任何请求。");
-      setStage("failed");
-      setFailedBatchId(null);
+      failFileSelection("Excel 文件超过 50 MB 上限，未发送任何请求。");
       return;
     }
     void analyzeEvidence(
       (signal) => analyzeReportUpload(file, signal),
       "reading",
     );
-  }, [analyzeEvidence]);
+  }, [analyzeEvidence, failFileSelection]);
 
   const copyReportPath = useCallback(async () => {
     if (!report) return;
@@ -469,6 +487,8 @@ export function CompetitorReportRunner({
       <ol className="competitor-report-stages" aria-label="竞品报告五阶段">
         {STAGE_ITEMS.map(([stageId, label], index) => (
           <li
+            aria-current={stageClass(stage, stageId) === "current" ? "step" : undefined}
+            aria-label={`${label}（${stageStateLabel(stage, stageId)}）`}
             className={stageClass(stage, stageId)}
             key={stageId}
           >
@@ -550,16 +570,22 @@ function ReportPreview({
   onCopy: () => Promise<void>;
   report: ReportReadyResponse;
 }) {
-  const [downloadUrl] = useState(() =>
-    URL.createObjectURL(
-      new Blob([report.markdown], { type: "text/markdown;charset=utf-8" }),
-    ),
-  );
+  const downloadRef = useRef<HTMLAnchorElement>(null);
 
-  useEffect(
-    () => () => URL.revokeObjectURL(downloadUrl),
-    [downloadUrl],
-  );
+  useEffect(() => {
+    const anchor = downloadRef.current;
+    if (!anchor) return undefined;
+    const nextUrl = URL.createObjectURL(
+      new Blob([report.markdown], { type: "text/markdown;charset=utf-8" }),
+    );
+    anchor.href = nextUrl;
+    return () => {
+      if (anchor.getAttribute("href") === nextUrl) {
+        anchor.removeAttribute("href");
+      }
+      URL.revokeObjectURL(nextUrl);
+    };
+  }, [report.markdown]);
 
   return (
     <section
@@ -571,7 +597,7 @@ function ReportPreview({
           <span className="panel-label">本地报告</span>
           <h3>Markdown 报告预览</h3>
         </div>
-        <a download={report.filename} href={downloadUrl}>下载 Markdown</a>
+        <a download={report.filename} ref={downloadRef}>下载 Markdown</a>
       </div>
       <pre>{report.markdown}</pre>
       <div className="competitor-report-path">
@@ -650,7 +676,7 @@ function stageClass(
   const normalized = current === "idle"
     ? -1
     : current === "evidence-ready"
-      ? 1
+      ? 2
       : current === "completed"
         ? order.length
         : current === "failed" || current === "stopped"
@@ -658,4 +684,14 @@ function stageClass(
           : order.indexOf(current as (typeof order)[number]);
   const index = order.indexOf(stageId);
   return index < normalized ? "completed" : index === normalized ? "current" : "";
+}
+
+function stageStateLabel(
+  current: ReportStage,
+  stageId: (typeof STAGE_ITEMS)[number][0],
+): "已完成" | "当前" | "未开始" {
+  const className = stageClass(current, stageId);
+  if (className === "completed") return "已完成";
+  if (className === "current") return "当前";
+  return "未开始";
 }

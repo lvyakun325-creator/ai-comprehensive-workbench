@@ -321,6 +321,30 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(result["stage"], "evidence_ready")
         self.assertEqual(result["account"]["nickname"], "测试账号")
 
+    def test_evidence_ready_returns_bounded_deterministic_batch_inputs(self) -> None:
+        first = service.analyze_upload("sample.xlsx", workbook_bytes())
+        second = service.analyze_upload("sample.xlsx", workbook_bytes())
+
+        self.assertEqual(first["batchInputs"], second["batchInputs"])
+        self.assertEqual(
+            set(first["batchInputs"]),
+            {"strategy", "performance", "execution"},
+        )
+        encoded = json.dumps(first["batchInputs"], ensure_ascii=False)
+        self.assertLess(len(encoded.encode("utf-8")), 80_000)
+        self.assertNotIn("sample.xlsx", encoded)
+        self.assertNotIn("contentBase64", encoded)
+        self.assertNotIn("reportPath", encoded)
+        for batch_id, batch_input in first["batchInputs"].items():
+            with self.subTest(batch_id=batch_id):
+                self.assertGreater(len(batch_input["evidence"]), 0)
+                self.assertEqual(
+                    batch_input["evidence"][0]["evidenceId"],
+                    "DY-E0001",
+                )
+                self.assertNotIn("url", batch_input["evidence"][0])
+                self.assertNotIn("sourceRow", batch_input["evidence"][0])
+
     def test_analyze_path_reads_without_modifying_the_original_workbook(self) -> None:
         workbook_path = self._douyin_root() / "account.xlsx"
         before = workbook_bytes()

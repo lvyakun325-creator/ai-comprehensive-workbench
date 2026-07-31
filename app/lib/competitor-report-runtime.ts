@@ -266,6 +266,54 @@ export async function generateCompetitorBatch(
   return batch;
 }
 
+export async function generateCompetitorBatchViaProxy(
+  config: GlobalTextConfig,
+  input: Record<string, unknown>,
+  options: CompetitorReportRuntimeOptions,
+): Promise<Record<string, unknown>> {
+  const validConfig = validateConfig(config, "server-proxy");
+  const batchId = validateBatchId(options?.batchId);
+  const sanitizedInput = JSON.parse(serializeSanitizedInput(input)) as Record<
+    string,
+    unknown
+  >;
+  const body = await fetchProviderJson(
+    {
+      url: "/api/agents/competitor-insight",
+      init: {
+        method: "POST",
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: new Headers({
+          accept: "application/json",
+          "content-type": "application/json",
+        }),
+        body: JSON.stringify({
+          config: validConfig,
+          batchId,
+          input: sanitizedInput,
+        }),
+      },
+    },
+    options,
+  );
+  if (
+    !isRecord(body)
+    || Object.keys(body).length !== 2
+    || !Object.prototype.hasOwnProperty.call(body, "ok")
+    || !Object.prototype.hasOwnProperty.call(body, "batch")
+    || body.ok !== true
+    || !isRecord(body.batch)
+  ) {
+    throw new CompetitorReportRuntimeError("INVALID_PROVIDER_RESPONSE");
+  }
+  const batch = parseCompetitorBatchResponse(JSON.stringify(body.batch));
+  if (batch.batchId !== batchId) {
+    throw new CompetitorReportRuntimeError("INVALID_MODEL_OUTPUT");
+  }
+  return batch;
+}
+
 function promptContract(batchId: CompetitorBatchId): string {
   if (batchId === "strategy") {
     return `- batchId 必须为 strategy。
