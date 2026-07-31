@@ -97,6 +97,8 @@ class ContractTests(unittest.TestCase):
             ["strategy", "performance", "execution"],
         )
         self.assertIn("section", schema["$defs"]["claim"]["required"])
+        for conditional in schema["$defs"]["claim"]["allOf"]:
+            self.assertIn("strength", conditional["if"]["required"])
         self.assertEqual(
             schema["$defs"]["evidenceIds"]["type"],
             "array",

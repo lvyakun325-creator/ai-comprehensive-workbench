@@ -162,12 +162,16 @@
       },
       "allOf": [
         {
-          "if": { "properties": { "strength": { "const": "direct" } } },
+          "if": {
+            "properties": { "strength": { "const": "direct" } },
+            "required": ["strength"]
+          },
           "then": { "required": ["rationale"] }
         },
         {
           "if": {
-            "properties": { "strength": { "enum": ["weak", "hypothesis"] } }
+            "properties": { "strength": { "enum": ["weak", "hypothesis"] } },
+            "required": ["strength"]
           },
           "then": { "required": ["rationale", "verificationPlan"] }
         }

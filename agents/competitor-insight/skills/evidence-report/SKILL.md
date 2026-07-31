@@ -12,3 +12,5 @@ Generate exactly three schema-valid JSON batches named `strategy`, `performance`
 Preserve evidence IDs exactly. The model must not output, calculate, rewrite, or infer source evidence metrics, total interactions, rankings, source rows, or publication times: those values come only from the deterministic evidence layer. Mark unsupported interpretations as `weak` or `hypothesis` and include their verification plan. Every required `complianceNotes` array contains at least one non-empty warning.
 
 Render the policy's fixed sections in order. The completed report contains five topic directions, three filming templates, seven distinct day entries, and non-empty item-level medical-health compliance notes. Do not invent evidence, claims, medical outcomes, credentials, or platform-rule facts.
+
+Final validation always receives the rendered Markdown, the same `EvidenceBundle`, and the same three validated batches used for assembly. Never validate with Markdown and evidence alone. Compare the full ordered evidence-reference line sequence against those batches so deleted, duplicated, reordered, or substituted references fail.

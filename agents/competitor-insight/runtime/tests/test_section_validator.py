@@ -277,15 +277,46 @@ class SectionValidatorTests(unittest.TestCase):
             validate_section_batch(claim_batch, evidence_bundle())
 
     def test_rejects_chinese_numeric_claims_and_double_negative_medical_claims(self) -> None:
-        chinese_number = strategy_batch()
-        chinese_number["claims"][0]["statement"] = "该作品已有九十九万互动"
-        with self.assertRaisesRegex(ValueError, "untrusted_numeric_claim"):
-            validate_section_batch(chinese_number, evidence_bundle())
+        ordinary = strategy_batch()
+        ordinary["claims"][0]["statement"] = "第一批做内容，一次只讲一个问题"
+        validate_section_batch(ordinary, evidence_bundle())
 
-        double_negative = strategy_batch()
-        double_negative["claims"][0]["statement"] = "不得不说这个方法保证有效"
-        with self.assertRaisesRegex(ValueError, "medical_compliance_violation:保证有效"):
-            validate_section_batch(double_negative, evidence_bundle())
+        for statement in (
+            "点赞九千九百",
+            "互动九十九",
+            "占比百分之九十",
+            "该作品已有九十九万",
+        ):
+            with self.subTest(statement=statement):
+                chinese_number = strategy_batch()
+                chinese_number["claims"][0]["statement"] = statement
+                with self.assertRaisesRegex(ValueError, "untrusted_numeric_claim"):
+                    validate_section_batch(chinese_number, evidence_bundle())
+
+        for statement in (
+            "不要宣称保证有效",
+            "不得使用‘保证有效’",
+            "不建议停药",
+        ):
+            with self.subTest(safe_statement=statement):
+                safe_warning = strategy_batch()
+                safe_warning["claims"][0]["statement"] = statement
+                validate_section_batch(safe_warning, evidence_bundle())
+
+        for statement in (
+            "不得不保证有效",
+            "不能不保证有效",
+            "并非不能保证有效",
+            "不得不说这个方法保证有效",
+        ):
+            with self.subTest(unsafe_statement=statement):
+                double_negative = strategy_batch()
+                double_negative["claims"][0]["statement"] = statement
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "medical_compliance_violation:保证有效",
+                ):
+                    validate_section_batch(double_negative, evidence_bundle())
 
 
 if __name__ == "__main__":

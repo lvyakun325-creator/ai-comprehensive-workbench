@@ -145,24 +145,48 @@ class ReportRendererTests(unittest.TestCase):
 
     def test_final_validation_detects_missing_structure_unknown_evidence_and_number_leaks(self) -> None:
         bundle = evidence_bundle()
-        markdown = assemble_report(bundle, valid_batches())
+        batches = valid_batches()
+        markdown = assemble_report(bundle, batches)
 
-        self.assertEqual(validate_final_report(markdown, bundle), [])
+        with self.assertRaises(TypeError):
+            validate_final_report(markdown, bundle)
+        self.assertEqual(validate_final_report(markdown, bundle, batches), [])
         missing = markdown.replace("## 数据层：关键指标与账号健康度分析", "")
-        self.assertIn("missing_section:数据层：关键指标与账号健康度分析", validate_final_report(missing, bundle))
-        unknown = markdown + "\n引用 DY-E9999\n"
-        self.assertIn("unknown_evidence_id:DY-E9999", validate_final_report(unknown, bundle))
+        self.assertIn(
+            "missing_section:数据层：关键指标与账号健康度分析",
+            validate_final_report(missing, bundle, batches),
+        )
+        unknown = markdown + "\n  - 证据 `DY-E9999`：伪造引用\n"
+        self.assertIn(
+            "unknown_evidence_id:DY-E9999",
+            validate_final_report(unknown, bundle, batches),
+        )
         forged = markdown + "\n伪造互动：999,999\n"
-        self.assertIn("untrusted_numeric_claim:999,999", validate_final_report(forged, bundle))
+        self.assertIn(
+            "untrusted_numeric_claim:999,999",
+            validate_final_report(forged, bundle, batches),
+        )
         borrowed = markdown + "\n挪用合法证据数字：1,000\n"
-        self.assertIn("untrusted_numeric_claim:1,000", validate_final_report(borrowed, bundle))
+        self.assertIn(
+            "untrusted_numeric_claim:1,000",
+            validate_final_report(borrowed, bundle, batches),
+        )
+        numbered_forgery = markdown + "\n999999.伪造互动\n"
+        self.assertIn(
+            "untrusted_numeric_claim:999999",
+            validate_final_report(numbered_forgery, bundle, batches),
+        )
 
     def test_final_validation_compares_deterministic_blocks_and_each_evidence_reference(self) -> None:
         bundle = evidence_bundle()
-        markdown = assemble_report(bundle, valid_batches())
+        batches = valid_batches()
+        markdown = assemble_report(bundle, batches)
 
         swapped_overview = markdown.replace("粉丝数：3,210", "粉丝数：3,200", 1)
-        self.assertIn("deterministic_block_mismatch:账号概览", validate_final_report(swapped_overview, bundle))
+        self.assertIn(
+            "deterministic_block_mismatch:账号概览",
+            validate_final_report(swapped_overview, bundle, batches),
+        )
 
         top_row = "| 1 | 作品一 | 12,000 | 320 | 860 | 210 | 13,390 |"
         swapped_table = markdown.replace(
@@ -172,36 +196,97 @@ class ReportRendererTests(unittest.TestCase):
         )
         self.assertIn(
             "deterministic_block_mismatch:Top 10 高表现作品",
-            validate_final_report(swapped_table, bundle),
+            validate_final_report(swapped_table, bundle, batches),
         )
 
         swapped_reference = markdown.replace("点赞：12,000", "点赞：1,000", 1)
         self.assertIn(
             "evidence_reference_mismatch:DY-E0001",
-            validate_final_report(swapped_reference, bundle),
+            validate_final_report(swapped_reference, bundle, batches),
         )
+
+    def test_final_validation_binds_complete_evidence_sequence_to_batches(self) -> None:
+        bundle = evidence_bundle()
+        batches = valid_batches()
+        markdown = assemble_report(bundle, batches)
+        evidence_prefix = "  - 证据 `"
+        lines = markdown.splitlines()
+        evidence_indexes = [
+            index for index, line in enumerate(lines) if line.startswith(evidence_prefix)
+        ]
+
+        deleted = "\n".join(
+            line for line in lines if not line.startswith(evidence_prefix)
+        ) + "\n"
+        self.assertIn(
+            "evidence_reference_sequence_mismatch",
+            validate_final_report(deleted, bundle, batches),
+        )
+
+        copied_lines = list(lines)
+        copied_reference = f"  - {render_evidence_reference('DY-E0001', bundle)}"
+        for index in evidence_indexes:
+            copied_lines[index] = copied_reference
+        self.assertIn(
+            "evidence_reference_sequence_mismatch",
+            validate_final_report("\n".join(copied_lines) + "\n", bundle, batches),
+        )
+
+        reordered_lines = list(lines)
+        first_e2 = next(
+            index for index in evidence_indexes if "DY-E0002" in lines[index]
+        )
+        first_e1 = next(
+            index for index in evidence_indexes if "DY-E0001" in lines[index]
+        )
+        reordered_lines[first_e1], reordered_lines[first_e2] = (
+            reordered_lines[first_e2],
+            reordered_lines[first_e1],
+        )
+        self.assertIn(
+            "evidence_reference_sequence_mismatch",
+            validate_final_report("\n".join(reordered_lines) + "\n", bundle, batches),
+        )
+
+        missing_one = list(lines)
+        missing_one.pop(evidence_indexes[0])
+        self.assertIn(
+            "evidence_reference_sequence_mismatch",
+            validate_final_report("\n".join(missing_one) + "\n", bundle, batches),
+        )
+
+    def test_evidence_scan_ignores_id_like_text_outside_formal_reference_prefix(self) -> None:
+        bundle = evidence_bundle()
+        bundle["account"]["nickname"] = "测试 DY-E9999"
+        bundle["items"][0]["title"] = "标题含 DY-E9998"
+        batches = valid_batches()
+        markdown = assemble_report(bundle, batches)
+
+        self.assertEqual(validate_final_report(markdown, bundle, batches), [])
 
     def test_final_validation_handles_unavailable_rankings_from_bundle_status(self) -> None:
         bundle = evidence_bundle()
         for name in ("collect", "share", "comment"):
             bundle["rankings"][name] = {"status": "unavailable", "rows": []}
-        markdown = assemble_report(bundle, valid_batches())
+        batches = valid_batches()
+        markdown = assemble_report(bundle, batches)
 
-        self.assertEqual(validate_final_report(markdown, bundle), [])
+        self.assertEqual(validate_final_report(markdown, bundle, batches), [])
         self.assertEqual(markdown.count("该指标在源数据中不可用，未生成榜单。"), 3)
         tampered = markdown.replace("该指标在源数据中不可用，未生成榜单。", "无数据。", 1)
         self.assertIn(
             "deterministic_block_mismatch:高收藏、高分享、高评论作品",
-            validate_final_report(tampered, bundle),
+            validate_final_report(tampered, bundle, batches),
         )
 
     def test_final_validation_requires_unique_real_heading_lines(self) -> None:
         bundle = evidence_bundle()
-        markdown = assemble_report(bundle, valid_batches())
+        batches = valid_batches()
+        markdown = assemble_report(bundle, batches)
         duplicated = markdown + "\n## 数据层：关键指标与账号健康度分析\n"
         self.assertIn(
             "duplicate_section:数据层：关键指标与账号健康度分析",
-            validate_final_report(duplicated, bundle),
+            validate_final_report(duplicated, bundle, batches),
         )
 
         quoted = markdown.replace(
@@ -211,7 +296,7 @@ class ReportRendererTests(unittest.TestCase):
         )
         self.assertIn(
             "missing_section:数据层：关键指标与账号健康度分析",
-            validate_final_report(quoted, bundle),
+            validate_final_report(quoted, bundle, batches),
         )
 
         fenced = markdown.replace(
@@ -221,30 +306,101 @@ class ReportRendererTests(unittest.TestCase):
         )
         self.assertIn(
             "missing_section:数据层：关键指标与账号健康度分析",
-            validate_final_report(fenced, bundle),
+            validate_final_report(fenced, bundle, batches),
         )
+
+    def test_final_validation_enforces_fixed_third_level_structure(self) -> None:
+        bundle = evidence_bundle()
+        batches = valid_batches()
+        markdown = assemble_report(bundle, batches)
+
+        cases = (
+            (
+                markdown.replace("### 选题方向", "", 1),
+                "missing_subsection:选题方向",
+            ),
+            (
+                markdown.replace("### 选题方向", "### 选题改名", 1),
+                "missing_subsection:选题方向",
+            ),
+            (
+                markdown.replace("### 拍法模板", "### 选题方向\n### 拍法模板", 1),
+                "duplicate_subsection:选题方向",
+            ),
+            (
+                markdown.replace("### 选题方向", "### 临时", 1).replace(
+                    "### 拍法模板",
+                    "### 选题方向",
+                    1,
+                ).replace("### 临时", "### 拍法模板", 1),
+                "subsection_out_of_order:对标建议",
+            ),
+            (
+                markdown.replace("### 第 1 天", "", 1),
+                "missing_execution_day:1",
+            ),
+            (
+                markdown.replace("### 第 1 天", "### 第一天", 1),
+                "missing_execution_day:1",
+            ),
+            (
+                markdown.replace("### 第 2 天", "### 第 1 天\n### 第 2 天", 1),
+                "duplicate_execution_day:1",
+            ),
+            (
+                markdown.replace("### 第 1 天", "### 临时天", 1).replace(
+                    "### 第 2 天",
+                    "### 第 1 天",
+                    1,
+                ).replace("### 临时天", "### 第 2 天", 1),
+                "execution_days_out_of_order",
+            ),
+            (
+                "### 第 1 天\n" + markdown,
+                "execution_day_outside_section:1",
+            ),
+        )
+        for tampered, error in cases:
+            with self.subTest(error=error):
+                self.assertIn(
+                    error,
+                    validate_final_report(tampered, bundle, batches),
+                )
 
     def test_final_validation_detects_medical_compliance_leaks(self) -> None:
         bundle = evidence_bundle()
-        markdown = assemble_report(bundle, valid_batches())
+        batches = valid_batches()
+        markdown = assemble_report(bundle, batches)
 
         unsafe = markdown + "\n该方法保证有效并可以停药。\n"
 
-        errors = validate_final_report(unsafe, bundle)
+        errors = validate_final_report(unsafe, bundle, batches)
         self.assertIn("medical_compliance_violation:保证有效", errors)
         self.assertIn("medical_compliance_violation:停药", errors)
 
         double_negative = markdown + "\n不得不说这个方法保证有效。\n"
         self.assertIn(
             "medical_compliance_violation:保证有效",
-            validate_final_report(double_negative, bundle),
+            validate_final_report(double_negative, bundle, batches),
         )
 
         chinese_number = markdown + "\n该账号已有九十九万互动。\n"
         self.assertIn(
             "untrusted_numeric_claim:九十九万",
-            validate_final_report(chinese_number, bundle),
+            validate_final_report(chinese_number, bundle, batches),
         )
+
+        for safe_warning in (
+            "不要宣称保证有效",
+            "不得使用‘保证有效’",
+            "不建议停药",
+        ):
+            with self.subTest(safe_warning=safe_warning):
+                safe_markdown = markdown + f"\n{safe_warning}\n"
+                self.assertNotIn(
+                    "medical_compliance_violation",
+                    " ".join(validate_final_report(safe_markdown, bundle, batches)),
+                )
 
 
 if __name__ == "__main__":

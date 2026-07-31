@@ -50,6 +50,12 @@ class ReportArtifact(TypedDict):
     sections: list[SectionBatch]
 
 
+class FinalReportValidationInput(TypedDict):
+    markdown: str
+    evidence: EvidenceBundle
+    batches: list[SectionBatch]
+
+
 def validate_contract_shape(
     value: object,
     required_keys: set[str],

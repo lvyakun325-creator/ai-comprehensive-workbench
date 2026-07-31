@@ -31,7 +31,9 @@ _SECTION_HEADINGS = (
 )
 _TABLE_HEADER = "| 排名 | 标题 | 点赞 | 评论 | 收藏 | 分享 | 综合互动量 |"
 _TABLE_DIVIDER = "| ---: | --- | ---: | ---: | ---: | ---: | ---: |"
-_EVIDENCE_ID_PATTERN = re.compile(r"\bDY-E\d{4,}\b")
+_EVIDENCE_LINE_PATTERN = re.compile(
+    r"^  - 证据 `(?P<evidence_id>DY-E\d{4,})`："
+)
 _MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+|>])")
 
 
@@ -272,11 +274,10 @@ def _special_rankings(bundle: EvidenceBundle) -> str:
     )
 
 
-def assemble_report(
+def _validated_batch_map(
     bundle: EvidenceBundle,
     batches: list[dict[str, object]],
-) -> str:
-    """Assemble the fixed report using only validated model text and bundle numbers."""
+) -> dict[str, dict[str, object]]:
     validated = [validate_section_batch(batch, bundle) for batch in batches]
     by_id: dict[str, dict[str, object]] = {}
     for batch in validated:
@@ -289,6 +290,47 @@ def assemble_report(
             raise ValueError(f"missing_batch_id:{batch_id}")
     if len(by_id) != 3:
         raise ValueError("unexpected_report_batch_count")
+    return by_id
+
+
+def _expected_evidence_lines(
+    bundle: EvidenceBundle,
+    by_id: dict[str, dict[str, object]],
+) -> list[str]:
+    evidence_ids: list[str] = []
+
+    def append_from(items: list[dict[str, object]]) -> None:
+        for item in items:
+            evidence_ids.extend(cast(list[str], item["evidenceIds"]))
+
+    strategy = by_id["strategy"]
+    performance = by_id["performance"]
+    execution = by_id["execution"]
+    for section in ("strategy", "business", "content"):
+        append_from(_claims_for_section(strategy, section))
+    for section in ("traffic", "data"):
+        append_from(_claims_for_section(performance, section))
+    append_from(cast(list[dict[str, object]], execution["topicDirections"]))
+    append_from(cast(list[dict[str, object]], execution["filmingTemplates"]))
+    append_from(cast(list[dict[str, object]], execution["conversionItems"]))
+    append_from(
+        sorted(
+            cast(list[dict[str, object]], execution["executionDays"]),
+            key=lambda item: _integer(item.get("day")),
+        )
+    )
+    return [
+        f"  - {render_evidence_reference(evidence_id, bundle)}"
+        for evidence_id in evidence_ids
+    ]
+
+
+def assemble_report(
+    bundle: EvidenceBundle,
+    batches: list[dict[str, object]],
+) -> str:
+    """Assemble the fixed report using only validated model text and bundle numbers."""
+    by_id = _validated_batch_map(bundle, batches)
 
     strategy = by_id["strategy"]
     performance = by_id["performance"]
@@ -361,9 +403,14 @@ def _append_once(errors: list[str], error: str) -> None:
         errors.append(error)
 
 
-def validate_final_report(markdown: str, bundle: EvidenceBundle) -> list[str]:
+def validate_final_report(
+    markdown: str,
+    bundle: EvidenceBundle,
+    batches: list[dict[str, object]],
+) -> list[str]:
     """Return stable final-report errors for structure, evidence, and numeric leaks."""
     errors: list[str] = []
+    by_id = _validated_batch_map(bundle, batches)
     lines, active, found_fence = _active_lines(markdown)
     if found_fence:
         errors.append("forbidden_code_fence")
@@ -406,6 +453,79 @@ def validate_final_report(markdown: str, bundle: EvidenceBundle) -> list[str]:
         if (line.startswith("# ") or line.startswith("## ")) and line not in expected_heading_set:
             _append_once(errors, f"unexpected_heading:{line.lstrip('# ')}")
 
+    subsection_headings = (
+        "### 选题方向",
+        "### 拍法模板",
+        "### 转化与承接",
+    )
+    subsection_positions = {
+        heading: [
+            index
+            for index, line in enumerate(lines)
+            if index in active and line == heading
+        ]
+        for heading in subsection_headings
+    }
+    recommendation_start = (
+        heading_positions[expected_headings[10]][0]
+        if len(heading_positions[expected_headings[10]]) == 1
+        else None
+    )
+    execution_start = (
+        heading_positions[expected_headings[11]][0]
+        if len(heading_positions[expected_headings[11]]) == 1
+        else None
+    )
+    for heading in subsection_headings:
+        label = heading.lstrip("# ")
+        positions = subsection_positions[heading]
+        if not positions:
+            errors.append(f"missing_subsection:{label}")
+        elif len(positions) > 1:
+            errors.append(f"duplicate_subsection:{label}")
+        if (
+            recommendation_start is not None
+            and execution_start is not None
+            and any(
+                not recommendation_start < position < execution_start
+                for position in positions
+            )
+        ):
+            _append_once(errors, f"subsection_outside_section:{label}")
+    subsection_first_positions = [
+        subsection_positions[heading][0]
+        for heading in subsection_headings
+        if subsection_positions[heading]
+    ]
+    if subsection_first_positions != sorted(subsection_first_positions):
+        errors.append("subsection_out_of_order:对标建议")
+
+    day_positions: dict[int, list[int]] = {
+        day: [
+            index
+            for index, line in enumerate(lines)
+            if index in active and line == f"### 第 {day} 天"
+        ]
+        for day in range(1, 8)
+    }
+    for day, positions in day_positions.items():
+        if not positions:
+            errors.append(f"missing_execution_day:{day}")
+        elif len(positions) > 1:
+            errors.append(f"duplicate_execution_day:{day}")
+        if (
+            execution_start is not None
+            and any(position <= execution_start for position in positions)
+        ):
+            _append_once(errors, f"execution_day_outside_section:{day}")
+    day_first_positions = [
+        day_positions[day][0]
+        for day in range(1, 8)
+        if day_positions[day]
+    ]
+    if day_first_positions != sorted(day_first_positions):
+        errors.append("execution_days_out_of_order")
+
     deterministic_bodies = {
         1: _account_overview(bundle),
         5: _ranking_table(bundle, "overall"),
@@ -428,18 +548,22 @@ def validate_final_report(markdown: str, bundle: EvidenceBundle) -> list[str]:
 
     known_ids = set(_items_by_id(bundle))
     evidence_lines: set[int] = set()
+    actual_evidence_lines: list[str] = []
     for index in sorted(active):
-        evidence_ids = _EVIDENCE_ID_PATTERN.findall(lines[index])
-        if not evidence_ids:
+        match = _EVIDENCE_LINE_PATTERN.match(lines[index])
+        if match is None:
             continue
         evidence_lines.add(index)
-        for evidence_id in evidence_ids:
-            if evidence_id not in known_ids:
-                _append_once(errors, f"unknown_evidence_id:{evidence_id}")
-                continue
-            expected_line = f"  - {render_evidence_reference(evidence_id, bundle)}"
-            if lines[index] != expected_line:
-                _append_once(errors, f"evidence_reference_mismatch:{evidence_id}")
+        actual_evidence_lines.append(lines[index])
+        evidence_id = match.group("evidence_id")
+        if evidence_id not in known_ids:
+            _append_once(errors, f"unknown_evidence_id:{evidence_id}")
+            continue
+        expected_line = f"  - {render_evidence_reference(evidence_id, bundle)}"
+        if lines[index] != expected_line:
+            _append_once(errors, f"evidence_reference_mismatch:{evidence_id}")
+    if actual_evidence_lines != _expected_evidence_lines(bundle, by_id):
+        errors.append("evidence_reference_sequence_mismatch")
 
     heading_line_indexes = {
         position
@@ -447,7 +571,9 @@ def validate_final_report(markdown: str, bundle: EvidenceBundle) -> list[str]:
         for position in positions
     }
     execution_heading = re.compile(r"^### 第 [1-7] 天$")
-    numbered_item = re.compile(r"^\d+\.\s*")
+    topic_position = subsection_positions["### 选题方向"]
+    filming_position = subsection_positions["### 拍法模板"]
+    conversion_position = subsection_positions["### 转化与承接"]
     for index in sorted(active):
         if (
             index in deterministic_lines
@@ -456,7 +582,19 @@ def validate_final_report(markdown: str, bundle: EvidenceBundle) -> list[str]:
             or execution_heading.fullmatch(lines[index])
         ):
             continue
-        model_line = numbered_item.sub("", lines[index], count=1)
+        model_line = lines[index]
+        if (
+            len(topic_position) == 1
+            and len(filming_position) == 1
+            and topic_position[0] < index < filming_position[0]
+        ):
+            model_line = re.sub(r"^[1-5]\. (?=\*\*)", "", model_line, count=1)
+        elif (
+            len(filming_position) == 1
+            and len(conversion_position) == 1
+            and filming_position[0] < index < conversion_position[0]
+        ):
+            model_line = re.sub(r"^[1-3]\. (?=\*\*)", "", model_line, count=1)
         for claim in untrusted_numeric_claims(model_line):
             _append_once(errors, f"untrusted_numeric_claim:{claim}")
         for phrase in medical_compliance_violations(model_line):
