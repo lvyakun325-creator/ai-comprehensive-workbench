@@ -32,13 +32,74 @@ function fixtureInput() {
 }
 
 function validBatch(batchId = "strategy") {
-  return {
-    batchId,
-    claims: [],
+  const emptyRecommendations = {
     topicDirections: [],
     filmingTemplates: [],
     conversionItems: [],
     executionDays: [],
+  };
+  if (batchId === "strategy") {
+    return {
+      batchId,
+      claims: [
+        {
+          section: "strategy",
+          statement: "标题呈现生活化健康管理表达",
+          strength: "direct",
+          evidenceIds: ["DY-E0001"],
+          rationale: "判断直接来自输入标题",
+        },
+      ],
+      ...emptyRecommendations,
+    };
+  }
+  if (batchId === "performance") {
+    return {
+      batchId,
+      claims: [
+        {
+          section: "traffic",
+          statement: "该作品进入输入提供的高互动样本",
+          strength: "weak",
+          evidenceIds: ["DY-E0001"],
+          rationale: "仅依据输入证据的既有排名标签",
+          verificationPlan: "结合后续同口径样本继续核验",
+        },
+      ],
+      ...emptyRecommendations,
+    };
+  }
+  const evidenceFields = {
+    evidenceIds: ["DY-E0001"],
+    complianceNotes: ["不承诺疗效"],
+  };
+  const topicLabels = ["一", "二", "三", "四", "五"];
+  const filmingLabels = ["一", "二", "三"];
+  return {
+    batchId,
+    claims: [],
+    topicDirections: Array.from({ length: 5 }, (_, index) => ({
+      title: `选题方向${topicLabels[index]}`,
+      angle: "从日常管理场景切入",
+      ...evidenceFields,
+    })),
+    filmingTemplates: Array.from({ length: 3 }, (_, index) => ({
+      name: `拍摄模板${filmingLabels[index]}`,
+      hook: "用生活场景自然开场",
+      structure: ["提出日常问题", "给出管理提醒"],
+      ...evidenceFields,
+    })),
+    conversionItems: [
+      {
+        action: "提供健康档案与日常提醒服务",
+        ...evidenceFields,
+      },
+    ],
+    executionDays: Array.from({ length: 7 }, (_, index) => ({
+      day: index + 1,
+      action: "整理素材并完成发布复盘",
+      ...evidenceFields,
+    })),
   };
 }
 
@@ -71,8 +132,14 @@ test("strategy prompt isolates untrusted evidence and states the exact validated
   assert.equal(turns[1].role, "user");
   assert.match(turns[0].content, /不得重新计算或修改排名/);
   assert.match(turns[0].content, /strategy、business、content/);
-  assert.match(turns[0].content, /不得生成任何数字/);
-  assert.match(turns[0].content, /只能引用输入中存在的 evidenceId/);
+  assert.match(turns[0].content, /不得生成证据数值、排名或数字结论/);
+  assert.match(
+    turns[0].content,
+    /只能原样复制输入中存在的 DY-E 格式 evidenceId/,
+  );
+  assert.match(turns[0].content, /对象不得包含额外字段/);
+  assert.match(turns[0].content, /evidenceIds.*非空字符串数组/);
+  assert.match(turns[0].content, /rationale.*非空字符串/);
   assert.match(turns[0].content, /不得返回 Markdown|不要返回 Markdown/);
   assert.match(turns[0].content, /不可信数据/);
   assert.match(turns[1].content, /DY-E0001/);
@@ -89,6 +156,8 @@ test("performance and execution prompts enforce their distinct section and recom
   assert.match(execution[0].content, /topicDirections 必须恰好 5 项/);
   assert.match(execution[0].content, /filmingTemplates 必须恰好 3 项/);
   assert.match(execution[0].content, /executionDays 必须覆盖 day 1 到 7/);
+  assert.match(execution[0].content, /structure.*非空字符串数组/);
+  assert.match(execution[0].content, /complianceNotes.*非空字符串数组/);
 });
 
 test("prompt rejects unknown batches and sanitized input above 80000 characters", () => {
@@ -109,18 +178,23 @@ test("prompt rejects unknown batches and sanitized input above 80000 characters"
   );
 });
 
-test("parser accepts only a whole JSON object or one json fence and returns ordinary records", () => {
+test("parser accepts each complete formal batch shape and returns ordinary records", () => {
   assert.deepEqual(
     parseCompetitorBatchResponse(
-      '```json\n{"batchId":"strategy","claims":[]}\n```',
+      `\`\`\`json\n${JSON.stringify(validBatch("strategy"))}\n\`\`\``,
     ),
-    { batchId: "strategy", claims: [] },
+    validBatch("strategy"),
   );
-  const parsed = parseCompetitorBatchResponse(
-    '{"batchId":"performance","claims":[]}',
-  );
-  assert.equal(Object.getPrototypeOf(parsed), Object.prototype);
+  for (const batchId of ["strategy", "performance", "execution"]) {
+    const parsed = parseCompetitorBatchResponse(
+      JSON.stringify(validBatch(batchId)),
+    );
+    assert.deepEqual(parsed, validBatch(batchId));
+    assert.equal(Object.getPrototypeOf(parsed), Object.prototype);
+  }
+});
 
+test("parser rejects non-whole JSON, dangerous keys and unknown batches", () => {
   for (const text of [
     "",
     "模型解释：{\"batchId\":\"strategy\"}",
@@ -140,6 +214,55 @@ test("parser accepts only a whole JSON object or one json fence and returns ordi
     );
   }
   assert.equal({}.polluted, undefined);
+});
+
+test("parser rejects formal-schema violations before a batch can succeed", () => {
+  const mutations = [
+    (batch) => {
+      batch.extra = true;
+    },
+    (batch) => {
+      batch.claims[0].extra = true;
+    },
+    (batch) => {
+      batch.claims[0].evidenceIds = [];
+    },
+    (batch) => {
+      batch.claims[0].rationale = "";
+    },
+    (batch) => {
+      batch.claims[0].section = "traffic";
+    },
+    (batch) => {
+      batch.claims[0].strength = "weak";
+      delete batch.claims[0].verificationPlan;
+    },
+    (batch) => {
+      batch.topicDirections.pop();
+    },
+    (batch) => {
+      batch.topicDirections[0].complianceNotes = [];
+    },
+    (batch) => {
+      batch.filmingTemplates[0].structure = [];
+    },
+    (batch) => {
+      batch.executionDays[6].day = 6;
+    },
+  ];
+
+  for (const [index, mutate] of mutations.entries()) {
+    const batch =
+      index < 6 ? structuredClone(validBatch("strategy")) : validBatch("execution");
+    mutate(batch);
+    assert.throws(
+      () => parseCompetitorBatchResponse(JSON.stringify(batch)),
+      (error) =>
+        error instanceof CompetitorReportRuntimeError
+        && error.code === "INVALID_MODEL_OUTPUT",
+      `mutation ${index}`,
+    );
+  }
 });
 
 test("generation sends a fixed bounded request with redirects disabled and parses the batch", async () => {
@@ -172,6 +295,19 @@ test("generation sends a fixed bounded request with redirects disabled and parse
     ["system", "user"],
   );
   assert.doesNotMatch(captured.init.body, /api[_-]?key|authorization|secret/i);
+});
+
+test("generation binds the returned batch to the requested batch", async () => {
+  await assert.rejects(
+    generateCompetitorBatch(config(), fixtureInput(), {
+      batchId: "strategy",
+      fetchImpl: async () =>
+        chatResponse(JSON.stringify(validBatch("performance"))),
+    }),
+    (error) =>
+      error instanceof CompetitorReportRuntimeError
+      && error.code === "INVALID_MODEL_OUTPUT",
+  );
 });
 
 test("browser-direct generation accepts only the existing exact APINebula HTTPS hosts", async () => {
@@ -368,4 +504,35 @@ test("generation cancels oversized or malformed upstream JSON without leaking it
       return true;
     },
   );
+});
+
+test("provider cancel rejection never replaces the stable oversized-response error", async () => {
+  let canceled = false;
+  let chunksSent = 0;
+  const response = new Response(
+    new ReadableStream({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(70 * 1024).fill(120));
+        chunksSent += 1;
+        if (chunksSent > 3) controller.close();
+      },
+      cancel() {
+        canceled = true;
+        throw new Error(`cancel cleanup ${FAKE_KEY}`);
+      },
+    }),
+  );
+
+  await assert.rejects(
+    generateCompetitorBatch(config(), fixtureInput(), {
+      batchId: "strategy",
+      fetchImpl: async () => response,
+    }),
+    (error) => {
+      assert.equal(error.code, "PROVIDER_RESPONSE_TOO_LARGE");
+      assert.doesNotMatch(error.message, /cancel cleanup|sk-competitor/);
+      return true;
+    },
+  );
+  assert.equal(canceled, true);
 });

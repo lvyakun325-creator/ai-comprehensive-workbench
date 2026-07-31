@@ -38,11 +38,35 @@ function request(body = payload(), signal) {
 function validBatch() {
   return {
     batchId: "strategy",
-    claims: [],
+    claims: [
+      {
+        section: "strategy",
+        statement: "标题呈现生活化健康管理表达",
+        strength: "direct",
+        evidenceIds: ["DY-E0001"],
+        rationale: "判断直接来自输入标题",
+      },
+    ],
     topicDirections: [],
     filmingTemplates: [],
     conversionItems: [],
     executionDays: [],
+  };
+}
+
+function performanceBatch() {
+  return {
+    ...validBatch(),
+    batchId: "performance",
+    claims: [
+      {
+        section: "traffic",
+        statement: "该作品属于输入提供的高互动样本",
+        strength: "direct",
+        evidenceIds: ["DY-E0001"],
+        rationale: "判断直接来自输入证据",
+      },
+    ],
   };
 }
 
@@ -89,6 +113,16 @@ test("route success is minimal no-store JSON and forces the server-only endpoint
   assert.deepEqual(await response.json(), { ok: true, batch: validBatch() });
   assert.equal(captured.url, "https://api.openai.com/v1/chat/completions");
   assert.equal(captured.init.redirect, "error");
+});
+
+test("route rejects a schema-valid provider batch that does not match the request", async () => {
+  const handler = createCompetitorReportRoute({
+    fetchImpl: async () => upstream(JSON.stringify(performanceBatch())),
+  });
+
+  const response = await handler(request());
+  assert.equal(response.status, 502);
+  assert.match(await response.text(), /INVALID_MODEL_OUTPUT/);
 });
 
 test("route rejects oversized declared and chunked requests before provider access", async () => {
@@ -331,4 +365,105 @@ test("malformed request JSON never reflects the request body", async () => {
   assert.equal(response.status, 400);
   assert.match(text, /INVALID_JSON/);
   assert.doesNotMatch(text, /sk-competitor/);
+});
+
+test("stalled request body responds to caller abort with 499", async () => {
+  const caller = new AbortController();
+  let pullStarted;
+  const started = new Promise((resolve) => {
+    pullStarted = resolve;
+  });
+  const stalled = new ReadableStream({
+    pull() {
+      pullStarted();
+      return new Promise(() => {});
+    },
+  });
+  const handler = createCompetitorReportRoute({
+    requestBodyTimeoutMs: 1_000,
+  });
+  const responsePromise = handler(
+    new Request(
+      "https://workbench.example/api/agents/competitor-insight",
+      {
+        method: "POST",
+        body: stalled,
+        duplex: "half",
+        signal: caller.signal,
+      },
+    ),
+  );
+  await started;
+  caller.abort();
+
+  const response = await Promise.race([
+    responsePromise,
+    new Promise((resolve) =>
+      setTimeout(() => resolve("still-pending"), 100),
+    ),
+  ]);
+  assert.notEqual(response, "still-pending");
+  assert.equal(response.status, 499);
+  assert.match(await response.text(), /REQUEST_CANCELLED/);
+});
+
+test("stalled request body has a finite injectable read timeout", async () => {
+  const handler = createCompetitorReportRoute({
+    requestBodyTimeoutMs: 5,
+  });
+  const response = await Promise.race([
+    handler(
+      new Request(
+        "https://workbench.example/api/agents/competitor-insight",
+        {
+          method: "POST",
+          body: new ReadableStream({
+            pull() {
+              return new Promise(() => {});
+            },
+          }),
+          duplex: "half",
+        },
+      ),
+    ),
+    new Promise((resolve) =>
+      setTimeout(() => resolve("still-pending"), 100),
+    ),
+  ]);
+
+  assert.notEqual(response, "still-pending");
+  assert.equal(response.status, 408);
+  assert.match(await response.text(), /REQUEST_BODY_TIMEOUT/);
+});
+
+test("request body cancel rejection never replaces the stable size error", async () => {
+  let canceled = false;
+  let chunksSent = 0;
+  const handler = createCompetitorReportRoute();
+  const response = await handler(
+    new Request(
+      "https://workbench.example/api/agents/competitor-insight",
+      {
+        method: "POST",
+        body: new ReadableStream({
+          pull(controller) {
+            controller.enqueue(new Uint8Array(70 * 1024).fill(120));
+            chunksSent += 1;
+            if (chunksSent > 3) controller.close();
+          },
+          cancel() {
+            canceled = true;
+            throw new Error(`request cleanup ${FAKE_KEY}`);
+          },
+        }),
+        duplex: "half",
+      },
+    ),
+  );
+  const text = await response.text();
+
+  assert.equal(response.status, 413);
+  assert.match(text, /REQUEST_TOO_LARGE/);
+  assert.doesNotMatch(text, /request cleanup|sk-competitor/);
+  assert.equal(canceled, true);
 });

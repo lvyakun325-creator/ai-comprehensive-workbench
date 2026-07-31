@@ -6,15 +6,24 @@ import {
 } from "../../../lib/competitor-report-runtime";
 import type { GlobalTextConfig } from "../../../lib/global-model-runtime";
 
-type RouteOptions = Omit<CompetitorReportRuntimeOptions, "batchId">;
+type RouteOptions = Omit<CompetitorReportRuntimeOptions, "batchId"> & {
+  requestBodyTimeoutMs?: number;
+};
 
 const MAX_REQUEST_BYTES = 128 * 1024;
+const DEFAULT_REQUEST_BODY_TIMEOUT_MS = 30_000;
 const NO_STORE_HEADERS = {
   "cache-control": "no-store",
   "content-type": "application/json; charset=utf-8",
 };
 
 export function createCompetitorReportRoute(options: RouteOptions = {}) {
+  const {
+    requestBodyTimeoutMs = DEFAULT_REQUEST_BODY_TIMEOUT_MS,
+    ...runtimeOptions
+  } = options;
+  const bodyTimeoutMs = validBodyTimeout(requestBodyTimeoutMs);
+
   return async function handleCompetitorReportRequest(
     request: Request,
   ): Promise<Response> {
@@ -27,12 +36,12 @@ export function createCompetitorReportRoute(options: RouteOptions = {}) {
     }
 
     try {
-      const payload = await parseRequest(request);
+      const payload = await parseRequest(request, bodyTimeoutMs);
       const batch = await generateCompetitorBatch(
         payload.config as GlobalTextConfig,
         payload.input as Record<string, unknown>,
         {
-          ...options,
+          ...runtimeOptions,
           batchId: payload.batchId as CompetitorBatchId,
           signal: request.signal,
           egressMode: "server-proxy",
@@ -63,6 +72,7 @@ class RouteRequestError extends Error {
       | "INVALID_JSON"
       | "INVALID_REQUEST"
       | "REQUEST_CANCELLED"
+      | "REQUEST_BODY_TIMEOUT"
       | "REQUEST_TOO_LARGE",
     message: string,
     readonly status: number,
@@ -74,6 +84,7 @@ class RouteRequestError extends Error {
 
 async function parseRequest(
   request: Request,
+  timeoutMs: number,
 ): Promise<Record<string, unknown>> {
   const declaredLength = Number(request.headers.get("content-length"));
   if (
@@ -86,7 +97,7 @@ async function parseRequest(
       413,
     );
   }
-  const text = await readRequestBody(request);
+  const text = await readRequestBody(request, timeoutMs);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -99,7 +110,13 @@ async function parseRequest(
   return parsed;
 }
 
-async function readRequestBody(request: Request): Promise<string> {
+async function readRequestBody(
+  request: Request,
+  timeoutMs: number,
+): Promise<string> {
+  if (request.signal.aborted) {
+    throw requestCancelled();
+  }
   if (!request.body) {
     throw new RouteRequestError("INVALID_REQUEST", "请求参数无效。", 400);
   }
@@ -107,13 +124,25 @@ async function readRequestBody(request: Request): Promise<string> {
   const decoder = new TextDecoder();
   const chunks: string[] = [];
   let receivedBytes = 0;
+  let timedOut = false;
+  const cancelRead = () => {
+    cancelReader(reader);
+  };
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    cancelRead();
+  }, timeoutMs);
+  request.signal.addEventListener("abort", cancelRead, { once: true });
+
   try {
     while (true) {
       const { done, value } = await reader.read();
+      if (request.signal.aborted) throw requestCancelled();
+      if (timedOut) throw requestBodyTimeout();
       if (done) break;
       receivedBytes += value.byteLength;
       if (receivedBytes > MAX_REQUEST_BYTES) {
-        await reader.cancel();
+        cancelReader(reader);
         throw new RouteRequestError(
           "REQUEST_TOO_LARGE",
           "请求内容过大，请精简后重试。",
@@ -125,18 +154,51 @@ async function readRequestBody(request: Request): Promise<string> {
     chunks.push(decoder.decode());
     return chunks.join("");
   } catch (error) {
+    if (request.signal.aborted) throw requestCancelled();
+    if (timedOut) throw requestBodyTimeout();
     if (error instanceof RouteRequestError) throw error;
-    if (request.signal.aborted) {
-      throw new RouteRequestError(
-        "REQUEST_CANCELLED",
-        "本次生成已取消。",
-        499,
-      );
-    }
     throw new RouteRequestError("INVALID_REQUEST", "请求参数无效。", 400);
   } finally {
-    reader.releaseLock();
+    clearTimeout(timeout);
+    request.signal.removeEventListener("abort", cancelRead);
+    try {
+      reader.releaseLock();
+    } catch {
+      // Cleanup failure must not replace the stable route result.
+    }
   }
+}
+
+function requestCancelled(): RouteRequestError {
+  return new RouteRequestError(
+    "REQUEST_CANCELLED",
+    "本次生成已取消。",
+    499,
+  );
+}
+
+function requestBodyTimeout(): RouteRequestError {
+  return new RouteRequestError(
+    "REQUEST_BODY_TIMEOUT",
+    "请求内容读取超时。",
+    408,
+  );
+}
+
+function cancelReader(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): void {
+  try {
+    void reader.cancel().catch(() => undefined);
+  } catch {
+    // Cleanup failure must not replace the stable route result.
+  }
+}
+
+function validBodyTimeout(value: number): number {
+  return Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_REQUEST_BODY_TIMEOUT_MS;
 }
 
 function json(body: unknown, status: number): Response {
