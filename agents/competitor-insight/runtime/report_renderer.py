@@ -10,6 +10,7 @@ from contracts import EvidenceBundle
 from section_validator import (
     STRENGTH_LABELS,
     medical_compliance_violations,
+    untrusted_numeric_claims,
     validate_section_batch,
 )
 
@@ -31,7 +32,6 @@ _SECTION_HEADINGS = (
 _TABLE_HEADER = "| 排名 | 标题 | 点赞 | 评论 | 收藏 | 分享 | 综合互动量 |"
 _TABLE_DIVIDER = "| ---: | --- | ---: | ---: | ---: | ---: | ---: |"
 _EVIDENCE_ID_PATTERN = re.compile(r"\bDY-E\d{4,}\b")
-_NUMERIC_TOKEN_PATTERN = re.compile(r"(?<![A-Za-z])\d[\d,]*(?:\.\d+)?%?")
 _MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+|>])")
 
 
@@ -157,11 +157,15 @@ def _render_claims(claims: list[dict[str, object]], bundle: EvidenceBundle) -> s
     return "\n".join(lines)
 
 
-def _partition(values: list[dict[str, object]], count: int) -> list[list[dict[str, object]]]:
-    result = [[] for _ in range(count)]
-    for index, value in enumerate(values):
-        result[min(index, count - 1)].append(value)
-    return result
+def _claims_for_section(
+    batch: dict[str, object],
+    section: str,
+) -> list[dict[str, object]]:
+    return [
+        claim
+        for claim in cast(list[dict[str, object]], batch["claims"])
+        if claim.get("section") == section
+    ]
 
 
 def _format_metric(name: str, value: object) -> str:
@@ -239,10 +243,6 @@ def _recommendations(batch: dict[str, object], bundle: EvidenceBundle) -> str:
         notes = cast(list[str], item.get("complianceNotes", []))
         lines.append(f"  - 合规提示：{_safe_text('；'.join(notes))}")
 
-    claims = cast(list[dict[str, object]], batch.get("claims", []))
-    if claims:
-        lines.append("\n### 转化假设")
-        lines.append(_render_claims(claims, bundle))
     return "\n".join(lines)
 
 
@@ -261,45 +261,69 @@ def _execution_plan(batch: dict[str, object], bundle: EvidenceBundle) -> str:
     return "\n".join(lines)
 
 
+def _special_rankings(bundle: EvidenceBundle) -> str:
+    return (
+        "### 高收藏 Top 5\n"
+        + _ranking_table(bundle, "collect")
+        + "\n\n### 高分享 Top 5\n"
+        + _ranking_table(bundle, "share")
+        + "\n\n### 高评论 Top 5\n"
+        + _ranking_table(bundle, "comment")
+    )
+
+
 def assemble_report(
     bundle: EvidenceBundle,
     batches: list[dict[str, object]],
 ) -> str:
     """Assemble the fixed report using only validated model text and bundle numbers."""
     validated = [validate_section_batch(batch, bundle) for batch in batches]
-    by_id = {str(batch["batchId"]): batch for batch in validated}
-    strategy = by_id.get("strategy", validated[0] if validated else None)
-    traffic = by_id.get("traffic", validated[1] if len(validated) > 1 else None)
-    recommendation = by_id.get("recommendations")
-    if strategy is None or traffic is None or recommendation is None:
-        raise ValueError("required_report_batches_missing")
+    by_id: dict[str, dict[str, object]] = {}
+    for batch in validated:
+        batch_id = str(batch["batchId"])
+        if batch_id in by_id:
+            raise ValueError(f"duplicate_batch_id:{batch_id}")
+        by_id[batch_id] = batch
+    for batch_id in ("strategy", "performance", "execution"):
+        if batch_id not in by_id:
+            raise ValueError(f"missing_batch_id:{batch_id}")
+    if len(by_id) != 3:
+        raise ValueError("unexpected_report_batch_count")
 
-    strategy_parts = _partition(cast(list[dict[str, object]], strategy["claims"]), 3)
-    traffic_parts = _partition(cast(list[dict[str, object]], traffic["claims"]), 2)
+    strategy = by_id["strategy"]
+    performance = by_id["performance"]
+    execution = by_id["execution"]
     account = bundle.get("account", {})
     nickname = _safe_text(account.get("nickname", "未命名账号"))
 
     sections = (
         (_SECTION_HEADINGS[0].format(nickname=nickname), ""),
         (_SECTION_HEADINGS[1], _account_overview(bundle)),
-        (_SECTION_HEADINGS[2], _render_claims(strategy_parts[0], bundle)),
-        (_SECTION_HEADINGS[3], _render_claims(strategy_parts[1], bundle)),
-        (_SECTION_HEADINGS[4], _render_claims(strategy_parts[2], bundle)),
+        (
+            _SECTION_HEADINGS[2],
+            _render_claims(_claims_for_section(strategy, "strategy"), bundle),
+        ),
+        (
+            _SECTION_HEADINGS[3],
+            _render_claims(_claims_for_section(strategy, "business"), bundle),
+        ),
+        (
+            _SECTION_HEADINGS[4],
+            _render_claims(_claims_for_section(strategy, "content"), bundle),
+        ),
         (_SECTION_HEADINGS[5], _ranking_table(bundle, "overall")),
         (_SECTION_HEADINGS[6], _ranking_table(bundle, "startup")),
+        (_SECTION_HEADINGS[7], _special_rankings(bundle)),
         (
-            _SECTION_HEADINGS[7],
-            "### 高收藏 Top 5\n"
-            + _ranking_table(bundle, "collect")
-            + "\n\n### 高分享 Top 5\n"
-            + _ranking_table(bundle, "share")
-            + "\n\n### 高评论 Top 5\n"
-            + _ranking_table(bundle, "comment"),
+            _SECTION_HEADINGS[8],
+            _render_claims(_claims_for_section(performance, "traffic"), bundle),
         ),
-        (_SECTION_HEADINGS[8], _render_claims(traffic_parts[0], bundle)),
-        (_SECTION_HEADINGS[9], _render_claims(traffic_parts[1], bundle)),
-        (_SECTION_HEADINGS[10], _recommendations(recommendation, bundle)),
-        (_SECTION_HEADINGS[11], _execution_plan(recommendation, bundle)),
+        (
+            _SECTION_HEADINGS[9],
+            _render_claims(_claims_for_section(performance, "data"), bundle),
+        ),
+        (_SECTION_HEADINGS[10], _recommendations(execution, bundle)),
+        (_SECTION_HEADINGS[11], _execution_plan(execution, bundle)),
     )
     return "\n\n".join(
         heading if not body else f"{heading}\n\n{body}"
@@ -307,72 +331,134 @@ def assemble_report(
     ) + "\n"
 
 
-def _allowed_numeric_tokens(bundle: EvidenceBundle) -> set[str]:
-    allowed = {str(value) for value in range(1, 11)}
+def _active_lines(markdown: str) -> tuple[list[str], set[int], bool]:
+    lines = markdown.splitlines()
+    active: set[int] = set()
+    in_fence = False
+    found_fence = False
+    fence_marker = ""
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not in_fence and (stripped.startswith("```") or stripped.startswith("~~~")):
+            in_fence = True
+            found_fence = True
+            fence_marker = stripped[:3]
+            continue
+        if in_fence and stripped.startswith(fence_marker):
+            in_fence = False
+            continue
+        if not in_fence:
+            active.add(index)
+    return lines, active, found_fence
 
-    def add(value: object) -> None:
-        if isinstance(value, bool) or value is None:
-            return
-        if isinstance(value, int):
-            allowed.update((str(value), f"{value:,}"))
-        elif isinstance(value, float):
-            allowed.update(
-                (
-                    str(value),
-                    f"{value:,.2f}",
-                    f"{value:.1%}",
-                )
-            )
-        elif isinstance(value, str):
-            allowed.update(_NUMERIC_TOKEN_PATTERN.findall(value))
-        elif isinstance(value, dict):
-            for nested in value.values():
-                add(nested)
-        elif isinstance(value, list):
-            for nested in value:
-                add(nested)
 
-    add(bundle)
-    return allowed
+def _section_body(lines: list[str], start: int, end: int) -> str:
+    return "\n".join(lines[start + 1 : end]).strip()
+
+
+def _append_once(errors: list[str], error: str) -> None:
+    if error not in errors:
+        errors.append(error)
 
 
 def validate_final_report(markdown: str, bundle: EvidenceBundle) -> list[str]:
     """Return stable final-report errors for structure, evidence, and numeric leaks."""
     errors: list[str] = []
+    lines, active, found_fence = _active_lines(markdown)
+    if found_fence:
+        errors.append("forbidden_code_fence")
     account = bundle.get("account", {})
     nickname = _safe_text(account.get("nickname", "未命名账号"))
     expected_headings = [
         heading.format(nickname=nickname) if "{nickname}" in heading else heading
         for heading in _SECTION_HEADINGS
     ]
-    cursor = -1
+    heading_positions: dict[str, list[int]] = {
+        heading: [
+            index
+            for index, line in enumerate(lines)
+            if index in active and line == heading
+        ]
+        for heading in expected_headings
+    }
     for heading in expected_headings:
-        position = markdown.find(heading)
-        if position < 0:
+        positions = heading_positions[heading]
+        if not positions:
             label = heading.lstrip("# ")
             if label.startswith("抖音账号分析报告"):
                 errors.append("missing_section:报告标题")
             else:
                 errors.append(f"missing_section:{label}")
-        elif position <= cursor:
-            errors.append(f"section_out_of_order:{heading.lstrip('# ')}")
-        else:
-            cursor = position
+        elif len(positions) > 1:
+            errors.append(f"duplicate_section:{heading.lstrip('# ')}")
 
-    if markdown.count(_TABLE_HEADER) < 5:
-        errors.append("missing_ranking_table")
+    present_positions = [
+        heading_positions[heading][0]
+        for heading in expected_headings
+        if heading_positions[heading]
+    ]
+    if present_positions != sorted(present_positions):
+        errors.append("section_out_of_order")
+
+    expected_heading_set = set(expected_headings)
+    for index in sorted(active):
+        line = lines[index]
+        if (line.startswith("# ") or line.startswith("## ")) and line not in expected_heading_set:
+            _append_once(errors, f"unexpected_heading:{line.lstrip('# ')}")
+
+    deterministic_bodies = {
+        1: _account_overview(bundle),
+        5: _ranking_table(bundle, "overall"),
+        6: _ranking_table(bundle, "startup"),
+        7: _special_rankings(bundle),
+    }
+    deterministic_lines: set[int] = set()
+    for heading_index, expected_body in deterministic_bodies.items():
+        heading = expected_headings[heading_index]
+        next_heading = expected_headings[heading_index + 1]
+        if len(heading_positions[heading]) != 1 or len(heading_positions[next_heading]) != 1:
+            continue
+        start = heading_positions[heading][0]
+        end = heading_positions[next_heading][0]
+        deterministic_lines.update(range(start, end))
+        if _section_body(lines, start, end) != expected_body:
+            errors.append(
+                f"deterministic_block_mismatch:{heading.lstrip('# ')}"
+            )
 
     known_ids = set(_items_by_id(bundle))
-    for evidence_id in sorted(set(_EVIDENCE_ID_PATTERN.findall(markdown))):
-        if evidence_id not in known_ids:
-            errors.append(f"unknown_evidence_id:{evidence_id}")
+    evidence_lines: set[int] = set()
+    for index in sorted(active):
+        evidence_ids = _EVIDENCE_ID_PATTERN.findall(lines[index])
+        if not evidence_ids:
+            continue
+        evidence_lines.add(index)
+        for evidence_id in evidence_ids:
+            if evidence_id not in known_ids:
+                _append_once(errors, f"unknown_evidence_id:{evidence_id}")
+                continue
+            expected_line = f"  - {render_evidence_reference(evidence_id, bundle)}"
+            if lines[index] != expected_line:
+                _append_once(errors, f"evidence_reference_mismatch:{evidence_id}")
 
-    allowed_numbers = _allowed_numeric_tokens(bundle)
-    for token in _NUMERIC_TOKEN_PATTERN.findall(markdown):
-        if token not in allowed_numbers:
-            error = f"untrusted_numeric_claim:{token}"
-            if error not in errors:
-                errors.append(error)
-    for phrase in medical_compliance_violations(markdown):
-        errors.append(f"medical_compliance_violation:{phrase}")
+    heading_line_indexes = {
+        position
+        for positions in heading_positions.values()
+        for position in positions
+    }
+    execution_heading = re.compile(r"^### 第 [1-7] 天$")
+    numbered_item = re.compile(r"^\d+\.\s*")
+    for index in sorted(active):
+        if (
+            index in deterministic_lines
+            or index in heading_line_indexes
+            or index in evidence_lines
+            or execution_heading.fullmatch(lines[index])
+        ):
+            continue
+        model_line = numbered_item.sub("", lines[index], count=1)
+        for claim in untrusted_numeric_claims(model_line):
+            _append_once(errors, f"untrusted_numeric_claim:{claim}")
+        for phrase in medical_compliance_violations(model_line):
+            _append_once(errors, f"medical_compliance_violation:{phrase}")
     return errors

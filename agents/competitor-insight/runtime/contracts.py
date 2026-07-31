@@ -1,4 +1,4 @@
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 
 class EvidenceItem(TypedDict):
@@ -25,9 +25,19 @@ class EvidenceBundle(TypedDict):
     items: list[EvidenceItem]
 
 
+class SectionClaim(TypedDict):
+    section: Literal["strategy", "business", "content", "traffic", "data"]
+    statement: str
+    strength: Literal["direct", "weak", "hypothesis"]
+    evidenceIds: list[str]
+    rationale: str
+    verificationPlan: NotRequired[str]
+    complianceNotes: NotRequired[list[str]]
+
+
 class SectionBatch(TypedDict):
-    batchId: str
-    claims: list[dict[str, object]]
+    batchId: Literal["strategy", "performance", "execution"]
+    claims: list[SectionClaim]
     topicDirections: list[dict[str, object]]
     filmingTemplates: list[dict[str, object]]
     conversionItems: list[dict[str, object]]

@@ -24,6 +24,7 @@ _BATCH_KEYS = {
     "executionDays",
 }
 _CLAIM_KEYS = {
+    "section",
     "statement",
     "strength",
     "evidenceIds",
@@ -31,17 +32,32 @@ _CLAIM_KEYS = {
     "verificationPlan",
     "complianceNotes",
 }
+_BATCH_SECTIONS = {
+    "strategy": {"strategy", "business", "content"},
+    "performance": {"traffic", "data"},
+    "execution": set(),
+}
 _TOPIC_KEYS = {"title", "angle", "evidenceIds", "complianceNotes"}
 _FILMING_KEYS = {"name", "hook", "structure", "evidenceIds", "complianceNotes"}
 _CONVERSION_KEYS = {"action", "evidenceIds", "complianceNotes"}
 _EXECUTION_KEYS = {"day", "action", "evidenceIds", "complianceNotes"}
 _NUMERIC_PATTERN = re.compile(r"(?<![A-Za-z])\d+(?:[,.]\d+)*(?:%|万|w|W)?")
+_CHINESE_MAGNITUDE_PATTERN = re.compile(
+    r"[零〇一二两三四五六七八九十百千]+(?:万|亿)(?!不要|不能|不得|避免)"
+)
+_CHINESE_COUNT_PATTERN = re.compile(
+    r"[零〇一二两三四五六七八九十百千万亿]+"
+    r"(?:个|条|天|秒|次|人|元|块|件|篇|名|位|期|款|倍|成|批)"
+)
 _ALLOWED_NUMERIC_STRUCTURES = (
     re.compile(r"(?<!\d)3\s*秒"),
     re.compile(r"(?<!\d)5\s*个"),
     re.compile(r"(?<!\d)7\s*天"),
     re.compile(r"(?<!\d)2\s*[-–—至]\s*3\s*条"),
-    re.compile(r"(?<!\d)(?:19|20)\d{2}\s*年?(?!\d)"),
+    re.compile(
+        r"(?<!\d)(?:19|20)\d{2}"
+        r"(?:\s*年|(?=\s*(?:[-/.]|$|[，。；：、])))"
+    ),
 )
 _MEDICAL_VIOLATIONS = (
     "根治",
@@ -96,10 +112,20 @@ def medical_compliance_violations(text: str) -> list[str]:
             position = text.find(phrase, position)
             if position < 0:
                 break
-            prefix = text[max(0, position - 8) : position]
-            explicitly_prohibited = re.search(
-                r"(?:不|不得|不能|避免|禁止|切勿|严禁)[^，。；！？]{0,6}$",
-                prefix,
+            prefix = text[:position]
+            explicitly_prohibited = any(
+                prefix.endswith(prohibition)
+                for prohibition in (
+                    "不",
+                    "不得",
+                    "不能",
+                    "不可",
+                    "不要",
+                    "避免",
+                    "禁止",
+                    "切勿",
+                    "严禁",
+                )
             )
             if not explicitly_prohibited and phrase not in violations:
                 violations.append(phrase)
@@ -107,16 +133,26 @@ def medical_compliance_violations(text: str) -> list[str]:
     return violations
 
 
+def untrusted_numeric_claims(text: str) -> list[str]:
+    """Return numeric claims not belonging to the fixed structural allowlist."""
+    without_allowed = text
+    for pattern in _ALLOWED_NUMERIC_STRUCTURES:
+        without_allowed = pattern.sub("", without_allowed)
+    claims = [match.group(0) for match in _NUMERIC_PATTERN.finditer(without_allowed)]
+    for pattern in (_CHINESE_MAGNITUDE_PATTERN, _CHINESE_COUNT_PATTERN):
+        for match in pattern.finditer(without_allowed):
+            if match.group(0) not in claims:
+                claims.append(match.group(0))
+    return claims
+
+
 def _check_model_text(text: str) -> None:
     violations = medical_compliance_violations(text)
     if violations:
         raise ValueError(f"medical_compliance_violation:{violations[0]}")
-    without_allowed = text
-    for pattern in _ALLOWED_NUMERIC_STRUCTURES:
-        without_allowed = pattern.sub("", without_allowed)
-    match = _NUMERIC_PATTERN.search(without_allowed)
-    if match:
-        raise ValueError(f"untrusted_numeric_claim:{match.group(0)}")
+    numeric_claims = untrusted_numeric_claims(text)
+    if numeric_claims:
+        raise ValueError(f"untrusted_numeric_claim:{numeric_claims[0]}")
 
 
 def _text_list(value: object, error: str, *, allow_empty: bool = True) -> list[str]:
@@ -169,12 +205,28 @@ def _optional_compliance_notes(
         if required:
             raise ValueError("missing_compliance_notes")
         return None
-    return _text_list(value["complianceNotes"], "invalid_compliance_notes")
+    return _text_list(
+        value["complianceNotes"],
+        "invalid_compliance_notes",
+        allow_empty=False,
+    )
 
 
-def _validate_claim(raw: object, known: dict[str, dict[str, object]]) -> dict[str, object]:
+def _validate_claim(
+    raw: object,
+    known: dict[str, dict[str, object]],
+    allowed_sections: set[str],
+) -> dict[str, object]:
     claim = _object(raw, "invalid_claim")
-    _keys(claim, {"statement", "strength", "evidenceIds"}, _CLAIM_KEYS, "claim")
+    _keys(
+        claim,
+        {"section", "statement", "strength", "evidenceIds"},
+        _CLAIM_KEYS,
+        "claim",
+    )
+    section = _text(claim["section"], "invalid_claim_section")
+    if section not in allowed_sections:
+        raise ValueError(f"claim_section_not_allowed:{section}")
     statement = _text(claim["statement"], "invalid_claim_statement")
     _check_model_text(statement)
     strength = _text(claim["strength"], "invalid_claim_strength")
@@ -270,7 +322,7 @@ def _ranked_evidence_ids(
     }
 
 
-def _validate_recommendation_contract(
+def _validate_execution_contract(
     batch: dict[str, object],
     bundle: EvidenceBundle,
     known: dict[str, dict[str, object]],
@@ -304,6 +356,8 @@ def validate_section_batch(batch: object, bundle: EvidenceBundle) -> dict[str, o
     normalized = deepcopy(_object(batch, "expected_section_batch_object"))
     _keys(normalized, _BATCH_KEYS, _BATCH_KEYS, "batch")
     batch_id = _text(normalized["batchId"], "invalid_batch_id")
+    if batch_id not in _BATCH_SECTIONS:
+        raise ValueError(f"invalid_batch_id:{batch_id}")
     known = _known_evidence(bundle)
 
     claims = _list(normalized["claims"], "invalid_claims")
@@ -312,13 +366,23 @@ def validate_section_batch(batch: object, bundle: EvidenceBundle) -> dict[str, o
     conversions = _list(normalized["conversionItems"], "invalid_conversion_items")
     execution = _list(normalized["executionDays"], "invalid_execution_days")
 
+    if batch_id in {"strategy", "performance"} and any(
+        (topics, filming, conversions, execution)
+    ):
+        raise ValueError(f"non_applicable_fields_must_be_empty:{batch_id}")
+    if batch_id == "execution" and claims:
+        raise ValueError("execution_claims_must_be_empty")
+
     normalized["batchId"] = batch_id
-    normalized["claims"] = [_validate_claim(item, known) for item in claims]
+    normalized["claims"] = [
+        _validate_claim(item, known, _BATCH_SECTIONS[batch_id])
+        for item in claims
+    ]
     normalized["topicDirections"] = [_validate_topic(item, known) for item in topics]
     normalized["filmingTemplates"] = [_validate_filming(item, known) for item in filming]
     normalized["conversionItems"] = [_validate_conversion(item, known) for item in conversions]
     normalized["executionDays"] = [_validate_execution(item, known) for item in execution]
 
-    if batch_id == "recommendations":
-        _validate_recommendation_contract(normalized, bundle, known)
+    if batch_id == "execution":
+        _validate_execution_contract(normalized, bundle, known)
     return normalized

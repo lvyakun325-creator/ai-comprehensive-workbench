@@ -71,7 +71,7 @@ def evidence_bundle() -> dict[str, object]:
     }
 
 
-def recommendation_batch() -> dict[str, object]:
+def execution_batch() -> dict[str, object]:
     labels = ["一", "二", "三", "四", "五"]
     topics = [
         {
@@ -103,16 +103,8 @@ def recommendation_batch() -> dict[str, object]:
         for day in range(1, 8)
     ]
     return {
-        "batchId": "recommendations",
-        "claims": [
-            {
-                "statement": "该内容角度可作为待验证方向",
-                "strength": "hypothesis",
-                "evidenceIds": ["DY-E0001"],
-                "rationale": "标题呈现了可复用的生活场景",
-                "verificationPlan": "先小范围测试并复盘",
-            }
-        ],
+        "batchId": "execution",
+        "claims": [],
         "topicDirections": topics,
         "filmingTemplates": templates,
         "conversionItems": [
@@ -126,12 +118,33 @@ def recommendation_batch() -> dict[str, object]:
     }
 
 
+def strategy_batch() -> dict[str, object]:
+    return {
+        "batchId": "strategy",
+        "claims": [
+            {
+                "section": "strategy",
+                "statement": "标题结构呈现生活化表达",
+                "strength": "weak",
+                "evidenceIds": ["DY-E0001"],
+                "rationale": "仅依据标题与互动结构",
+                "verificationPlan": "结合画面与评论进一步核验",
+            }
+        ],
+        "topicDirections": [],
+        "filmingTemplates": [],
+        "conversionItems": [],
+        "executionDays": [],
+    }
+
+
 class SectionValidatorTests(unittest.TestCase):
     def test_rejects_unknown_evidence_id(self) -> None:
         batch = {
             "batchId": "strategy",
             "claims": [
                 {
+                    "section": "strategy",
                     "statement": "测试判断",
                     "strength": "direct",
                     "evidenceIds": ["DY-E9999"],
@@ -157,6 +170,7 @@ class SectionValidatorTests(unittest.TestCase):
                     "batchId": "strategy",
                     "claims": [
                         {
+                            "section": "strategy",
                             "statement": "这是有限证据下的判断",
                             "strength": strength,
                             "evidenceIds": ["DY-E0001"],
@@ -179,13 +193,13 @@ class SectionValidatorTests(unittest.TestCase):
         )
         for name, mutate, error in mutations:
             with self.subTest(name=name):
-                batch = recommendation_batch()
+                batch = execution_batch()
                 mutate(batch)
                 with self.assertRaisesRegex(ValueError, error):
                     validate_section_batch(batch, evidence_bundle())
 
     def test_requires_each_recommendation_to_reference_top_or_startup_evidence(self) -> None:
-        batch = recommendation_batch()
+        batch = execution_batch()
         batch["topicDirections"][0]["evidenceIds"] = ["DY-E0002"]
         bundle = evidence_bundle()
         bundle["rankings"]["overall"]["rows"] = [12]
@@ -195,7 +209,7 @@ class SectionValidatorTests(unittest.TestCase):
             validate_section_batch(batch, bundle)
 
     def test_rejects_untrusted_numbers_but_allows_fixed_structure_numbers_and_years(self) -> None:
-        batch = recommendation_batch()
+        batch = strategy_batch()
         batch["claims"][0]["statement"] = "2026年先测2-3条，开场控制在3秒，连续7天准备5个方向"
         validate_section_batch(batch, evidence_bundle())
 
@@ -203,22 +217,75 @@ class SectionValidatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "untrusted_numeric_claim"):
             validate_section_batch(batch, evidence_bundle())
 
+        batch["claims"][0]["statement"] = "该作品获得2026次互动"
+        with self.assertRaisesRegex(ValueError, "untrusted_numeric_claim"):
+            validate_section_batch(batch, evidence_bundle())
+
     def test_rejects_medical_marketing_claims(self) -> None:
-        batch = recommendation_batch()
+        batch = strategy_batch()
         batch["claims"][0]["statement"] = "该方法保证有效并可以停药"
 
         with self.assertRaisesRegex(ValueError, "medical_compliance_violation"):
             validate_section_batch(batch, evidence_bundle())
 
     def test_returns_a_detached_normalized_batch(self) -> None:
-        batch = recommendation_batch()
+        batch = execution_batch()
         original = deepcopy(batch)
 
         normalized = validate_section_batch(batch, evidence_bundle())
 
         self.assertEqual(batch, original)
-        self.assertEqual(normalized["batchId"], "recommendations")
+        self.assertEqual(normalized["batchId"], "execution")
         self.assertIsNot(normalized, batch)
+
+    def test_enforces_three_batch_contract_and_section_ownership(self) -> None:
+        cases = (
+            ({**strategy_batch(), "batchId": "traffic"}, "invalid_batch_id"),
+            (
+                {
+                    **strategy_batch(),
+                    "topicDirections": execution_batch()["topicDirections"],
+                },
+                "non_applicable_fields_must_be_empty",
+            ),
+        )
+        for batch, error in cases:
+            with self.subTest(error=error):
+                with self.assertRaisesRegex(ValueError, error):
+                    validate_section_batch(batch, evidence_bundle())
+
+        wrong_section = strategy_batch()
+        wrong_section["claims"][0]["section"] = "traffic"
+        with self.assertRaisesRegex(ValueError, "claim_section_not_allowed"):
+            validate_section_batch(wrong_section, evidence_bundle())
+
+        execution = execution_batch()
+        execution["claims"] = strategy_batch()["claims"]
+        with self.assertRaisesRegex(ValueError, "execution_claims_must_be_empty"):
+            validate_section_batch(execution, evidence_bundle())
+
+    def test_rejects_empty_required_compliance_notes(self) -> None:
+        batch = execution_batch()
+        batch["topicDirections"][0]["complianceNotes"] = []
+
+        with self.assertRaisesRegex(ValueError, "invalid_compliance_notes"):
+            validate_section_batch(batch, evidence_bundle())
+
+        claim_batch = strategy_batch()
+        claim_batch["claims"][0]["complianceNotes"] = []
+        with self.assertRaisesRegex(ValueError, "invalid_compliance_notes"):
+            validate_section_batch(claim_batch, evidence_bundle())
+
+    def test_rejects_chinese_numeric_claims_and_double_negative_medical_claims(self) -> None:
+        chinese_number = strategy_batch()
+        chinese_number["claims"][0]["statement"] = "该作品已有九十九万互动"
+        with self.assertRaisesRegex(ValueError, "untrusted_numeric_claim"):
+            validate_section_batch(chinese_number, evidence_bundle())
+
+        double_negative = strategy_batch()
+        double_negative["claims"][0]["statement"] = "不得不说这个方法保证有效"
+        with self.assertRaisesRegex(ValueError, "medical_compliance_violation:保证有效"):
+            validate_section_batch(double_negative, evidence_bundle())
 
 
 if __name__ == "__main__":

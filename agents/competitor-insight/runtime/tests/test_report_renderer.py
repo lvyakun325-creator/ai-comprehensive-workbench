@@ -8,7 +8,7 @@ sys.path.insert(0, str(RUNTIME_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from report_renderer import assemble_report, render_evidence_reference, validate_final_report
-from test_section_validator import evidence_bundle, recommendation_batch
+from test_section_validator import evidence_bundle, execution_batch
 
 
 def valid_batches() -> list[dict[str, object]]:
@@ -16,34 +16,58 @@ def valid_batches() -> list[dict[str, object]]:
         "batchId": "strategy",
         "claims": [
             {
+                "section": "strategy",
                 "statement": "<script>标题结构呈现生活化表达\n# 非法章节",
                 "strength": "weak",
                 "evidenceIds": ["DY-E0001"],
                 "rationale": "仅依据标题与互动结构",
                 "verificationPlan": "结合画面与评论进一步核验",
-            }
+            },
+            {
+                "section": "business",
+                "statement": "业务判断",
+                "strength": "direct",
+                "evidenceIds": ["DY-E0001"],
+                "rationale": "由证据包字段直接支持",
+            },
+            {
+                "section": "content",
+                "statement": "内容判断",
+                "strength": "hypothesis",
+                "evidenceIds": ["DY-E0001"],
+                "rationale": "由证据包字段直接支持",
+                "verificationPlan": "结合画面进一步核验",
+            },
         ],
         "topicDirections": [],
         "filmingTemplates": [],
         "conversionItems": [],
         "executionDays": [],
     }
-    traffic = {
-        "batchId": "traffic",
+    performance = {
+        "batchId": "performance",
         "claims": [
             {
+                "section": "traffic",
                 "statement": "互动结构值得继续观察",
                 "strength": "direct",
                 "evidenceIds": ["DY-E0002"],
                 "rationale": "由证据包字段直接支持",
-            }
+            },
+            {
+                "section": "data",
+                "statement": "账号数据需持续复盘",
+                "strength": "direct",
+                "evidenceIds": ["DY-E0002"],
+                "rationale": "由证据包字段直接支持",
+            },
         ],
         "topicDirections": [],
         "filmingTemplates": [],
         "conversionItems": [],
         "executionDays": [],
     }
-    return [strategy, traffic, recommendation_batch()]
+    return [strategy, performance, execution_batch()]
 
 
 class ReportRendererTests(unittest.TestCase):
@@ -89,6 +113,27 @@ class ReportRendererTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "untrusted_numeric_claim"):
             assemble_report(evidence_bundle(), batches)
 
+    def test_routes_claims_by_section_and_rejects_duplicate_missing_or_extra_batches(self) -> None:
+        batches = valid_batches()
+        batches[0]["claims"].reverse()
+        markdown = assemble_report(evidence_bundle(), batches)
+
+        strategy_body = markdown.split("## 战略层：账号定位与人设分析", 1)[1].split("## 业务层", 1)[0]
+        business_body = markdown.split("## 业务层：转化路径与商业价值分析", 1)[1].split("## 内容层", 1)[0]
+        self.assertIn("标题结构呈现生活化表达", strategy_body)
+        self.assertNotIn("业务判断", strategy_body)
+        self.assertIn("业务判断", business_body)
+
+        cases = (
+            ([batches[0], batches[1], batches[1]], "duplicate_batch_id:performance"),
+            ([batches[0], batches[2]], "missing_batch_id:performance"),
+            ([*batches, {**batches[0], "batchId": "unknown"}], "invalid_batch_id"),
+        )
+        for invalid, error in cases:
+            with self.subTest(error=error):
+                with self.assertRaisesRegex(ValueError, error):
+                    assemble_report(evidence_bundle(), invalid)
+
     def test_renders_a_reference_only_from_the_bundle(self) -> None:
         reference = render_evidence_reference("DY-E0001", evidence_bundle())
 
@@ -109,6 +154,75 @@ class ReportRendererTests(unittest.TestCase):
         self.assertIn("unknown_evidence_id:DY-E9999", validate_final_report(unknown, bundle))
         forged = markdown + "\n伪造互动：999,999\n"
         self.assertIn("untrusted_numeric_claim:999,999", validate_final_report(forged, bundle))
+        borrowed = markdown + "\n挪用合法证据数字：1,000\n"
+        self.assertIn("untrusted_numeric_claim:1,000", validate_final_report(borrowed, bundle))
+
+    def test_final_validation_compares_deterministic_blocks_and_each_evidence_reference(self) -> None:
+        bundle = evidence_bundle()
+        markdown = assemble_report(bundle, valid_batches())
+
+        swapped_overview = markdown.replace("粉丝数：3,210", "粉丝数：3,200", 1)
+        self.assertIn("deterministic_block_mismatch:账号概览", validate_final_report(swapped_overview, bundle))
+
+        top_row = "| 1 | 作品一 | 12,000 | 320 | 860 | 210 | 13,390 |"
+        swapped_table = markdown.replace(
+            top_row,
+            "| 1 | 作品一 | 1,000 | 320 | 860 | 210 | 13,390 |",
+            1,
+        )
+        self.assertIn(
+            "deterministic_block_mismatch:Top 10 高表现作品",
+            validate_final_report(swapped_table, bundle),
+        )
+
+        swapped_reference = markdown.replace("点赞：12,000", "点赞：1,000", 1)
+        self.assertIn(
+            "evidence_reference_mismatch:DY-E0001",
+            validate_final_report(swapped_reference, bundle),
+        )
+
+    def test_final_validation_handles_unavailable_rankings_from_bundle_status(self) -> None:
+        bundle = evidence_bundle()
+        for name in ("collect", "share", "comment"):
+            bundle["rankings"][name] = {"status": "unavailable", "rows": []}
+        markdown = assemble_report(bundle, valid_batches())
+
+        self.assertEqual(validate_final_report(markdown, bundle), [])
+        self.assertEqual(markdown.count("该指标在源数据中不可用，未生成榜单。"), 3)
+        tampered = markdown.replace("该指标在源数据中不可用，未生成榜单。", "无数据。", 1)
+        self.assertIn(
+            "deterministic_block_mismatch:高收藏、高分享、高评论作品",
+            validate_final_report(tampered, bundle),
+        )
+
+    def test_final_validation_requires_unique_real_heading_lines(self) -> None:
+        bundle = evidence_bundle()
+        markdown = assemble_report(bundle, valid_batches())
+        duplicated = markdown + "\n## 数据层：关键指标与账号健康度分析\n"
+        self.assertIn(
+            "duplicate_section:数据层：关键指标与账号健康度分析",
+            validate_final_report(duplicated, bundle),
+        )
+
+        quoted = markdown.replace(
+            "## 数据层：关键指标与账号健康度分析",
+            "> ## 数据层：关键指标与账号健康度分析",
+            1,
+        )
+        self.assertIn(
+            "missing_section:数据层：关键指标与账号健康度分析",
+            validate_final_report(quoted, bundle),
+        )
+
+        fenced = markdown.replace(
+            "## 数据层：关键指标与账号健康度分析",
+            "```\n## 数据层：关键指标与账号健康度分析\n```",
+            1,
+        )
+        self.assertIn(
+            "missing_section:数据层：关键指标与账号健康度分析",
+            validate_final_report(fenced, bundle),
+        )
 
     def test_final_validation_detects_medical_compliance_leaks(self) -> None:
         bundle = evidence_bundle()
@@ -119,6 +233,18 @@ class ReportRendererTests(unittest.TestCase):
         errors = validate_final_report(unsafe, bundle)
         self.assertIn("medical_compliance_violation:保证有效", errors)
         self.assertIn("medical_compliance_violation:停药", errors)
+
+        double_negative = markdown + "\n不得不说这个方法保证有效。\n"
+        self.assertIn(
+            "medical_compliance_violation:保证有效",
+            validate_final_report(double_negative, bundle),
+        )
+
+        chinese_number = markdown + "\n该账号已有九十九万互动。\n"
+        self.assertIn(
+            "untrusted_numeric_claim:九十九万",
+            validate_final_report(chinese_number, bundle),
+        )
 
 
 if __name__ == "__main__":

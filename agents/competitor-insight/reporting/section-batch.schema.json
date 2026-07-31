@@ -14,8 +14,7 @@
   ],
   "properties": {
     "batchId": {
-      "type": "string",
-      "minLength": 1
+      "enum": ["strategy", "performance", "execution"]
     },
     "claims": {
       "type": "array",
@@ -23,14 +22,10 @@
     },
     "topicDirections": {
       "type": "array",
-      "minItems": 5,
-      "maxItems": 5,
       "items": { "$ref": "#/$defs/topicDirection" }
     },
     "filmingTemplates": {
       "type": "array",
-      "minItems": 3,
-      "maxItems": 3,
       "items": { "$ref": "#/$defs/filmingTemplate" }
     },
     "conversionItems": {
@@ -39,48 +34,107 @@
     },
     "executionDays": {
       "type": "array",
-      "minItems": 7,
-      "maxItems": 7,
-      "items": { "$ref": "#/$defs/executionDay" },
-      "allOf": [
-        {
-          "contains": { "properties": { "day": { "const": 1 } }, "required": ["day"] },
-          "minContains": 1,
-          "maxContains": 1
-        },
-        {
-          "contains": { "properties": { "day": { "const": 2 } }, "required": ["day"] },
-          "minContains": 1,
-          "maxContains": 1
-        },
-        {
-          "contains": { "properties": { "day": { "const": 3 } }, "required": ["day"] },
-          "minContains": 1,
-          "maxContains": 1
-        },
-        {
-          "contains": { "properties": { "day": { "const": 4 } }, "required": ["day"] },
-          "minContains": 1,
-          "maxContains": 1
-        },
-        {
-          "contains": { "properties": { "day": { "const": 5 } }, "required": ["day"] },
-          "minContains": 1,
-          "maxContains": 1
-        },
-        {
-          "contains": { "properties": { "day": { "const": 6 } }, "required": ["day"] },
-          "minContains": 1,
-          "maxContains": 1
-        },
-        {
-          "contains": { "properties": { "day": { "const": 7 } }, "required": ["day"] },
-          "minContains": 1,
-          "maxContains": 1
-        }
-      ]
+      "items": { "$ref": "#/$defs/executionDay" }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "batchId": { "const": "strategy" } },
+        "required": ["batchId"]
+      },
+      "then": {
+        "properties": {
+          "claims": {
+            "items": {
+              "properties": {
+                "section": { "enum": ["strategy", "business", "content"] }
+              }
+            }
+          },
+          "topicDirections": { "maxItems": 0 },
+          "filmingTemplates": { "maxItems": 0 },
+          "conversionItems": { "maxItems": 0 },
+          "executionDays": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "batchId": { "const": "performance" } },
+        "required": ["batchId"]
+      },
+      "then": {
+        "properties": {
+          "claims": {
+            "items": {
+              "properties": {
+                "section": { "enum": ["traffic", "data"] }
+              }
+            }
+          },
+          "topicDirections": { "maxItems": 0 },
+          "filmingTemplates": { "maxItems": 0 },
+          "conversionItems": { "maxItems": 0 },
+          "executionDays": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "batchId": { "const": "execution" } },
+        "required": ["batchId"]
+      },
+      "then": {
+        "properties": {
+          "claims": { "maxItems": 0 },
+          "topicDirections": { "minItems": 5, "maxItems": 5 },
+          "filmingTemplates": { "minItems": 3, "maxItems": 3 },
+          "executionDays": {
+            "minItems": 7,
+            "maxItems": 7,
+            "allOf": [
+              {
+                "contains": { "properties": { "day": { "const": 1 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "day": { "const": 2 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "day": { "const": 3 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "day": { "const": 4 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "day": { "const": 5 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "day": { "const": 6 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "day": { "const": 7 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "evidenceIds": {
       "type": "array",
@@ -90,8 +144,11 @@
     "claim": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["statement", "strength", "evidenceIds"],
+      "required": ["section", "statement", "strength", "evidenceIds"],
       "properties": {
+        "section": {
+          "enum": ["strategy", "business", "content", "traffic", "data"]
+        },
         "statement": { "type": "string", "minLength": 1 },
         "strength": { "enum": ["direct", "weak", "hypothesis"] },
         "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
@@ -99,6 +156,7 @@
         "verificationPlan": { "type": "string", "minLength": 1 },
         "complianceNotes": {
           "type": "array",
+          "minItems": 1,
           "items": { "type": "string", "minLength": 1 }
         }
       },
@@ -125,6 +183,7 @@
         "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
         "complianceNotes": {
           "type": "array",
+          "minItems": 1,
           "items": { "type": "string", "minLength": 1 }
         }
       }
@@ -140,6 +199,7 @@
         "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
         "complianceNotes": {
           "type": "array",
+          "minItems": 1,
           "items": { "type": "string", "minLength": 1 }
         }
       }
@@ -153,6 +213,7 @@
         "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
         "complianceNotes": {
           "type": "array",
+          "minItems": 1,
           "items": { "type": "string", "minLength": 1 }
         }
       }
@@ -167,6 +228,7 @@
         "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
         "complianceNotes": {
           "type": "array",
+          "minItems": 1,
           "items": { "type": "string", "minLength": 1 }
         }
       }
