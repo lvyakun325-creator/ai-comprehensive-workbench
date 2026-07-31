@@ -15,6 +15,7 @@ import {
   type ContentMatrixRunOperation,
   type ContentMatrixStageResult,
 } from "./ContentMatrixRunner";
+import { CompetitorInsightPanel } from "./CompetitorInsightPanel";
 import {
   ContentMatrixRuntimeError,
   createContentMatrixRuntime,
@@ -148,6 +149,7 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   const matrixRunRequest = useRef(0);
   const matrixRunAbortController = useRef<AbortController | null>(null);
   const isContentMatrix = agent.id === "content-matrix";
+  const isCompetitorInsight = agent.id === "competitor-insight";
   const requiresPrivateAssets = matrixDiagnosis.platform === "video-account";
   const requiredMatrixFields = requiresPrivateAssets
     ? [...MATRIX_DIAGNOSIS_FIELDS, ["privateAssets", "私域资产"] as const]
@@ -514,7 +516,7 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 setResultTaskId(null);
               }
               setActiveTab(tab);
-              if (tab === "Agent 对话" && !isContentMatrix) {
+              if (tab === "Agent 对话" && !isContentMatrix && !isCompetitorInsight) {
                 onPreview(`${tab}将在真实 Agent 接入后启用`);
               }
             }}
@@ -560,6 +562,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
           agentTitle={agent.title}
           onPreview={onPreview}
         />
+      ) : isCompetitorInsight && activeTab === "Agent 对话" ? (
+        <CompetitorInsightPanel mode="run" onPreview={onPreview} />
       ) : isContentMatrix && activeTab === "Agent 对话" ? (
         <section className="matrix-diagnosis" aria-labelledby="matrix-diagnosis-title">
           <div className="matrix-diagnosis-heading">
@@ -789,6 +793,12 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
             </div>
           </article>
         </div>
+      ) : isCompetitorInsight && activeTab === "项目总览" ? (
+        <CompetitorInsightPanel
+          mode="overview"
+          onPreview={onPreview}
+          onStart={() => setActiveTab("Agent 对话")}
+        />
       ) : (
         <div className="agent-project-grid">
           <article className="project-panel">

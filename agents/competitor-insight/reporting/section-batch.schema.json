@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Competitor insight evidence report section batch",
+  "description": "Model output is schema-valid JSON only. Source evidence metrics, calculated rankings, and interaction totals are deterministic evidence-layer fields and are not model output fields.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "batchId",
+    "claims",
+    "topicDirections",
+    "filmingTemplates",
+    "conversionItems",
+    "executionDays"
+  ],
+  "properties": {
+    "batchId": {
+      "enum": ["strategy", "performance", "execution"]
+    },
+    "claims": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/claim" }
+    },
+    "topicDirections": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/topicDirection" }
+    },
+    "filmingTemplates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/filmingTemplate" }
+    },
+    "conversionItems": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/conversionItem" }
+    },
+    "executionDays": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/executionDay" }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "batchId": { "const": "strategy" } },
+        "required": ["batchId"]
+      },
+      "then": {
+        "properties": {
+          "claims": {
+            "items": {
+              "properties": {
+                "section": { "enum": ["strategy", "business", "content"] }
+              }
+            }
+          },
+          "topicDirections": { "maxItems": 0 },
+          "filmingTemplates": { "maxItems": 0 },
+          "conversionItems": { "maxItems": 0 },
+          "executionDays": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "batchId": { "const": "performance" } },
+        "required": ["batchId"]
+      },
+      "then": {
+        "properties": {
+          "claims": {
+            "items": {
+              "properties": {
+                "section": { "enum": ["traffic", "data"] }
+              }
+            }
+          },
+          "topicDirections": { "maxItems": 0 },
+          "filmingTemplates": { "maxItems": 0 },
+          "conversionItems": { "maxItems": 0 },
+          "executionDays": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "batchId": { "const": "execution" } },
+        "required": ["batchId"]
+      },
+      "then": {
+        "properties": {
+          "claims": { "maxItems": 0 },
+          "topicDirections": { "minItems": 5, "maxItems": 5 },
+          "filmingTemplates": { "minItems": 3, "maxItems": 3 },
+          "executionDays": {
+            "minItems": 7,
+            "maxItems": 7,
+            "allOf": [
+              {
+                "contains": { "properties": { "day": { "const": 1 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "day": { "const": 2 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "day": { "const": 3 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "day": { "const": 4 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "day": { "const": 5 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "day": { "const": 6 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "day": { "const": 7 } }, "required": ["day"] },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "evidenceIds": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section", "statement", "strength", "evidenceIds"],
+      "properties": {
+        "section": {
+          "enum": ["strategy", "business", "content", "traffic", "data"]
+        },
+        "statement": { "type": "string", "minLength": 1 },
+        "strength": { "enum": ["direct", "weak", "hypothesis"] },
+        "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
+        "rationale": { "type": "string", "minLength": 1 },
+        "verificationPlan": { "type": "string", "minLength": 1 },
+        "complianceNotes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "strength": { "const": "direct" } },
+            "required": ["strength"]
+          },
+          "then": { "required": ["rationale"] }
+        },
+        {
+          "if": {
+            "properties": { "strength": { "enum": ["weak", "hypothesis"] } },
+            "required": ["strength"]
+          },
+          "then": { "required": ["rationale", "verificationPlan"] }
+        }
+      ]
+    },
+    "topicDirection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "angle", "evidenceIds", "complianceNotes"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "angle": { "type": "string", "minLength": 1 },
+        "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
+        "complianceNotes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "filmingTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "hook", "structure", "evidenceIds", "complianceNotes"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "hook": { "type": "string", "minLength": 1 },
+        "structure": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
+        "complianceNotes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "conversionItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "evidenceIds", "complianceNotes"],
+      "properties": {
+        "action": { "type": "string", "minLength": 1 },
+        "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
+        "complianceNotes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "executionDay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["day", "action", "evidenceIds", "complianceNotes"],
+      "properties": {
+        "day": { "type": "integer", "minimum": 1, "maximum": 7 },
+        "action": { "type": "string", "minLength": 1 },
+        "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
+        "complianceNotes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

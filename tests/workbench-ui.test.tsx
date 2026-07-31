@@ -55,6 +55,16 @@ const { ChatHistorySidebar } = await import(
 );
 const { ChatTranscript } = await import("../app/components/ChatTranscript");
 const { default: Home } = await import("../app/page");
+const {
+  ModelRegistryProvider,
+  useModelRegistry,
+} = await import("../app/components/ModelRegistryProvider");
+const { CompetitorReportRunner } = await import(
+  "../app/components/CompetitorReportRunner"
+);
+const { analyzeReportUpload } = await import(
+  "../app/lib/competitor-report-client"
+);
 const originalFetch = globalThis.fetch;
 
 function deferredValue<T>() {
@@ -4828,19 +4838,1075 @@ test("video account intake requires private assets before it can become ready", 
   assert.ok(screen.getByRole("status", { name: "诊断提交状态" }));
 });
 
-test("competitor insight Agent does not show the content matrix intake form", async () => {
+test("competitor insight Agent opens its platform-aware collection console", async () => {
+  const requestedUrls: string[] = [];
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    ok: true,
+    inputType: "作品链接",
+    excelPath: "/tmp/competitor-insight/douyin/work.xlsx",
+    outputDir: "/tmp/competitor-insight/douyin",
+  }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  })) as typeof fetch;
+  const successfulFetch = globalThis.fetch;
+  globalThis.fetch = (async (input, init) => {
+    requestedUrls.push(String(input));
+    return successfulFetch(input, init);
+  }) as typeof fetch;
   const user = userEvent.setup({ document });
   render(<Home />);
 
   await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
-  await user.click(screen.getByRole("button", { name: "Agent 对话" }));
+  assert.ok(screen.getByRole("heading", { name: "跨平台竞品洞察工作流" }));
+  assert.match(
+    screen.getByText("douyin-scraper").closest("article")?.textContent ?? "",
+    /已接入/,
+  );
+  assert.match(
+    screen.getByText("xiaohongshu-scraper").closest("article")?.textContent ?? "",
+    /已接入/,
+  );
+  await user.click(screen.getByRole("button", { name: "开始竞品采集" }));
 
+  assert.equal(
+    screen.getByRole("button", { name: "Agent 对话" }).getAttribute("aria-current"),
+    "page",
+  );
+  assert.ok(screen.getByRole("heading", { name: "粘贴链接，自动选择抓取 Skill" }));
   assert.equal(screen.queryByRole("heading", { name: "企业矩阵基建诊断表" }), null);
   assert.equal(screen.queryByRole("button", { name: "开始矩阵诊断" }), null);
-  assert.match(
-    screen.getByRole("status", { name: "设计预览提示" }).textContent ?? "",
-    /Agent 对话将在真实 Agent 接入后启用/,
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://v.douyin.com/test-account/",
   );
+  assert.match(
+    screen.getByRole("status", { name: "竞品平台识别状态" }).textContent ?? "",
+    /已识别抖音/,
+  );
+  await user.click(screen.getByRole("button", { name: "抓取并分析" }));
+  await waitFor(() => {
+    assert.match(screen.getByRole("alert").textContent ?? "", /抓取完成/);
+  });
+  assert.equal(requestedUrls.at(-1), "http://127.0.0.1:8765/scrape");
+
+  await user.clear(screen.getByLabelText("竞品主页或作品链接"));
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://www.xiaohongshu.com/explore/test-note",
+  );
+  await user.click(screen.getByRole("button", { name: "抓取并分析" }));
+  await waitFor(() => {
+    assert.equal(requestedUrls.at(-1), "http://127.0.0.1:8766/scrape");
+  });
+});
+
+type CompetitorReportRequest = {
+  url: string;
+  init?: RequestInit;
+  body: Record<string, unknown> | null;
+};
+
+function installCompetitorReportModel() {
+  installConnectedChatModels([
+    {
+      id: "competitor-report-model",
+      provider: "OpenAI",
+      displayName: "竞品报告模型",
+      modelId: "gpt-competitor-report",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "sk-competitor-report-secret",
+      revision: "revision-competitor-report",
+    },
+  ]);
+  window.localStorage.setItem(
+    "ai-workbench:agent-model-selections:v1",
+    JSON.stringify({ "competitor-insight": "competitor-report-model" }),
+  );
+}
+
+function competitorBatchFixture(
+  batchId: "strategy" | "performance" | "execution",
+) {
+  const empty = {
+    claims: [],
+    topicDirections: [],
+    filmingTemplates: [],
+    conversionItems: [],
+    executionDays: [],
+  };
+  if (batchId !== "execution") return { batchId, ...empty };
+  return {
+    batchId,
+    claims: [],
+    topicDirections: Array.from({ length: 5 }, (_, index) => ({
+      title: `选题 ${index + 1}`,
+      angle: "经营证据角度",
+      evidenceIds: ["DY-E0001"],
+      complianceNotes: ["不承诺疗效"],
+    })),
+    filmingTemplates: Array.from({ length: 3 }, (_, index) => ({
+      name: `拍法 ${index + 1}`,
+      hook: "公开数据开场",
+      structure: ["证据", "判断", "边界"],
+      evidenceIds: ["DY-E0001"],
+      complianceNotes: ["人工复核"],
+    })),
+    conversionItems: [],
+    executionDays: Array.from({ length: 7 }, (_, index) => ({
+      day: index + 1,
+      action: `执行动作 ${index + 1}`,
+      evidenceIds: ["DY-E0001"],
+      complianceNotes: ["不做医疗诊断"],
+    })),
+  };
+}
+
+function evidenceReadyFixture() {
+  const evidence = [{
+    evidenceId: "DY-E0001",
+    title: "第一条作品",
+    likes: 20,
+    comments: 2,
+    collects: 3,
+    shares: 1,
+    totalInteractions: 26,
+    publishedAt: "2026-07-01T10:00:00",
+  }];
+  const ranking = { status: "available", evidenceIds: ["DY-E0001"] };
+  return {
+    ok: true,
+    stage: "evidence_ready",
+    evidenceId: "0123456789abcdef",
+    account: {
+      nickname: "测试账号",
+      followers: 100,
+      signature: "分享日常生活与健康管理常识",
+    },
+    completeness: {
+      missingFields: ["粉丝数"],
+      warnings: ["公开互动不等于成交"],
+    },
+    batchInputs: {
+      strategy: {
+        account: {
+          nickname: "测试账号",
+          followers: 100,
+          signature: "分享日常生活与健康管理常识",
+        },
+        availability: { comments: true, collects: true, shares: true },
+        rankings: { overall: ranking, startup: ranking },
+        evidence,
+      },
+      performance: {
+        availability: { comments: true, collects: true, shares: true },
+        metrics: {
+          workCount: 1,
+          averageLikes: 20,
+          averageComments: 2,
+          averageCollects: 3,
+          averageShares: 1,
+          averageInteractions: 26,
+          maxInteractions: 26,
+          aboveAverageInteractionCount: 0,
+          top10InteractionShare: 1,
+          maxToAverageMultiple: 1,
+        },
+        rankings: {
+          overall: ranking,
+          startup: ranking,
+          collect: ranking,
+          share: ranking,
+          comment: ranking,
+        },
+        evidence,
+      },
+      execution: {
+        availability: { comments: true, collects: true, shares: true },
+        rankings: {
+          overall: ranking,
+          collect: ranking,
+          share: ranking,
+          comment: ranking,
+        },
+        evidence,
+      },
+    },
+  };
+}
+
+function reportReadyFixture() {
+  return {
+    ok: true,
+    stage: "report_ready",
+    filename: "测试账号_抖音账号分析报告.md",
+    reportPath:
+      "/Users/test/outputs/competitor-insight/reports/测试账号_抖音账号分析报告.md",
+    markdown: "# 抖音账号分析报告\n\n同一次组装响应的 Markdown。",
+    validationErrors: [],
+  };
+}
+
+async function openCompetitorReportRunner() {
+  const user = userEvent.setup({ document });
+  render(<Home />);
+  await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
+  await user.click(screen.getByRole("button", { name: "开始竞品采集" }));
+  return user;
+}
+
+test("竞品洞察报告显示双入口且拒绝非 xlsx 文件而不请求服务", async () => {
+  let requestCount = 0;
+  globalThis.fetch = (async () => {
+    requestCount += 1;
+    return Response.json({ ok: true });
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+
+  assert.ok(screen.getByRole("button", { name: "抓取并分析" }));
+  assert.ok(screen.getByText("分析已有 Excel"));
+  const input = screen.getByLabelText("选择已有 Excel 文件");
+  fireEvent.change(input, {
+    target: { files: [new File(["not xlsx"], "account.csv", { type: "text/csv" })] },
+  });
+
+  assert.match(screen.getByRole("alert").textContent ?? "", /仅支持 \.xlsx/);
+  assert.equal(requestCount, 0);
+
+  const oversized = new File(["small fixture"], "oversized.xlsx");
+  Object.defineProperty(oversized, "size", {
+    configurable: true,
+    value: 50 * 1024 * 1024 + 1,
+  });
+  fireEvent.change(input, { target: { files: [oversized] } });
+  assert.match(screen.getByRole("alert").textContent ?? "", /50 MB/);
+  assert.equal(requestCount, 0);
+});
+
+test("竞品洞察报告客户端跨编码分块仍无损上传 Excel", async () => {
+  const bytes = new Uint8Array(256 * 1024 + 11);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = index % 251;
+  }
+  let encoded = "";
+  globalThis.fetch = (async (_input, init) => {
+    assert.equal(init?.credentials, "omit");
+    assert.equal(
+      new Headers(init?.headers).get("content-type"),
+      "application/json",
+    );
+    const body = JSON.parse(String(init?.body)) as {
+      filename: string;
+      contentBase64: string;
+    };
+    assert.equal(body.filename, "chunk-boundary.xlsx");
+    encoded = body.contentBase64;
+    return Response.json(evidenceReadyFixture());
+  }) as typeof fetch;
+
+  await analyzeReportUpload(
+    new File([bytes], "chunk-boundary.xlsx"),
+    new AbortController().signal,
+  );
+
+  assert.deepEqual(
+    new Uint8Array(Buffer.from(encoded, "base64")),
+    bytes,
+  );
+});
+
+test("竞品洞察抓取并分析仅对抖音账号 Excel 自动生成证据包", async () => {
+  const requests: CompetitorReportRequest[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    requests.push({ url, init, body });
+    if (url.endsWith("/scrape")) {
+      return Response.json({
+        ok: true,
+        platform: "douyin",
+        skillId: "douyin-scraper",
+        inputType: "账号链接/账号标识",
+        excelPath: "/controlled/douyin/account.xlsx",
+        outputDir: "/controlled/douyin",
+      });
+    }
+    if (url.endsWith("/analyze-path")) {
+      return Response.json(evidenceReadyFixture());
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const user = await openCompetitorReportRunner();
+
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://v.douyin.com/test-account/",
+  );
+  await user.click(screen.getByRole("button", { name: "抓取并分析" }));
+
+  await waitFor(() =>
+    assert.ok(screen.getByRole("status", { name: "竞品报告生成状态" })),
+  );
+  assert.deepEqual(
+    requests.map(({ url }) => url),
+    [
+      "http://127.0.0.1:8765/scrape",
+      "http://127.0.0.1:8768/analyze-path",
+    ],
+  );
+  assert.deepEqual(requests[1]?.body, {
+    path: "/controlled/douyin/account.xlsx",
+  });
+  assert.equal(requests[1]?.init?.credentials, "omit");
+  assert.match(document.body.textContent ?? "", /证据包已生成/);
+});
+
+test("竞品洞察抓取并分析对抖音作品只保留单作品完成提示", async () => {
+  const requestedUrls: string[] = [];
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    requestedUrls.push(url);
+    return Response.json({
+      ok: true,
+      platform: "douyin",
+      skillId: "douyin-scraper",
+      inputType: "作品链接",
+      excelPath: "/controlled/douyin/work.xlsx",
+      outputDir: "/controlled/douyin",
+    });
+  }) as typeof fetch;
+  const user = await openCompetitorReportRunner();
+
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://www.douyin.com/video/123",
+  );
+  await user.click(screen.getByRole("button", { name: "抓取并分析" }));
+
+  await waitFor(() =>
+    assert.match(screen.getByRole("alert").textContent ?? "", /单作品抓取完成/),
+  );
+  assert.deepEqual(requestedUrls, ["http://127.0.0.1:8765/scrape"]);
+});
+
+test("竞品洞察报告上传后按三批生成校验并只组装一次", async () => {
+  installCompetitorReportModel();
+  const requests: CompetitorReportRequest[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    requests.push({ url, init, body });
+    if (url.endsWith("/analyze-upload")) {
+      assert.deepEqual(Object.keys(body ?? {}).sort(), ["contentBase64", "filename"]);
+      return Response.json(evidenceReadyFixture());
+    }
+    if (url === "/api/agents/competitor-insight") {
+      const batchId = body?.batchId as "strategy" | "performance" | "execution";
+      assert.deepEqual(Object.keys(body ?? {}).sort(), ["batchId", "config", "input"]);
+      assert.equal((body?.config as Record<string, unknown>).apiKey, "sk-competitor-report-secret");
+      assert.deepEqual(body?.input, evidenceReadyFixture().batchInputs[batchId]);
+      return Response.json({ ok: true, batch: competitorBatchFixture(batchId) });
+    }
+    if (url.endsWith("/validate-section")) {
+      const batch = body?.batch as Record<string, unknown>;
+      return Response.json({
+        ok: true,
+        stage: "section_validated",
+        evidenceId: "0123456789abcdef",
+        batchId: batch.batchId,
+        batch,
+      });
+    }
+    if (url.endsWith("/assemble-report")) {
+      return Response.json(reportReadyFixture());
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
+    target: {
+      files: [
+        new File(
+          [new Uint8Array([0x50, 0x4b, 0x03, 0x04])],
+          "account.xlsx",
+        ),
+      ],
+    },
+  });
+
+  await waitFor(() =>
+    assert.ok(screen.getByRole("heading", { name: "Markdown 报告预览" })),
+  );
+  assert.deepEqual(
+    requests.map(({ url }) =>
+      url === "/api/agents/competitor-insight"
+        ? "model"
+        : url.replace("http://127.0.0.1:8768", ""),
+    ),
+    [
+      "/analyze-upload",
+      "model",
+      "/validate-section",
+      "model",
+      "/validate-section",
+      "model",
+      "/validate-section",
+      "/assemble-report",
+    ],
+  );
+  assert.equal(
+    requests.filter(({ url }) => url.endsWith("/assemble-report")).length,
+    1,
+  );
+  assert.match(
+    screen.getByRole("region", { name: "Markdown 报告预览" }).textContent ?? "",
+    /同一次组装响应的 Markdown/,
+  );
+  assert.equal(
+    screen.getByRole("link", { name: "下载 Markdown" }).getAttribute("href"),
+    "blob:test-1",
+  );
+  assert.doesNotMatch(
+    document.body.textContent ?? "",
+    /sk-competitor-report-secret/,
+  );
+
+  const originalWriteText = navigator.clipboard.writeText;
+  Object.assign(navigator.clipboard, {
+    writeText: async () => {
+      throw new Error("clipboard denied");
+    },
+  });
+  try {
+    await userEvent.setup({ document }).click(
+      screen.getByRole("button", { name: "复制报告路径" }),
+    );
+    assert.match(document.body.textContent ?? "", /复制失败，请手动选择报告路径/);
+  } finally {
+    Object.assign(navigator.clipboard, { writeText: originalWriteText });
+  }
+  cleanup();
+  assert.deepEqual(revokedMarkdownUrls, ["blob:test-1"]);
+});
+
+test("竞品洞察报告未配置 Agent 模型时停在证据包已生成", async () => {
+  const requests: string[] = [];
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.endsWith("/analyze-upload")) {
+      return Response.json(evidenceReadyFixture());
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
+    target: { files: [new File(["PK fixture"], "account.xlsx")] },
+  });
+
+  await waitFor(() =>
+    assert.match(
+      screen.getByRole("status", { name: "竞品报告生成状态" }).textContent ?? "",
+      /证据包已生成[\s\S]*选择已连接/u,
+    ),
+  );
+  assert.deepEqual(requests, ["http://127.0.0.1:8768/analyze-upload"]);
+  assert.ok(screen.getByRole("button", { name: "继续生成报告" }));
+});
+
+test("竞品报告证据已就绪时显式标记已完成与当前阶段", async () => {
+  globalThis.fetch = (async (input) => {
+    if (String(input).endsWith("/analyze-upload")) {
+      return Response.json(evidenceReadyFixture());
+    }
+    throw new Error(`unexpected request: ${String(input)}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
+    target: { files: [new File(["PK fixture"], "account.xlsx")] },
+  });
+
+  await screen.findByRole("button", { name: "继续生成报告" });
+  const stages = screen.getByRole("list", { name: "竞品报告五阶段" });
+  assert.equal(
+    within(stages).getByRole("listitem", { name: "读取 Excel（已完成）" })
+      .className,
+    "completed",
+  );
+  assert.equal(
+    within(stages).getByRole("listitem", { name: "计算证据（已完成）" })
+      .className,
+    "completed",
+  );
+  assert.equal(
+    within(stages).getByRole("listitem", { name: "生成三批（当前）" })
+      .getAttribute("aria-current"),
+    "step",
+  );
+});
+
+test("空或不完整的 batchInputs 在模型请求前失败关闭", async () => {
+  installCompetitorReportModel();
+  let modelCalls = 0;
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (url.endsWith("/analyze-upload")) {
+      const fixture = evidenceReadyFixture();
+      return Response.json({
+        ...fixture,
+        batchInputs: { strategy: fixture.batchInputs.strategy },
+      });
+    }
+    modelCalls += 1;
+    return Response.json({ ok: true, batch: competitorBatchFixture("strategy") });
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
+    target: { files: [new File(["PK fixture"], "account.xlsx")] },
+  });
+
+  await waitFor(() =>
+    assert.match(screen.getByRole("alert").textContent ?? "", /无效响应/),
+  );
+  assert.equal(modelCalls, 0);
+  assert.equal(screen.queryByRole("button", { name: /继续|重试/ }), null);
+});
+
+test("批内排名引用外部证据时在模型请求前失败关闭", async () => {
+  installCompetitorReportModel();
+  let modelCalls = 0;
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (url.endsWith("/analyze-upload")) {
+      const fixture = evidenceReadyFixture();
+      fixture.batchInputs.strategy.rankings.overall = {
+        status: "available",
+        evidenceIds: ["DY-E9999"],
+      };
+      return Response.json(fixture);
+    }
+    modelCalls += 1;
+    return Response.json({ ok: true, batch: competitorBatchFixture("strategy") });
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
+    target: { files: [new File(["PK fixture"], "account.xlsx")] },
+  });
+
+  await waitFor(() =>
+    assert.match(screen.getByRole("alert").textContent ?? "", /无效响应/),
+  );
+  assert.equal(modelCalls, 0);
+  assert.equal(screen.queryByRole("button", { name: /继续|重试/ }), null);
+});
+
+test("新选文件校验失败会隔离旧证据和旧报告", async () => {
+  installCompetitorReportModel();
+  let assembleCount = 0;
+  let directBatchIndex = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    if (url.endsWith("/analyze-upload")) {
+      return Response.json(evidenceReadyFixture());
+    }
+    if (url === "/api/agents/competitor-insight") {
+      const batchId = body?.batchId as "strategy" | "performance" | "execution";
+      return Response.json({ ok: true, batch: competitorBatchFixture(batchId) });
+    }
+    if (url === "https://api.openai.com/v1/chat/completions") {
+      const batchId = ["strategy", "performance", "execution"]
+        [directBatchIndex++] as "strategy" | "performance" | "execution";
+      return Response.json({
+        choices: [{ message: { role: "assistant", content: JSON.stringify(competitorBatchFixture(batchId)) } }],
+      });
+    }
+    if (url.endsWith("/validate-section")) {
+      return Response.json({
+        ok: true,
+        stage: "section_validated",
+        evidenceId: "0123456789abcdef",
+        batchId: body?.batch.batchId,
+        batch: body?.batch,
+      });
+    }
+    if (url.endsWith("/assemble-report")) {
+      assembleCount += 1;
+      return Response.json(reportReadyFixture());
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  const input = screen.getByLabelText("选择已有 Excel 文件");
+  fireEvent.change(input, {
+    target: { files: [new File(["PK fixture"], "account.xlsx")] },
+  });
+  await screen.findByRole("heading", { name: "Markdown 报告预览" });
+
+  fireEvent.change(input, {
+    target: { files: [new File(["invalid"], "new-account.csv")] },
+  });
+
+  assert.match(screen.getByRole("alert").textContent ?? "", /仅支持 \.xlsx/);
+  assert.equal(screen.queryByRole("region", { name: "Markdown 报告预览" }), null);
+  assert.equal(screen.queryByLabelText("证据包完整性摘要"), null);
+  assert.equal(screen.queryByRole("button", { name: /继续|重试/ }), null);
+  assert.equal(assembleCount, 1);
+});
+
+test("新选超限 Excel 会清理旧证据且不暴露重试", async () => {
+  let requestCount = 0;
+  globalThis.fetch = (async (input) => {
+    requestCount += 1;
+    if (String(input).endsWith("/analyze-upload")) {
+      return Response.json(evidenceReadyFixture());
+    }
+    throw new Error(`unexpected request: ${String(input)}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  const input = screen.getByLabelText("选择已有 Excel 文件");
+  fireEvent.change(input, {
+    target: { files: [new File(["PK fixture"], "account.xlsx")] },
+  });
+  await screen.findByRole("button", { name: "继续生成报告" });
+
+  const oversized = new File(["small fixture"], "replacement.xlsx");
+  Object.defineProperty(oversized, "size", {
+    configurable: true,
+    value: 50 * 1024 * 1024 + 1,
+  });
+  fireEvent.change(input, { target: { files: [oversized] } });
+
+  assert.match(screen.getByRole("alert").textContent ?? "", /50 MB/);
+  assert.equal(screen.queryByLabelText("证据包完整性摘要"), null);
+  assert.equal(screen.queryByRole("button", { name: /继续|重试/ }), null);
+  assert.equal(requestCount, 1);
+});
+
+test("StrictMode 与报告替换始终撤销旧 URL 并下载当前 Markdown", async () => {
+  installCompetitorReportModel();
+  let reportNumber = 0;
+  let directBatchIndex = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      const batchId = body?.batchId as "strategy" | "performance" | "execution";
+      return Response.json({ ok: true, batch: competitorBatchFixture(batchId) });
+    }
+    if (url === "https://api.openai.com/v1/chat/completions") {
+      const batchId = ["strategy", "performance", "execution"]
+        [directBatchIndex++ % 3] as "strategy" | "performance" | "execution";
+      return Response.json({
+        choices: [{ message: { role: "assistant", content: JSON.stringify(competitorBatchFixture(batchId)) } }],
+      });
+    }
+    if (url.endsWith("/validate-section")) {
+      return Response.json({
+        ok: true,
+        stage: "section_validated",
+        evidenceId: "0123456789abcdef",
+        batchId: body?.batch.batchId,
+        batch: body?.batch,
+      });
+    }
+    if (url.endsWith("/assemble-report")) {
+      reportNumber += 1;
+      return Response.json({
+        ...reportReadyFixture(),
+        filename: `report-${reportNumber}.md`,
+        reportPath: `/controlled/report-${reportNumber}.md`,
+        markdown: `# 当前报告 ${reportNumber}`,
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<StrictMode><Home /></StrictMode>);
+  await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
+  await user.click(screen.getByRole("button", { name: "开始竞品采集" }));
+  const input = screen.getByLabelText("选择已有 Excel 文件");
+
+  fireEvent.change(input, {
+    target: { files: [new File(["PK first"], "first.xlsx")] },
+  });
+  await screen.findByText("# 当前报告 1");
+  const firstCurrentUrl = screen.getByRole("link", { name: "下载 Markdown" })
+    .getAttribute("href");
+  assert.ok(firstCurrentUrl);
+  assert.deepEqual(
+    createdMarkdownBlobs.slice(0, -1).map(({ url }) => url),
+    revokedMarkdownUrls,
+  );
+
+  fireEvent.change(input, {
+    target: { files: [new File(["PK second"], "second.xlsx")] },
+  });
+  await screen.findByText("# 当前报告 2");
+  const currentDownload = await screen.findByRole("link", { name: "下载 Markdown" });
+  const current = createdMarkdownBlobs.at(-1);
+  assert.ok(current);
+  assert.equal(
+    currentDownload.getAttribute("href"),
+    current.url,
+  );
+  assert.equal(await current.blob.text(), "# 当前报告 2");
+  assert.ok(revokedMarkdownUrls.includes(firstCurrentUrl));
+  assert.deepEqual(
+    createdMarkdownBlobs.slice(0, -1).map(({ url }) => url),
+    revokedMarkdownUrls,
+  );
+  cleanup();
+  assert.deepEqual(
+    createdMarkdownBlobs.map(({ url }) => url),
+    revokedMarkdownUrls,
+  );
+});
+
+function CompetitorCredentialRevisionHarness() {
+  const registry = useModelRegistry();
+  const [pathRequest, setPathRequest] = useState<{
+    requestId: number;
+    excelPath: string;
+  } | null>(null);
+  return (
+    <>
+      <button
+        disabled={registry.connectedModels.length === 0}
+        onClick={() =>
+          setPathRequest({
+            requestId: 1,
+            excelPath: "/controlled/douyin/account.xlsx",
+          })
+        }
+        type="button"
+      >
+        开始凭据修订测试
+      </button>
+      <button
+        onClick={() =>
+          registry.saveCredential(
+            "competitor-report-model",
+            "sk-revised-competitor-report",
+            false,
+            "revision-competitor-report-new",
+          )
+        }
+        type="button"
+      >
+        修订竞品模型凭据
+      </button>
+      <CompetitorReportRunner pathRequest={pathRequest} />
+    </>
+  );
+}
+
+test("竞品洞察报告凭据修订变化会中止请求并丢弃迟到响应", async () => {
+  installCompetitorReportModel();
+  const pending = deferredValue<Response>();
+  const requestedUrls: string[] = [];
+  let modelSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    requestedUrls.push(url);
+    if (url.endsWith("/analyze-path")) {
+      return Response.json(evidenceReadyFixture());
+    }
+    if (url === "/api/agents/competitor-insight") {
+      modelSignal = init?.signal ?? null;
+      return pending.promise;
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(
+    <ModelRegistryProvider>
+      <CompetitorCredentialRevisionHarness />
+    </ModelRegistryProvider>,
+  );
+
+  const start = screen.getByRole("button", { name: "开始凭据修订测试" });
+  await waitFor(() => assert.equal((start as HTMLButtonElement).disabled, false));
+  await user.click(start);
+  await waitFor(() => assertSignalNotAborted(modelSignal));
+  await user.click(screen.getByRole("button", { name: "修订竞品模型凭据" }));
+  assertSignalAborted(modelSignal);
+  pending.resolve(Response.json({
+    ok: true,
+    batch: competitorBatchFixture("strategy"),
+  }));
+
+  await waitFor(() =>
+    assert.match(
+      document.body.textContent ?? "",
+      /模型或凭据已变化[\s\S]*证据包已保留/u,
+    ),
+  );
+  assert.deepEqual(requestedUrls, [
+    "http://127.0.0.1:8768/analyze-path",
+    "/api/agents/competitor-insight",
+  ]);
+  assert.equal(
+    requestedUrls.some((url) => url.endsWith("/validate-section")),
+    false,
+  );
+  assert.match(document.body.textContent ?? "", /0123456789abcdef/);
+});
+
+test("竞品洞察报告停止中止模型请求并保留证据包", async () => {
+  installCompetitorReportModel();
+  let modelSignal: AbortSignal | null = null;
+  let uploadCount = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/analyze-upload")) {
+      uploadCount += 1;
+      return Response.json(evidenceReadyFixture());
+    }
+    if (url === "/api/agents/competitor-insight") {
+      modelSignal = init?.signal ?? null;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("aborted", "AbortError")),
+          { once: true },
+        );
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const user = await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
+    target: { files: [new File(["PK fixture"], "account.xlsx")] },
+  });
+
+  await waitFor(() => assert.ok(screen.getByRole("button", { name: "停止生成" })));
+  await user.click(screen.getByRole("button", { name: "停止生成" }));
+
+  assertSignalAborted(modelSignal);
+  assert.match(document.body.textContent ?? "", /已停止[\s\S]*证据包已保留/);
+  assert.match(document.body.textContent ?? "", /0123456789abcdef/);
+  assert.equal(uploadCount, 1);
+  const stoppedStages = screen.getByRole("list", { name: "竞品报告五阶段" });
+  assert.ok(within(stoppedStages).getByRole("listitem", {
+    name: "读取 Excel（已完成）",
+  }));
+  assert.ok(within(stoppedStages).getByRole("listitem", {
+    name: "计算证据（已完成）",
+  }));
+  assert.equal(
+    within(stoppedStages).getByRole("listitem", { name: "生成三批（当前）" })
+      .getAttribute("aria-current"),
+    "step",
+  );
+});
+
+test("竞品洞察报告失败批次重试从原批次继续且不重复上传", async () => {
+  installCompetitorReportModel();
+  const batchIds = [
+    "strategy",
+    "performance",
+    "performance",
+    "execution",
+  ] as const;
+  let providerIndex = 0;
+  let uploadCount = 0;
+  let shouldFailPerformance = true;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    if (url.endsWith("/analyze-upload")) {
+      uploadCount += 1;
+      return Response.json(evidenceReadyFixture());
+    }
+    if (url === "/api/agents/competitor-insight") {
+      const batchId = batchIds[providerIndex++] ?? "execution";
+      if (batchId === "performance" && shouldFailPerformance) {
+        shouldFailPerformance = false;
+        return new Response("provider unavailable", { status: 503 });
+      }
+      return Response.json({ ok: true, batch: competitorBatchFixture(batchId) });
+    }
+    if (url.endsWith("/validate-section")) {
+      const batch = body?.batch as Record<string, unknown>;
+      return Response.json({
+        ok: true,
+        stage: "section_validated",
+        evidenceId: "0123456789abcdef",
+        batchId: batch.batchId,
+        batch,
+      });
+    }
+    if (url.endsWith("/assemble-report")) {
+      return Response.json(reportReadyFixture());
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const user = await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
+    target: { files: [new File(["PK fixture"], "account.xlsx")] },
+  });
+
+  const retry = await screen.findByRole("button", { name: "重试失败批次" });
+  assert.match(screen.getByRole("alert").textContent ?? "", /数据表现批次/);
+  const failedStages = screen.getByRole("list", { name: "竞品报告五阶段" });
+  assert.ok(within(failedStages).getByRole("listitem", {
+    name: "读取 Excel（已完成）",
+  }));
+  assert.ok(within(failedStages).getByRole("listitem", {
+    name: "计算证据（已完成）",
+  }));
+  assert.equal(
+    within(failedStages).getByRole("listitem", { name: "生成三批（当前）" })
+      .getAttribute("aria-current"),
+    "step",
+  );
+  await user.click(retry);
+  await waitFor(() =>
+    assert.ok(screen.getByRole("heading", { name: "Markdown 报告预览" })),
+  );
+
+  assert.equal(uploadCount, 1);
+  assert.deepEqual(batchIds.slice(0, providerIndex), [
+    "strategy",
+    "performance",
+    "performance",
+    "execution",
+  ]);
+});
+
+test("竞品报告模型首次格式错误会自动重试一次且携带账号上下文", async () => {
+  installCompetitorReportModel();
+  const modelBatchIds: string[] = [];
+  let strategyAttempts = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      modelBatchIds.push(body?.batchId);
+      if (body?.batchId === "strategy") {
+        assert.deepEqual(body.input.account, evidenceReadyFixture().account);
+        strategyAttempts += 1;
+        if (strategyAttempts === 1) {
+          return Response.json({ ok: true, batch: {} });
+        }
+      } else {
+        assert.equal(body.input.account, undefined);
+      }
+      return Response.json({ ok: true, batch: competitorBatchFixture(body.batchId) });
+    }
+    if (url.endsWith("/validate-section")) {
+      return Response.json({
+        ok: true,
+        stage: "section_validated",
+        evidenceId: "0123456789abcdef",
+        batchId: body.batch.batchId,
+        batch: body.batch,
+      });
+    }
+    if (url.endsWith("/assemble-report")) return Response.json(reportReadyFixture());
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
+    target: { files: [new File(["PK fixture"], "account.xlsx")] },
+  });
+
+  await screen.findByRole("heading", { name: "Markdown 报告预览" });
+  assert.deepEqual(modelBatchIds, ["strategy", "strategy", "performance", "execution"]);
+});
+
+test("竞品报告章节校验首次失败会只自动重试当前批次", async () => {
+  installCompetitorReportModel();
+  const modelBatchIds: string[] = [];
+  let validationAttempts = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      modelBatchIds.push(body.batchId);
+      return Response.json({ ok: true, batch: competitorBatchFixture(body.batchId) });
+    }
+    if (url.endsWith("/validate-section")) {
+      validationAttempts += 1;
+      if (validationAttempts === 1) {
+        return Response.json({ ok: false, error: "INVALID_SECTION", message: "safe" }, { status: 400 });
+      }
+      return Response.json({ ok: true, stage: "section_validated", evidenceId: "0123456789abcdef", batchId: body.batch.batchId, batch: body.batch });
+    }
+    if (url.endsWith("/assemble-report")) return Response.json(reportReadyFixture());
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), { target: { files: [new File(["PK"], "account.xlsx")] } });
+
+  await screen.findByRole("heading", { name: "Markdown 报告预览" });
+  assert.deepEqual(modelBatchIds, ["strategy", "strategy", "performance", "execution"]);
+});
+
+test("竞品报告同一批两次格式错误后失败且不进入后续批次", async () => {
+  installCompetitorReportModel();
+  let modelCalls = 0;
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      modelCalls += 1;
+      return Response.json({ ok: true, batch: {} });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), { target: { files: [new File(["PK"], "account.xlsx")] } });
+
+  await screen.findByRole("button", { name: "重试失败批次" });
+  assert.equal(modelCalls, 2);
+});
+
+test("竞品报告运营错误不自动重试", async () => {
+  installCompetitorReportModel();
+  let modelCalls = 0;
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      modelCalls += 1;
+      return new Response("rate limited", { status: 429 });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), { target: { files: [new File(["PK"], "account.xlsx")] } });
+
+  await screen.findByRole("button", { name: "重试失败批次" });
+  assert.equal(modelCalls, 1);
+});
+
+test("竞品报告两次尝试之间停止会阻止第二次请求", async () => {
+  installCompetitorReportModel();
+  let modelCalls = 0;
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      modelCalls += 1;
+      fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
+      return Response.json({ ok: true, batch: {} });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), { target: { files: [new File(["PK"], "account.xlsx")] } });
+
+  await waitFor(() => assert.match(document.body.textContent ?? "", /已停止/));
+  assert.equal(modelCalls, 1);
 });
 
 test("renders the compliance status required by each Agent output", async () => {

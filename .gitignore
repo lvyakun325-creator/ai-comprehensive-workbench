@@ -42,3 +42,5 @@ next-env.d.ts
 /work/
 /.worktrees/
 /.superpowers/
+agents/competitor-insight/.venv/
+agents/competitor-insight/runtime/**/__pycache__/
