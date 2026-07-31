@@ -3,6 +3,7 @@
   "displayName": "竞品洞察 Agent",
   "skills": [
     "skills/platform-router/SKILL.md",
+    "skills/evidence-report/SKILL.md",
     "installed://douyin-scraper",
     "installed://xiaohongshu-scraper"
   ],
