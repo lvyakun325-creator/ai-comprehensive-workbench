@@ -5366,6 +5366,35 @@ test("空或不完整的 batchInputs 在模型请求前失败关闭", async () =
   assert.equal(screen.queryByRole("button", { name: /继续|重试/ }), null);
 });
 
+test("批内排名引用外部证据时在模型请求前失败关闭", async () => {
+  installCompetitorReportModel();
+  let modelCalls = 0;
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (url.endsWith("/analyze-upload")) {
+      const fixture = evidenceReadyFixture();
+      fixture.batchInputs.strategy.rankings.overall = {
+        status: "available",
+        evidenceIds: ["DY-E9999"],
+      };
+      return Response.json(fixture);
+    }
+    modelCalls += 1;
+    return Response.json({ ok: true, batch: competitorBatchFixture("strategy") });
+  }) as typeof fetch;
+  await openCompetitorReportRunner();
+
+  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
+    target: { files: [new File(["PK fixture"], "account.xlsx")] },
+  });
+
+  await waitFor(() =>
+    assert.match(screen.getByRole("alert").textContent ?? "", /无效响应/),
+  );
+  assert.equal(modelCalls, 0);
+  assert.equal(screen.queryByRole("button", { name: /继续|重试/ }), null);
+});
+
 test("新选文件校验失败会隔离旧证据和旧报告", async () => {
   installCompetitorReportModel();
   let assembleCount = 0;
@@ -5654,6 +5683,18 @@ test("竞品洞察报告停止中止模型请求并保留证据包", async () =>
   assert.match(document.body.textContent ?? "", /已停止[\s\S]*证据包已保留/);
   assert.match(document.body.textContent ?? "", /0123456789abcdef/);
   assert.equal(uploadCount, 1);
+  const stoppedStages = screen.getByRole("list", { name: "竞品报告五阶段" });
+  assert.ok(within(stoppedStages).getByRole("listitem", {
+    name: "读取 Excel（已完成）",
+  }));
+  assert.ok(within(stoppedStages).getByRole("listitem", {
+    name: "计算证据（已完成）",
+  }));
+  assert.equal(
+    within(stoppedStages).getByRole("listitem", { name: "生成三批（当前）" })
+      .getAttribute("aria-current"),
+    "step",
+  );
 });
 
 test("竞品洞察报告失败批次重试从原批次继续且不重复上传", async () => {
@@ -5704,6 +5745,18 @@ test("竞品洞察报告失败批次重试从原批次继续且不重复上传",
 
   const retry = await screen.findByRole("button", { name: "重试失败批次" });
   assert.match(screen.getByRole("alert").textContent ?? "", /数据表现批次/);
+  const failedStages = screen.getByRole("list", { name: "竞品报告五阶段" });
+  assert.ok(within(failedStages).getByRole("listitem", {
+    name: "读取 Excel（已完成）",
+  }));
+  assert.ok(within(failedStages).getByRole("listitem", {
+    name: "计算证据（已完成）",
+  }));
+  assert.equal(
+    within(failedStages).getByRole("listitem", { name: "生成三批（当前）" })
+      .getAttribute("aria-current"),
+    "step",
+  );
   await user.click(retry);
   await waitFor(() =>
     assert.ok(screen.getByRole("heading", { name: "Markdown 报告预览" })),

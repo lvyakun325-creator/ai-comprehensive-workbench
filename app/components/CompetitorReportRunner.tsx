@@ -97,6 +97,8 @@ export function CompetitorReportRunner({
     : "";
 
   const [stage, setStage] = useState<ReportStage>("idle");
+  const [lastProgressStage, setLastProgressStage] =
+    useState<ReportStage>("idle");
   const [statusMessage, setStatusMessage] = useState(
     "可抓取抖音账号，或选择已有 .xlsx 文件。",
   );
@@ -117,6 +119,13 @@ export function CompetitorReportRunner({
   const batchesRef = useRef<Record<string, unknown>[]>([]);
   const previousModelRef = useRef({ modelId, credentialRevision });
   const lastPathRequestRef = useRef(0);
+
+  const setReportStage = useCallback((nextStage: ReportStage) => {
+    if (nextStage !== "failed" && nextStage !== "stopped") {
+      setLastProgressStage(nextStage);
+    }
+    setStage(nextStage);
+  }, []);
 
   useLayoutEffect(() => {
     liveModelRef.current = { modelId, credentialRevision };
@@ -161,11 +170,11 @@ export function CompetitorReportRunner({
   ) => {
     if (!isCurrent(run)) return;
     controllerRef.current = null;
-    setStage("failed");
+    setReportStage("failed");
     setFailedBatchId(failed);
     setErrorMessage(message);
     setStatusMessage("本次报告未完成，已保留证据包和通过校验的批次。");
-  }, [isCurrent]);
+  }, [isCurrent, setReportStage]);
 
   const runReportBatches = useCallback(async (
     run: RunContext,
@@ -188,7 +197,7 @@ export function CompetitorReportRunner({
     ) {
       if (!isCurrent(run)) return;
       controllerRef.current = null;
-      setStage("evidence-ready");
+      setReportStage("evidence-ready");
       setStatusMessage(
         "证据包已生成；请先在 Agent 配置中选择已连接且已保存凭据的模型。",
       );
@@ -199,7 +208,7 @@ export function CompetitorReportRunner({
     for (let index = completed.length; index < BATCH_IDS.length; index += 1) {
       const batchId = BATCH_IDS[index];
       try {
-        setStage("generating");
+        setReportStage("generating");
         setStatusMessage(`正在生成${BATCH_LABELS[batchId]}…`);
         const batchInput = recordValue(readyEvidence.batchInputs[batchId]);
         if (!batchInput) {
@@ -225,7 +234,7 @@ export function CompetitorReportRunner({
           });
         if (!isCurrent(run)) return;
 
-        setStage("validating");
+        setReportStage("validating");
         setStatusMessage(`正在校验${BATCH_LABELS[batchId]}的证据引用…`);
         const validated = await validateReportBatch(
           readyEvidence.evidenceId,
@@ -260,7 +269,7 @@ export function CompetitorReportRunner({
     }
 
     try {
-      setStage("saving");
+      setReportStage("saving");
       setStatusMessage("三批章节均已通过校验，正在组装并保存 Markdown…");
       const readyReport = await assembleReport(
         readyEvidence.evidenceId,
@@ -270,7 +279,7 @@ export function CompetitorReportRunner({
       if (!isCurrent(run)) return;
       controllerRef.current = null;
       setReport(readyReport);
-      setStage("completed");
+      setReportStage("completed");
       setFailedBatchId(null);
       setErrorMessage("");
       setStatusMessage("报告已完成；预览和下载来自同一次组装响应。");
@@ -289,6 +298,7 @@ export function CompetitorReportRunner({
     isCurrent,
     model,
     modelId,
+    setReportStage,
   ]);
 
   const analyzeEvidence = useCallback(async (
@@ -306,7 +316,7 @@ export function CompetitorReportRunner({
     setCopyMessage("");
     setErrorMessage("");
     setFailedBatchId(null);
-    setStage(sourceStage);
+    setReportStage(sourceStage);
     setStatusMessage(
       sourceStage === "reading"
         ? "正在读取并安全编码 Excel…"
@@ -318,14 +328,14 @@ export function CompetitorReportRunner({
       evidenceRef.current = readyEvidence;
       run.evidenceId = readyEvidence.evidenceId;
       setEvidence(readyEvidence);
-      setStage("evidence-ready");
+      setReportStage("evidence-ready");
       setStatusMessage("证据包已生成，正在检查 Agent 模型配置…");
       await runReportBatches(run, readyEvidence, []);
     } catch (error) {
       if (!isCurrent(run)) return;
       failRun(run, safeReportError(error), null);
     }
-  }, [createRun, failRun, isCurrent, runReportBatches]);
+  }, [createRun, failRun, isCurrent, runReportBatches, setReportStage]);
 
   const retryReport = useCallback(() => {
     const readyEvidence = evidenceRef.current;
@@ -337,17 +347,17 @@ export function CompetitorReportRunner({
     setFailedBatchId(null);
     setReport(null);
     setCopyMessage("");
-    setStage("evidence-ready");
+    setReportStage("evidence-ready");
     setStatusMessage("证据包已保留，正在从未完成批次继续…");
     void runReportBatches(run, readyEvidence, batchesRef.current);
-  }, [createRun, runReportBatches, stage]);
+  }, [createRun, runReportBatches, setReportStage, stage]);
 
   const stopReport = useCallback(() => {
     if (!ACTIVE_STAGES.has(stage)) return;
     tokenRef.current += 1;
     controllerRef.current?.abort();
     controllerRef.current = null;
-    setStage("stopped");
+    setReportStage("stopped");
     setErrorMessage("");
     setFailedBatchId(null);
     setStatusMessage(
@@ -355,7 +365,7 @@ export function CompetitorReportRunner({
         ? "已停止；证据包已保留，可从未完成批次继续。"
         : "已停止本次 Excel 分析。",
     );
-  }, [stage]);
+  }, [setReportStage, stage]);
 
   const failFileSelection = useCallback((message: string) => {
     tokenRef.current += 1;
@@ -369,9 +379,10 @@ export function CompetitorReportRunner({
     setCopyMessage("");
     setFailedBatchId(null);
     setErrorMessage(message);
-    setStage("failed");
+    setLastProgressStage("idle");
+    setReportStage("failed");
     setStatusMessage("新选文件未通过校验，未复用上一次证据或报告。");
-  }, []);
+  }, [setReportStage]);
 
   const selectExcel = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
@@ -434,15 +445,15 @@ export function CompetitorReportRunner({
     setErrorMessage("");
     setFailedBatchId(null);
     if (evidenceRef.current) {
-      setStage("evidence-ready");
+      setReportStage("evidence-ready");
       setStatusMessage(
         "模型或凭据已变化；证据包已保留，请使用新配置重新生成三批报告。",
       );
     } else {
-      setStage("stopped");
+      setReportStage("stopped");
       setStatusMessage("模型配置已变化，本次迟到响应已丢弃。");
     }
-  }, [credentialRevision, modelId]);
+  }, [credentialRevision, modelId, setReportStage]);
 
   useEffect(
     () => () => {
@@ -453,6 +464,9 @@ export function CompetitorReportRunner({
   );
 
   const active = ACTIVE_STAGES.has(stage);
+  const displayedProgressStage = stage === "failed" || stage === "stopped"
+    ? lastProgressStage
+    : stage;
   const canRetry = Boolean(evidence) && !active && stage !== "completed";
   const completedBatchIds = validatedBatches.map(
     (batch) => batch.batchId as string,
@@ -487,9 +501,9 @@ export function CompetitorReportRunner({
       <ol className="competitor-report-stages" aria-label="竞品报告五阶段">
         {STAGE_ITEMS.map(([stageId, label], index) => (
           <li
-            aria-current={stageClass(stage, stageId) === "current" ? "step" : undefined}
-            aria-label={`${label}（${stageStateLabel(stage, stageId)}）`}
-            className={stageClass(stage, stageId)}
+            aria-current={stageClass(displayedProgressStage, stageId) === "current" ? "step" : undefined}
+            aria-label={`${label}（${stageStateLabel(displayedProgressStage, stageId)}）`}
+            className={stageClass(displayedProgressStage, stageId)}
             key={stageId}
           >
             <span>{index + 1}</span>

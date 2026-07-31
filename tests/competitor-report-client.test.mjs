@@ -17,6 +17,67 @@ function analyze(signal = new AbortController().signal) {
   return analyzeReportPath("/controlled/douyin/account.xlsx", signal);
 }
 
+function evidenceReadyFixture() {
+  const evidence = [{
+    evidenceId: "DY-E0001",
+    title: "第一条作品",
+    likes: 20,
+    comments: 2,
+    collects: 3,
+    shares: 1,
+    totalInteractions: 26,
+    publishedAt: "2026-07-01T10:00:00",
+  }];
+  const ranking = { status: "available", evidenceIds: ["DY-E0001"] };
+  return {
+    ok: true,
+    stage: "evidence_ready",
+    evidenceId: "0123456789abcdef",
+    account: { nickname: "测试账号" },
+    completeness: { missingFields: [], warnings: [] },
+    batchInputs: {
+      strategy: {
+        availability: { comments: true, collects: true, shares: true },
+        rankings: { overall: ranking, startup: ranking },
+        evidence,
+      },
+      performance: {
+        availability: { comments: true, collects: true, shares: true },
+        metrics: {
+          workCount: 1,
+          averageLikes: 20,
+          averageComments: 2,
+          averageCollects: 3,
+          averageShares: 1,
+          averageInteractions: 26,
+          maxInteractions: 26,
+          aboveAverageInteractionCount: 0,
+          top10InteractionShare: 1,
+          maxToAverageMultiple: 1,
+        },
+        rankings: {
+          overall: ranking,
+          startup: ranking,
+          collect: ranking,
+          share: ranking,
+          comment: ranking,
+        },
+        evidence,
+      },
+      execution: {
+        availability: { comments: true, collects: true, shares: true },
+        rankings: {
+          overall: ranking,
+          collect: ranking,
+          share: ranking,
+          comment: ranking,
+        },
+        evidence,
+      },
+    },
+  };
+}
+
 function assertClientCode(code) {
   return (error) =>
     error instanceof CompetitorReportClientError && error.code === code;
@@ -111,23 +172,10 @@ test("abort during a stalled response read cancels the reader and settles", asyn
   assert.equal(canceled, true);
 });
 
-test("malformed and extra-field bridge responses fail closed", async () => {
+test("malformed and unknown-error bridge responses fail closed", async () => {
   const responses = [
     new Response('{"ok":true', {
       headers: { "content-type": "application/json" },
-    }),
-    Response.json({
-      ok: true,
-      stage: "evidence_ready",
-      evidenceId: "0123456789abcdef",
-      account: {},
-      completeness: {},
-      batchInputs: {
-        strategy: { evidence: [{ evidenceId: "DY-E0001" }] },
-        performance: { evidence: [{ evidenceId: "DY-E0001" }] },
-        execution: { evidence: [{ evidenceId: "DY-E0001" }] },
-      },
-      extra: "must fail",
     }),
     Response.json({ ok: false, error: "UNKNOWN", message: "secret provider body" }, {
       status: 502,
@@ -143,4 +191,51 @@ test("malformed and extra-field bridge responses fail closed", async () => {
         && !error.message.includes("secret provider body"),
     );
   }
+});
+
+test("a top-level extra field alone makes an otherwise valid response fail closed", async () => {
+  globalThis.fetch = async () => Response.json(evidenceReadyFixture());
+  await analyze();
+
+  globalThis.fetch = async () => Response.json({
+    ...evidenceReadyFixture(),
+    extra: "must fail",
+  });
+  await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
+});
+
+test("ranking evidence IDs must belong to evidence from the same batch", async () => {
+  const fixture = structuredClone(evidenceReadyFixture());
+  fixture.batchInputs.strategy.rankings.overall.evidenceIds = ["DY-E9999"];
+  globalThis.fetch = async () => Response.json(fixture);
+
+  await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
+});
+
+test("every batch requires a nonempty available overall ranking", async () => {
+  const fixture = structuredClone(evidenceReadyFixture());
+  fixture.batchInputs.performance.rankings.overall.evidenceIds = [];
+  globalThis.fetch = async () => Response.json(fixture);
+
+  await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
+});
+
+test("ranking availability follows the strict service contract", async () => {
+  const startupUnavailable = structuredClone(evidenceReadyFixture());
+  startupUnavailable.batchInputs.strategy.rankings.startup = {
+    status: "unavailable",
+    evidenceIds: [],
+  };
+  globalThis.fetch = async () => Response.json(startupUnavailable);
+  await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
+
+  const emptyAvailableCollects = structuredClone(evidenceReadyFixture());
+  emptyAvailableCollects.batchInputs.performance.rankings.collect.evidenceIds = [];
+  globalThis.fetch = async () => Response.json(emptyAvailableCollects);
+  await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
+
+  const unavailableMismatch = structuredClone(evidenceReadyFixture());
+  unavailableMismatch.batchInputs.execution.availability.comments = false;
+  globalThis.fetch = async () => Response.json(unavailableMismatch);
+  await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
 });

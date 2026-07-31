@@ -315,8 +315,18 @@ function validBatchInput(
   if (
     !hasExactKeys(value, expectedKeys)
     || !validAvailability(value.availability)
-    || !validRankings(batchId, value.rankings)
-    || !validEvidenceItems(value.evidence)
+  ) {
+    return false;
+  }
+  const evidenceIds = validEvidenceIdSet(value.evidence);
+  if (
+    !evidenceIds
+    || !validRankings(
+      batchId,
+      value.rankings,
+      evidenceIds,
+      value.availability as Record<string, boolean>,
+    )
   ) {
     return false;
   }
@@ -335,6 +345,8 @@ function validAvailability(value: unknown): boolean {
 function validRankings(
   batchId: "strategy" | "performance" | "execution",
   value: unknown,
+  batchEvidenceIds: ReadonlySet<string>,
+  availability: Readonly<Record<string, boolean>>,
 ): boolean {
   if (!isRecord(value)) return false;
   const expected = batchId === "strategy"
@@ -345,15 +357,48 @@ function validRankings(
   if (!hasExactKeys(value, expected)) return false;
   return expected.every((name) => {
     const ranking = value[name];
-    return (
-      isRecord(ranking)
-      && hasExactKeys(ranking, ["status", "evidenceIds"])
-      && ["available", "unavailable"].includes(String(ranking.status))
-      && Array.isArray(ranking.evidenceIds)
-      && ranking.evidenceIds.length <= 10
-      && ranking.evidenceIds.every(validEvidenceId)
-    );
+    if (
+      !isRecord(ranking)
+      || !hasExactKeys(ranking, ["status", "evidenceIds"])
+      || (ranking.status !== "available" && ranking.status !== "unavailable")
+      || !Array.isArray(ranking.evidenceIds)
+      || ranking.evidenceIds.length > 10
+      || !ranking.evidenceIds.every(validEvidenceId)
+    ) {
+      return false;
+    }
+    const ids = ranking.evidenceIds as string[];
+    if (
+      new Set(ids).size !== ids.length
+      || ids.some((id) => !batchEvidenceIds.has(id))
+    ) {
+      return false;
+    }
+    if (name === "overall") {
+      return ranking.status === "available" && ids.length > 0;
+    }
+    if (name === "startup") {
+      return ranking.status === "available";
+    }
+    const availabilityKey = name === "collect"
+      ? "collects"
+      : name === "share"
+        ? "shares"
+        : "comments";
+    const expectedStatus = availability[availabilityKey]
+      ? "available"
+      : "unavailable";
+    if (ranking.status !== expectedStatus) return false;
+    return ranking.status === "available" ? ids.length > 0 : ids.length === 0;
   });
+}
+
+function validEvidenceIdSet(value: unknown): ReadonlySet<string> | null {
+  if (!validEvidenceItems(value)) return null;
+  const items = value as Array<Record<string, unknown>>;
+  const ids = items.map((item) => item.evidenceId as string);
+  const uniqueIds = new Set(ids);
+  return uniqueIds.size === ids.length ? uniqueIds : null;
 }
 
 function validEvidenceItems(value: unknown): boolean {
