@@ -21,6 +21,22 @@ def _availability(parsed: dict[str, object]) -> dict[str, bool]:
     return {field: field not in missing for field in ("comments", "collects", "shares")}
 
 
+def _canonical_string_list(value: object) -> list[str]:
+    values = cast(list[object], value) if isinstance(value, list) else []
+    return sorted(str(item) for item in values)
+
+
+def _canonical_parsed(parsed: dict[str, object]) -> dict[str, object]:
+    works = [dict(work) for work in cast(list[dict[str, object]], parsed.get("works", []))]
+    return {
+        "account": dict(cast(dict[str, object], parsed.get("account", {}))),
+        "fieldMap": dict(cast(dict[str, object], parsed.get("fieldMap", {}))),
+        "missingFields": _canonical_string_list(parsed.get("missingFields", [])),
+        "warnings": _canonical_string_list(parsed.get("warnings", [])),
+        "works": sorted(works, key=_source_row),
+    }
+
+
 def _bundle_digest(parsed: dict[str, object], source: dict[str, str]) -> str:
     canonical_input = {"parsed": parsed, "source": source}
     payload = json.dumps(canonical_input, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -37,8 +53,9 @@ def _rank_by_row(rankings: dict[str, dict[str, object]]) -> dict[str, dict[int, 
 
 def build_evidence_bundle(parsed: dict[str, object], source: dict[str, str]) -> EvidenceBundle:
     """Create a repeatable evidence bundle without relying on current time or input list order."""
-    works = [dict(work) for work in cast(list[dict[str, object]], parsed.get("works", []))]
-    rankings = rank_works(works, _availability(parsed))
+    canonical_parsed = _canonical_parsed(parsed)
+    works = cast(list[dict[str, object]], canonical_parsed["works"])
+    rankings = rank_works(works, _availability(canonical_parsed))
     metrics = calculate_metrics(works, rankings)
     rank_positions = _rank_by_row(rankings)
     items = []
@@ -64,14 +81,14 @@ def build_evidence_bundle(parsed: dict[str, object], source: dict[str, str]) -> 
         EvidenceBundle,
         {
             "evidenceVersion": "1.0",
-            "evidenceId": _bundle_digest(parsed, source),
+            "evidenceId": _bundle_digest(canonical_parsed, source),
             "source": dict(source),
-            "account": dict(cast(dict[str, object], parsed.get("account", {}))),
+            "account": dict(cast(dict[str, object], canonical_parsed["account"])),
             "completeness": {
-                "fieldMap": dict(cast(dict[str, object], parsed.get("fieldMap", {}))),
-                "missingFields": list(cast(list[object], parsed.get("missingFields", []))),
-                "warnings": list(cast(list[object], parsed.get("warnings", []))),
-                "availability": _availability(parsed),
+                "fieldMap": dict(cast(dict[str, object], canonical_parsed["fieldMap"])),
+                "missingFields": list(cast(list[object], canonical_parsed["missingFields"])),
+                "warnings": list(cast(list[object], canonical_parsed["warnings"])),
+                "availability": _availability(canonical_parsed),
             },
             "metrics": metrics,
             "rankings": rankings,

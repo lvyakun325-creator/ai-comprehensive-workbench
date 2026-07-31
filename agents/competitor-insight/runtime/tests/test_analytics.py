@@ -53,6 +53,8 @@ class AnalyticsTests(unittest.TestCase):
 
                 self.assertEqual(len(rankings["startup"]["sampleRows"]), expected_window_size)
                 self.assertNotIn(count - 1, rankings["startup"]["sampleRows"])
+                self.assertNotIn(count - 1, rankings["startup"]["rows"])
+                self.assertTrue(set(rankings["startup"]["rows"]).issubset(rankings["startup"]["sampleRows"]))
                 self.assertLessEqual(len(rankings["startup"]["rows"]), 5)
 
     def test_startup_prefers_early_high_performers_then_fills_by_interactions(self) -> None:

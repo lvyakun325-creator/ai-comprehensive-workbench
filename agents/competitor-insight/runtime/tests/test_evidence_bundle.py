@@ -16,8 +16,8 @@ class EvidenceBundleTests(unittest.TestCase):
         return {
             "account": {"nickname": "测试账号", "followers": 100},
             "fieldMap": {"title": "标题", "likes": "点赞"},
-            "missingFields": ["shares"],
-            "warnings": ["missing_metric:shares:row=9"],
+            "missingFields": ["shares", "url"],
+            "warnings": ["missing_metric:shares:row=9", "missing_metric:url:row=2"],
             "works": [
                 {"sourceRow": 9, "title": "第二行", "likes": 7, "comments": 1, "collects": 2, "shares": 0, "publishedAt": "2026-01-02T00:00:00", "url": "https://example.com/9"},
                 {"sourceRow": 2, "title": "第一行", "likes": 20, "comments": 2, "collects": 3, "shares": 0, "publishedAt": "2026-01-01T00:00:00", "url": "https://example.com/2"},
@@ -49,6 +49,24 @@ class EvidenceBundleTests(unittest.TestCase):
 
         self.assertTrue(output_path.name.endswith("_证据包.json"))
         self.assertEqual(loaded, bundle)
+
+    def test_canonicalizes_reordered_input_for_bundle_id_and_json_output(self) -> None:
+        parsed_a = self._parsed()
+        parsed_b = self._parsed()
+        parsed_b["works"].reverse()
+        parsed_b["missingFields"].reverse()
+        parsed_b["warnings"].reverse()
+        source = {"kind": "upload", "name": "sample.xlsx"}
+
+        bundle_a = build_evidence_bundle(parsed_a, source)
+        bundle_b = build_evidence_bundle(parsed_b, source)
+
+        self.assertEqual(bundle_a, bundle_b)
+        self.assertEqual(bundle_a["evidenceId"], bundle_b["evidenceId"])
+        with TemporaryDirectory() as directory:
+            output_a = write_evidence_bundle(bundle_a, Path(directory) / "a")
+            output_b = write_evidence_bundle(bundle_b, Path(directory) / "b")
+            self.assertEqual(output_a.read_text(encoding="utf-8"), output_b.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
