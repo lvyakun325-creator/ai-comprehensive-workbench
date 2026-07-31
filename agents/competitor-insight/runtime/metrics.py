@@ -37,6 +37,8 @@ def parse_metric(value: object) -> tuple[int, list[str]]:
     else:
         return 0, ["unrecognized_metric"]
 
+    if not numeric.is_finite():
+        return 0, ["unrecognized_metric"]
     if numeric < 0:
         return 0, ["negative_metric"]
     return int(numeric), []

@@ -83,6 +83,27 @@ class ReadAccountWorkbookTests(unittest.TestCase):
         self.assertEqual(parsed["works"][0]["collects"], 0)
         self.assertEqual(parsed["works"][0]["shares"], 0)
 
+    def test_distinguishes_real_zero_from_missing_metric_cells(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = self._write_workbook(
+                directory,
+                [("昵称", "测试账号")],
+                ["标题", "点赞", "评论", "收藏", "分享", "发布时间"],
+                [
+                    ["真实零互动", 0, 0, 0, 0, "2026-07-31 12:30"],
+                    ["缺失互动", None, "", 1, None, "2026-07-31 12:30"],
+                ],
+            )
+
+            parsed = read_account_workbook(path)
+
+        self.assertEqual(parsed["works"][0]["likes"], 0)
+        self.assertEqual(parsed["works"][1]["likes"], 0)
+        self.assertIn("missing_metric:likes:row=3", parsed["warnings"])
+        self.assertIn("missing_metric:comments:row=3", parsed["warnings"])
+        self.assertIn("missing_metric:shares:row=3", parsed["warnings"])
+        self.assertNotIn("missing_metric:likes:row=2", parsed["warnings"])
+
     def test_rejects_missing_title_field(self) -> None:
         with TemporaryDirectory() as directory:
             path = self._write_workbook(

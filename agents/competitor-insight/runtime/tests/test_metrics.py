@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 import sys
 import unittest
@@ -34,6 +35,13 @@ class ParseMetricTests(unittest.TestCase):
 
         self.assertIn("negative_metric", negative_warnings)
         self.assertIn("unrecognized_metric", unrecognized_warnings)
+
+    def test_rejects_non_finite_decimal_metrics(self) -> None:
+        for raw in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
+            with self.subTest(raw=raw):
+                actual, warnings = parse_metric(raw)
+                self.assertEqual(actual, 0)
+                self.assertIn("unrecognized_metric", warnings)
 
 
 class ParsePublishTimeTests(unittest.TestCase):

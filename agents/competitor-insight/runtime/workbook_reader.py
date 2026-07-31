@@ -99,6 +99,8 @@ def read_account_workbook(path: Path) -> dict[str, object]:
             for field in ("likes", "comments", "collects", "shares"):
                 column = field_map.get(field)
                 raw_value = row[header_positions[_normalized_text(column)]] if column else None
+                if column and (raw_value is None or (isinstance(raw_value, str) and not raw_value.strip())):
+                    warnings.append(f"missing_metric:{field}:row={row_number}")
                 parsed_value, field_warnings = parse_metric(raw_value)
                 work[field] = parsed_value
                 warnings.extend(field_warnings)
