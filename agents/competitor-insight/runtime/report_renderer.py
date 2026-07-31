@@ -411,6 +411,8 @@ def validate_final_report(
     """Return stable final-report errors for structure, evidence, and numeric leaks."""
     errors: list[str] = []
     by_id = _validated_batch_map(bundle, batches)
+    if markdown != assemble_report(bundle, batches):
+        errors.append("report_content_mismatch")
     lines, active, found_fence = _active_lines(markdown)
     if found_fence:
         errors.append("forbidden_code_fence")

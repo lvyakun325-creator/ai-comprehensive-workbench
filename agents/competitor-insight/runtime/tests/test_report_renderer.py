@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 import sys
 import unittest
@@ -255,6 +256,44 @@ class ReportRendererTests(unittest.TestCase):
             validate_final_report("\n".join(missing_one) + "\n", bundle, batches),
         )
 
+    def test_final_validation_requires_exact_reassembly_from_same_batches(self) -> None:
+        bundle = evidence_bundle()
+        batches = valid_batches()
+        markdown = assemble_report(bundle, batches)
+        self.assertEqual(validate_final_report(markdown, bundle, batches), [])
+
+        lines = markdown.splitlines()
+        references = [
+            line for line in lines if line.startswith("  - 证据 `")
+        ]
+        moved_to_end = "\n".join(
+            [
+                *(
+                    line
+                    for line in lines
+                    if not line.startswith("  - 证据 `")
+                ),
+                *references,
+            ]
+        ) + "\n"
+        self.assertIn(
+            "report_content_mismatch",
+            validate_final_report(moved_to_end, bundle, batches),
+        )
+
+        changed_batches = deepcopy(batches)
+        changed_batches[0]["claims"][0]["statement"] = "另一条合法战略判断"
+        self.assertIn(
+            "report_content_mismatch",
+            validate_final_report(markdown, bundle, changed_batches),
+        )
+
+        changed_body = markdown.replace("业务判断", "业务判断已被改写", 1)
+        self.assertIn(
+            "report_content_mismatch",
+            validate_final_report(changed_body, bundle, batches),
+        )
+
     def test_evidence_scan_ignores_id_like_text_outside_formal_reference_prefix(self) -> None:
         bundle = evidence_bundle()
         bundle["account"]["nickname"] = "测试 DY-E9999"
@@ -378,28 +417,60 @@ class ReportRendererTests(unittest.TestCase):
         self.assertIn("medical_compliance_violation:保证有效", errors)
         self.assertIn("medical_compliance_violation:停药", errors)
 
-        double_negative = markdown + "\n不得不说这个方法保证有效。\n"
-        self.assertIn(
-            "medical_compliance_violation:保证有效",
-            validate_final_report(double_negative, bundle, batches),
-        )
-
-        chinese_number = markdown + "\n该账号已有九十九万互动。\n"
-        self.assertIn(
-            "untrusted_numeric_claim:九十九万",
-            validate_final_report(chinese_number, bundle, batches),
-        )
+        for chinese_claim in (
+            "该账号已有九十九万互动",
+            "九千九百次互动",
+            "九千九百个点赞",
+        ):
+            with self.subTest(chinese_claim=chinese_claim):
+                chinese_number = markdown + f"\n{chinese_claim}。\n"
+                self.assertIn(
+                    "untrusted_numeric_claim",
+                    " ".join(
+                        validate_final_report(
+                            chinese_number,
+                            bundle,
+                            batches,
+                        )
+                    ),
+                )
 
         for safe_warning in (
             "不要宣称保证有效",
             "不得使用‘保证有效’",
             "不建议停药",
+            "不要 宣称“保证有效”",
+            "不得使用 “保证有效”",
+            "不得使用：“保证有效”",
         ):
             with self.subTest(safe_warning=safe_warning):
                 safe_markdown = markdown + f"\n{safe_warning}\n"
                 self.assertNotIn(
                     "medical_compliance_violation",
                     " ".join(validate_final_report(safe_markdown, bundle, batches)),
+                )
+
+        for unsafe_warning in (
+            "不得不保证有效",
+            "不能不保证有效",
+            "并非不能保证有效",
+            "不得不说这个方法保证有效",
+            "并非不应宣称保证有效",
+            "不是不能保证有效",
+            "不等于不得使用保证有效",
+            "并非不建议停药",
+        ):
+            with self.subTest(unsafe_warning=unsafe_warning):
+                unsafe_markdown = markdown + f"\n{unsafe_warning}\n"
+                self.assertIn(
+                    "medical_compliance_violation",
+                    " ".join(
+                        validate_final_report(
+                            unsafe_markdown,
+                            bundle,
+                            batches,
+                        )
+                    ),
                 )
 
 

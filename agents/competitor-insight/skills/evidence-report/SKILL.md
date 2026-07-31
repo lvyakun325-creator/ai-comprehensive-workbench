@@ -13,4 +13,4 @@ Preserve evidence IDs exactly. The model must not output, calculate, rewrite, or
 
 Render the policy's fixed sections in order. The completed report contains five topic directions, three filming templates, seven distinct day entries, and non-empty item-level medical-health compliance notes. Do not invent evidence, claims, medical outcomes, credentials, or platform-rule facts.
 
-Final validation always receives the rendered Markdown, the same `EvidenceBundle`, and the same three validated batches used for assembly. Never validate with Markdown and evidence alone. Compare the full ordered evidence-reference line sequence against those batches so deleted, duplicated, reordered, or substituted references fail.
+Final validation always receives the rendered Markdown, the same `EvidenceBundle`, and the same three validated batches used for assembly. Never validate with Markdown and evidence alone. Reassemble the expected Markdown with the same deterministic assembler and require exact full-document equality. Also compare the full ordered evidence-reference line sequence against those batches so moved, deleted, duplicated, reordered, or substituted references fail.

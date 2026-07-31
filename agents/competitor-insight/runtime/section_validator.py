@@ -49,6 +49,11 @@ _CHINESE_METRIC_PATTERN = re.compile(
     r"(?:为|有|达到|约|共|是|：|:)?\s*"
     rf"(?P<claim>百分之{_CHINESE_NUMERAL}|{_CHINESE_NUMERAL})"
 )
+_CHINESE_INVERTED_METRIC_PATTERN = re.compile(
+    rf"(?P<claim>{_CHINESE_NUMERAL})\s*(?:次|个|条|位)?\s*"
+    r"(?:互动|点赞|评论|收藏|分享|播放|粉丝|排名|占比|销售额|成交额|"
+    r"转化率|复购率|退款率)"
+)
 _CHINESE_PERCENT_PATTERN = re.compile(
     rf"(?P<claim>百分之{_CHINESE_NUMERAL})"
 )
@@ -83,16 +88,20 @@ _MEDICAL_VIOLATIONS = (
 )
 _MEDICATION_ACTIONS = {"停药", "换药", "加量", "减量"}
 _WARNING_ACTION_PATTERN = re.compile(
-    r"(?:不要|不得|不能|不可|不应|禁止|严禁|切勿|避免)"
+    r"(?:不要|不得|不能|不可|不应|禁止|严禁|切勿|避免)\s*"
     r"(?:宣称|声称|宣传|承诺|使用|写作|写成|表述|表达|说成)"
-    r"[“\"'‘「『]?$"
+    r"\s*[:：]?\s*[“\"'‘「『]?\s*$"
 )
 _MEDICATION_WARNING_PATTERN = re.compile(
     r"(?:不建议|不要|不得|不能|不可|不应|禁止|严禁|切勿)"
-    r"(?:自行|擅自)?$"
+    r"\s*(?:自行|擅自)?\s*$"
 )
 _NO_REPLACE_DOCTOR_PATTERN = re.compile(
-    r"(?:不|不要|不得|不能|不可|不应|禁止|严禁|切勿)$"
+    r"(?:不|不要|不得|不能|不可|不应|禁止|严禁|切勿)\s*$"
+)
+_NEGATION_SCOPE_ESCAPE_PATTERN = re.compile(
+    r"(?:并非|不是|不等于)\s*(?:不应|不能|不得|不要|不建议)"
+    r"|(?:不得不|不能不)"
 )
 
 
@@ -133,17 +142,23 @@ def medical_compliance_violations(text: str) -> list[str]:
             if position < 0:
                 break
             prefix = text[:position].rstrip()
-            if phrase in _MEDICATION_ACTIONS:
+            clause_prefix = re.split(r"[。；！？\n]", prefix)[-1]
+            escaped_scope = bool(
+                _NEGATION_SCOPE_ESCAPE_PATTERN.search(clause_prefix)
+            )
+            if escaped_scope:
+                explicitly_prohibited = False
+            elif phrase in _MEDICATION_ACTIONS:
                 explicitly_prohibited = bool(
-                    _MEDICATION_WARNING_PATTERN.search(prefix)
+                    _MEDICATION_WARNING_PATTERN.search(clause_prefix)
                 )
             elif phrase == "替代医生":
                 explicitly_prohibited = bool(
-                    _NO_REPLACE_DOCTOR_PATTERN.search(prefix)
+                    _NO_REPLACE_DOCTOR_PATTERN.search(clause_prefix)
                 )
             else:
                 explicitly_prohibited = bool(
-                    _WARNING_ACTION_PATTERN.search(prefix)
+                    _WARNING_ACTION_PATTERN.search(clause_prefix)
                 )
             if not explicitly_prohibited and phrase not in violations:
                 violations.append(phrase)
@@ -159,6 +174,7 @@ def untrusted_numeric_claims(text: str) -> list[str]:
     claims = [match.group(0) for match in _NUMERIC_PATTERN.finditer(without_allowed)]
     for pattern in (
         _CHINESE_METRIC_PATTERN,
+        _CHINESE_INVERTED_METRIC_PATTERN,
         _CHINESE_PERCENT_PATTERN,
         _CHINESE_MAGNITUDE_PATTERN,
     ):

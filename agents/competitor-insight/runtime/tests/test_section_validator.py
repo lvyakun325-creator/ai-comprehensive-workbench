@@ -286,6 +286,8 @@ class SectionValidatorTests(unittest.TestCase):
             "互动九十九",
             "占比百分之九十",
             "该作品已有九十九万",
+            "九千九百次互动",
+            "九千九百个点赞",
         ):
             with self.subTest(statement=statement):
                 chinese_number = strategy_batch()
@@ -297,6 +299,9 @@ class SectionValidatorTests(unittest.TestCase):
             "不要宣称保证有效",
             "不得使用‘保证有效’",
             "不建议停药",
+            "不要 宣称“保证有效”",
+            "不得使用 “保证有效”",
+            "不得使用：“保证有效”",
         ):
             with self.subTest(safe_statement=statement):
                 safe_warning = strategy_batch()
@@ -308,13 +313,17 @@ class SectionValidatorTests(unittest.TestCase):
             "不能不保证有效",
             "并非不能保证有效",
             "不得不说这个方法保证有效",
+            "并非不应宣称保证有效",
+            "不是不能保证有效",
+            "不等于不得使用保证有效",
+            "并非不建议停药",
         ):
             with self.subTest(unsafe_statement=statement):
                 double_negative = strategy_batch()
                 double_negative["claims"][0]["statement"] = statement
                 with self.assertRaisesRegex(
                     ValueError,
-                    "medical_compliance_violation:保证有效",
+                    "medical_compliance_violation",
                 ):
                     validate_section_batch(double_negative, evidence_bundle())
 
