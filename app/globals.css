@@ -1966,6 +1966,146 @@ button {
 .compliance-status.data-review strong,
 .compliance-status.data-review p { color: #42647f; }
 
+.competitor-console {
+  padding: 22px;
+  border: 1px solid #dce6f4;
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top right, rgba(52, 111, 246, .09), transparent 34%),
+    #fff;
+}
+.competitor-console-heading,
+.competitor-skill-card > div,
+.competitor-overview-actions,
+.competitor-detection {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.competitor-console-heading { align-items: flex-start; }
+.competitor-console-heading h2 { margin: 3px 0 7px; font-size: 24px; }
+.competitor-console-heading p,
+.competitor-overview-actions p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.competitor-live-badge {
+  flex: 0 0 auto;
+  padding: 7px 10px;
+  border: 1px solid #b9e4ce;
+  border-radius: 999px;
+  background: #effaf4;
+  color: #25714d;
+  font-size: 11px;
+  font-weight: 800;
+}
+.competitor-capability-grid {
+  margin-top: 20px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.competitor-skill-card {
+  padding: 16px;
+  border: 1px solid #dfe7f2;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .88);
+}
+.competitor-skill-card > div span { color: #33445f; font-size: 13px; font-weight: 800; }
+.competitor-skill-card > div b { color: #2d865b; font-size: 11px; }
+.competitor-skill-card.planned > div b { color: #94702a; }
+.competitor-skill-card strong { display: block; margin-top: 15px; color: #2f66f6; font-size: 16px; }
+.competitor-skill-card.planned strong { color: #8290a5; }
+.competitor-skill-card p { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.competitor-workflow {
+  margin: 16px 0 0;
+  padding: 13px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  border-radius: 12px;
+  background: #f5f8fc;
+  list-style: none;
+}
+.competitor-workflow li { color: #607089; font-size: 11px; }
+.competitor-workflow li span {
+  width: 21px;
+  height: 21px;
+  margin-right: 6px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #e5edff;
+  color: #2f66f6;
+  font-weight: 800;
+}
+.competitor-overview-actions {
+  margin-top: 16px;
+  padding: 15px 16px;
+  align-items: flex-end;
+  border: 1px solid #dbe5f2;
+  border-radius: 12px;
+  background: #fbfcfe;
+}
+.competitor-overview-actions strong { display: block; margin-bottom: 4px; color: #34445e; font-size: 13px; }
+.competitor-overview-actions button,
+.competitor-dispatch-button {
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 10px;
+  background: #2f66f6;
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+.competitor-source-form { margin-top: 18px; display: grid; gap: 12px; }
+.competitor-source-form > label { display: grid; gap: 8px; color: #3e4b60; font-size: 12px; font-weight: 800; }
+.competitor-source-form textarea {
+  min-height: 108px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px;
+  border: 1px solid #d6e0ed;
+  border-radius: 12px;
+  background: #fbfcfe;
+  color: #354156;
+  font: inherit;
+  resize: vertical;
+}
+.competitor-detection {
+  padding: 12px 13px;
+  border: 1px solid #dce5f0;
+  border-radius: 11px;
+  background: #f8fafc;
+}
+.competitor-detection span { flex: 0 0 auto; color: #455a78; font-size: 12px; font-weight: 800; }
+.competitor-detection p { flex: 1 1 auto; margin: 0; color: #68788e; font-size: 11px; line-height: 1.55; }
+.competitor-detection code { color: #2f66f6; font-size: 11px; }
+.competitor-detection.ready { border-color: #b9e4ce; background: #effaf4; }
+.competitor-detection.planned { border-color: #ead5a9; background: #fff9ed; }
+.competitor-detection.unsupported { border-color: #edc4c4; background: #fff6f6; }
+.competitor-dispatch-button { justify-self: start; }
+.competitor-dispatch-button:disabled { cursor: not-allowed; opacity: .45; }
+.competitor-dispatch-result {
+  padding: 11px 13px;
+  border: 1px solid #b9e4ce;
+  border-radius: 10px;
+  background: #effaf4;
+  color: #25714d;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.competitor-dispatch-result.planned,
+.competitor-dispatch-result.unsupported {
+  border-color: #ead5a9;
+  background: #fff9ed;
+  color: #845f1f;
+}
+
 .matrix-overview { display: grid; grid-template-columns: minmax(220px, .75fr) minmax(0, 1.25fr); gap: 14px; }
 .matrix-skill-card,
 .matrix-flow-card,
@@ -3098,12 +3238,21 @@ button {
 
   .agent-grid,
   .agent-project-grid,
+  .competitor-capability-grid,
+  .competitor-workflow,
   .matrix-overview,
   .matrix-form-grid,
   .matrix-optional-fields,
   .matrix-private-assets,
   .matrix-config-grid {
     grid-template-columns: 1fr;
+  }
+
+  .competitor-console-heading,
+  .competitor-overview-actions,
+  .competitor-detection {
+    align-items: stretch;
+    display: grid;
   }
 
   .agent-task-view-heading,

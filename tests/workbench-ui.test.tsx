@@ -4828,19 +4828,65 @@ test("video account intake requires private assets before it can become ready", 
   assert.ok(screen.getByRole("status", { name: "诊断提交状态" }));
 });
 
-test("competitor insight Agent does not show the content matrix intake form", async () => {
+test("competitor insight Agent opens its platform-aware collection console", async () => {
+  const requestedUrls: string[] = [];
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    ok: true,
+    outputDir: "/tmp/competitor-insight/douyin",
+  }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  })) as typeof fetch;
+  const successfulFetch = globalThis.fetch;
+  globalThis.fetch = (async (input, init) => {
+    requestedUrls.push(String(input));
+    return successfulFetch(input, init);
+  }) as typeof fetch;
   const user = userEvent.setup({ document });
   render(<Home />);
 
   await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
-  await user.click(screen.getByRole("button", { name: "Agent 对话" }));
+  assert.ok(screen.getByRole("heading", { name: "跨平台竞品洞察工作流" }));
+  assert.match(
+    screen.getByText("douyin-scraper").closest("article")?.textContent ?? "",
+    /已接入/,
+  );
+  assert.match(
+    screen.getByText("xiaohongshu-scraper").closest("article")?.textContent ?? "",
+    /已接入/,
+  );
+  await user.click(screen.getByRole("button", { name: "开始竞品采集" }));
 
+  assert.equal(
+    screen.getByRole("button", { name: "Agent 对话" }).getAttribute("aria-current"),
+    "page",
+  );
+  assert.ok(screen.getByRole("heading", { name: "粘贴链接，自动选择抓取 Skill" }));
   assert.equal(screen.queryByRole("heading", { name: "企业矩阵基建诊断表" }), null);
   assert.equal(screen.queryByRole("button", { name: "开始矩阵诊断" }), null);
-  assert.match(
-    screen.getByRole("status", { name: "设计预览提示" }).textContent ?? "",
-    /Agent 对话将在真实 Agent 接入后启用/,
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://v.douyin.com/test-account/",
   );
+  assert.match(
+    screen.getByRole("status").textContent ?? "",
+    /已识别抖音/,
+  );
+  await user.click(screen.getByRole("button", { name: "识别并调用抓取 Skill" }));
+  await waitFor(() => {
+    assert.match(screen.getByRole("alert").textContent ?? "", /抓取完成/);
+  });
+  assert.equal(requestedUrls.at(-1), "http://127.0.0.1:8765/scrape");
+
+  await user.clear(screen.getByLabelText("竞品主页或作品链接"));
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://www.xiaohongshu.com/explore/test-note",
+  );
+  await user.click(screen.getByRole("button", { name: "识别并调用抓取 Skill" }));
+  await waitFor(() => {
+    assert.equal(requestedUrls.at(-1), "http://127.0.0.1:8766/scrape");
+  });
 });
 
 test("renders the compliance status required by each Agent output", async () => {

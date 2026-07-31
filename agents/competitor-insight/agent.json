@@ -1,0 +1,11 @@
+{
+  "agentId": "competitor-insight",
+  "displayName": "竞品洞察 Agent",
+  "skills": [
+    "skills/platform-router/SKILL.md",
+    "installed://douyin-scraper",
+    "installed://xiaohongshu-scraper"
+  ],
+  "plannedSkills": [],
+  "status": "running"
+}
