@@ -13,6 +13,7 @@ export type CompetitorPlatformDetection = {
   platformLabel: string;
   skillId: string | null;
   bridgeUrl: string | null;
+  reportMode: "douyin-account" | "none";
   normalizedUrl: string;
   message: string;
 };

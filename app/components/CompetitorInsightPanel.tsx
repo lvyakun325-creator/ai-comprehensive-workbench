@@ -5,6 +5,10 @@ import {
   COMPETITOR_PLATFORM_ROUTES,
   detectCompetitorPlatform,
 } from "../lib/competitor-platform-router.mjs";
+import {
+  CompetitorReportRunner,
+  type CompetitorReportPathRequest,
+} from "./CompetitorReportRunner";
 
 type CompetitorInsightPanelProps = {
   mode: "overview" | "run";
@@ -22,6 +26,8 @@ export function CompetitorInsightPanel({
   const [source, setSource] = useState("");
   const [dispatchMessage, setDispatchMessage] = useState("");
   const [isDispatching, setIsDispatching] = useState(false);
+  const [reportPathRequest, setReportPathRequest] =
+    useState<CompetitorReportPathRequest | null>(null);
   const detection = useMemo(
     () => detectCompetitorPlatform(source),
     [source],
@@ -35,6 +41,7 @@ export function CompetitorInsightPanel({
       try {
         const response = await fetch(`${detection.bridgeUrl}/scrape`, {
           method: "POST",
+          credentials: "omit",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ input: detection.normalizedUrl }),
         });
@@ -42,6 +49,8 @@ export function CompetitorInsightPanel({
           ok?: boolean;
           message?: string;
           outputDir?: string;
+          inputType?: string;
+          excelPath?: string;
         };
         if (!response.ok || payload.ok !== true) {
           setDispatchMessage(
@@ -49,6 +58,31 @@ export function CompetitorInsightPanel({
             ?? `${message}。本地采集桥未完成任务，请确认本地工作台和抓取服务已启动。`,
           );
           return;
+        }
+        if (
+          detection.reportMode === "douyin-account"
+          && payload.inputType === "作品链接"
+        ) {
+          const completed = `${message}。单作品抓取完成，结果已保存到 ${payload.outputDir ?? "竞品洞察输出目录"}；单作品不会进入账号报告。`;
+          setDispatchMessage(completed);
+          onPreview("抖音单作品抓取完成");
+          return;
+        }
+        if (detection.reportMode === "douyin-account") {
+          if (
+            payload.inputType !== "账号链接/账号标识"
+            || typeof payload.excelPath !== "string"
+            || !/\.xlsx$/iu.test(payload.excelPath)
+          ) {
+            setDispatchMessage(
+              `${message}。账号抓取已返回，但没有得到有效的账号 Excel，未启动报告分析。`,
+            );
+            return;
+          }
+          setReportPathRequest((current) => ({
+            requestId: (current?.requestId ?? 0) + 1,
+            excelPath: payload.excelPath as string,
+          }));
         }
         const completed = `${message}。抓取完成，结果已保存到 ${payload.outputDir ?? "竞品洞察输出目录"}。`;
         setDispatchMessage(completed);
@@ -92,7 +126,9 @@ export function CompetitorInsightPanel({
             <strong>{route.skillId}</strong>
             <p>
               {route.status === "ready"
-                ? "账号主页、作品列表和 Excel 导出已就绪"
+                ? route.id === "douyin"
+                  ? "账号主页、作品列表和 Excel 导出已就绪；账号 Excel → Markdown 证据报告"
+                  : "账号主页、作品列表和 Excel 导出已就绪"
                 : "平台识别规则已预留，安装后自动启用"}
             </p>
           </article>
@@ -109,13 +145,14 @@ export function CompetitorInsightPanel({
       </ol>
 
       {mode === "run" ? (
-        <form
-          className="competitor-source-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            submit();
-          }}
-        >
+        <>
+          <form
+            className="competitor-source-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              submit();
+            }}
+          >
           <label htmlFor="competitor-source">
             竞品主页或作品链接
             <textarea
@@ -129,6 +166,7 @@ export function CompetitorInsightPanel({
             />
           </label>
           <div
+            aria-label="竞品平台识别状态"
             className={`competitor-detection ${detection.kind}`}
             role="status"
             aria-live="polite"
@@ -142,7 +180,7 @@ export function CompetitorInsightPanel({
             disabled={detection.kind === "empty" || isDispatching}
             type="submit"
           >
-            {isDispatching ? "正在抓取…" : "识别并调用抓取 Skill"}
+            {isDispatching ? "正在抓取…" : "抓取并分析"}
           </button>
           {dispatchMessage ? (
             <div
@@ -152,7 +190,9 @@ export function CompetitorInsightPanel({
               {dispatchMessage}
             </div>
           ) : null}
-        </form>
+          </form>
+          <CompetitorReportRunner pathRequest={reportPathRequest} />
+        </>
       ) : (
         <>
           <div className="competitor-overview-actions">

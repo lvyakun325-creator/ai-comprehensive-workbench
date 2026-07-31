@@ -45,6 +45,7 @@ export function detectCompetitorPlatform(input) {
       platformLabel: "等待识别",
       skillId: null,
       bridgeUrl: null,
+      reportMode: "none",
       normalizedUrl: "",
       message: "粘贴竞品主页或作品链接后自动识别平台。",
     };
@@ -58,6 +59,7 @@ export function detectCompetitorPlatform(input) {
       platformLabel: "未识别",
       skillId: null,
       bridgeUrl: null,
+      reportMode: "none",
       normalizedUrl: "",
       message: "没有识别到有效链接，请粘贴完整的 http 或 https 地址。",
     };
@@ -73,6 +75,7 @@ export function detectCompetitorPlatform(input) {
       platformLabel: "未识别",
       skillId: null,
       bridgeUrl: null,
+      reportMode: "none",
       normalizedUrl: "",
       message: "链接格式不完整，请重新复制平台分享链接。",
     };
@@ -89,6 +92,7 @@ export function detectCompetitorPlatform(input) {
       platformLabel: "暂不支持",
       skillId: null,
       bridgeUrl: null,
+      reportMode: "none",
       normalizedUrl: parsed.href,
       message: "当前仅识别抖音和小红书链接，其他平台后续接入。",
     };
@@ -101,6 +105,7 @@ export function detectCompetitorPlatform(input) {
       platformLabel: route.label,
       skillId: route.skillId,
       bridgeUrl: route.bridgeUrl,
+      reportMode: "none",
       normalizedUrl: parsed.href,
       message: `已识别${route.label}，对应抓取 Skill 尚待安装，当前不会误调用其他平台工具。`,
     };
@@ -112,6 +117,7 @@ export function detectCompetitorPlatform(input) {
     platformLabel: route.label,
     skillId: route.skillId,
     bridgeUrl: route.bridgeUrl,
+    reportMode: route.id === "douyin" ? "douyin-account" : "none",
     normalizedUrl: parsed.href,
     message: `已识别${route.label}，将自动调用 ${route.skillId}。`,
   };
