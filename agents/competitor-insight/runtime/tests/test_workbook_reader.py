@@ -96,10 +96,27 @@ class ReadAccountWorkbookTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = self._write_workbook(
                 directory,
-                [("小红书号", "red-123"), ("签名", "错误平台")],
+                [
+                    ("昵称", "小红书账号"),
+                    ("小红书号", "red-123"),
+                    ("签名", "错误平台"),
+                ],
                 ["标题", "点赞"],
                 [["错误平台作品", 10]],
-                overview_name="账号信息",
+                overview_name="小红书账号信息",
+            )
+
+            with self.assertRaisesRegex(ValueError, r"^wrong_platform_account_sheet$"):
+                read_account_workbook(path)
+
+    def test_nonstandard_account_sheet_requires_a_douyin_specific_id(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = self._write_workbook(
+                directory,
+                [("昵称", "通用平台账号"), ("粉丝", 99)],
+                ["标题", "点赞"],
+                [["通用作品", 10]],
+                overview_name="资料页",
             )
 
             with self.assertRaisesRegex(ValueError, r"^missing_account_identity$"):
@@ -198,7 +215,7 @@ class ReadAccountWorkbookTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             path = self._write_workbook(
                 directory,
-                [("昵称", "异名账号"), ("粉丝", 99)],
+                [("昵称", "异名账号"), ("sec_uid", "MS4w-test"), ("粉丝", 99)],
                 ["作品标题", "点赞数", "评论数", "收藏数", "分享数", "发布时间戳", "链接"],
                 [["异名作品", 10, 2, 3, 4, 1_722_429_000, "https://example.com/1"]],
                 overview_name="资料页",
@@ -208,5 +225,6 @@ class ReadAccountWorkbookTests(unittest.TestCase):
             parsed = read_account_workbook(path)
 
         self.assertEqual(parsed["account"]["nickname"], "异名账号")
+        self.assertEqual(parsed["account"]["accountId"], "MS4w-test")
         self.assertEqual(parsed["works"][0]["title"], "异名作品")
         self.assertEqual(parsed["works"][0]["publishedAt"], "2024-07-31T12:30:00")

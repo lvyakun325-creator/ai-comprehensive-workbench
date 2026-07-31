@@ -237,6 +237,14 @@ class ServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"^secure_nofollow_unavailable$"):
                 service.analyze_path(str(workbook_path))
 
+    def test_fails_closed_with_stable_error_when_directory_open_is_unavailable(self) -> None:
+        workbook_path = self._douyin_root() / "account.xlsx"
+        workbook_path.write_bytes(workbook_bytes())
+
+        with patch.object(service.os, "O_DIRECTORY", 0):
+            with self.assertRaisesRegex(ValueError, r"^secure_directory_unavailable$"):
+                service.analyze_path(str(workbook_path))
+
     def test_fails_closed_before_path_swap_when_nofollow_is_missing(self) -> None:
         workbook_path = self._douyin_root() / "account.xlsx"
         workbook_path.write_bytes(workbook_bytes())

@@ -228,6 +228,25 @@ class BridgeServerTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["error"], "INTERNAL_SECURITY_BOUNDARY")
         self.assertNotIn(str(workbook_path), decoded)
 
+    def test_missing_secure_directory_open_has_stable_safe_http_error(self) -> None:
+        douyin_root = (
+            self.project_root / "outputs" / "competitor-insight" / "douyin"
+        )
+        douyin_root.mkdir(parents=True)
+        workbook_path = douyin_root / "account.xlsx"
+        workbook_path.write_bytes(workbook_bytes())
+
+        with patch.object(service.os, "O_DIRECTORY", 0):
+            status, _headers, body = self._post_json(
+                "/analyze-path",
+                {"path": str(workbook_path)},
+            )
+
+        decoded = body.decode("utf-8")
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body)["error"], "INTERNAL_SECURITY_BOUNDARY")
+        self.assertNotIn(str(workbook_path), decoded)
+
     def test_archive_bomb_and_internal_workbook_value_error_have_safe_http_codes(self) -> None:
         cases = (
             (

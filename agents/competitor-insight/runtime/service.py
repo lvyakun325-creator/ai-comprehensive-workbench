@@ -56,6 +56,7 @@ _KNOWN_WORKBOOK_VALUE_ERRORS = {
     "invalid_account_identity",
     "missing_account_identity",
     "missing_account_sheet",
+    "wrong_platform_account_sheet",
     "missing_title_field",
     "no_work_rows",
 }

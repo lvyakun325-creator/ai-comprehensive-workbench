@@ -40,6 +40,17 @@ _ACCOUNT_TEXT_LIMITS = {
     "signature": 1000,
 }
 
+_STANDARD_DOUYIN_ACCOUNT_SHEETS = {"账号概览"}
+_OTHER_PLATFORM_ACCOUNT_MARKERS = ("小红书", "xiaohongshu", "xhs")
+_OTHER_PLATFORM_ACCOUNT_KEYS = {
+    "小红书号",
+    "小红书id",
+    "red_id",
+    "redid",
+    "xhs_id",
+    "xhsid",
+}
+
 
 def _normalized_text(value: object) -> str:
     return str(value).strip().casefold() if value is not None else ""
@@ -78,12 +89,24 @@ def _read_account(workbook: Any, works_sheet: Any) -> dict[str, object]:
         raise ValueError("missing_account_sheet")
 
     account: dict[str, object] = {}
+    nickname_from_standard_sheet = False
     for sheet in sheets:
+        normalized_title = _normalized_text(sheet.title)
+        if any(
+            marker in normalized_title
+            for marker in _OTHER_PLATFORM_ACCOUNT_MARKERS
+        ):
+            raise ValueError("wrong_platform_account_sheet")
+        standard_douyin_sheet = normalized_title in _STANDARD_DOUYIN_ACCOUNT_SHEETS
         for row in sheet.iter_rows(values_only=True):
             key = row[0] if row else None
             value = row[1] if len(row) > 1 else None
             normalized_key = _normalized_text(key)
-            if not normalized_key or value is None:
+            if not normalized_key:
+                continue
+            if normalized_key in _OTHER_PLATFORM_ACCOUNT_KEYS:
+                raise ValueError("wrong_platform_account_sheet")
+            if value is None:
                 continue
             field = _ACCOUNT_KEY_ALIASES.get(normalized_key)
             if field and field not in account:
@@ -96,7 +119,11 @@ def _read_account(workbook: Any, works_sheet: Any) -> dict[str, object]:
                     if len(text) > _ACCOUNT_TEXT_LIMITS[field]:
                         raise ValueError("invalid_account_identity")
                     account[field] = text
+                    if field == "nickname" and standard_douyin_sheet:
+                        nickname_from_standard_sheet = True
     if not account.get("nickname") and not account.get("accountId"):
+        raise ValueError("missing_account_identity")
+    if not account.get("accountId") and not nickname_from_standard_sheet:
         raise ValueError("missing_account_identity")
     return account
 
