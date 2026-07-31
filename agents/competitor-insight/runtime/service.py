@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-import io
+import errno
 import json
 import os
 from pathlib import Path
 import re
+import stat
 from tempfile import TemporaryDirectory
 from typing import cast
 import zipfile
@@ -21,6 +22,10 @@ from workbook_reader import read_account_workbook
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MAX_EXCEL_BYTES = 50 * 1024 * 1024
+MAX_XLSX_MEMBERS = 10_000
+MAX_XLSX_MEMBER_BYTES = 100 * 1024 * 1024
+MAX_XLSX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+MAX_XLSX_COMPRESSION_RATIO = 100
 
 _EVIDENCE_ID = re.compile(r"^[0-9a-f]{16}$")
 _REQUIRED_XLSX_MEMBERS = {
@@ -29,10 +34,10 @@ _REQUIRED_XLSX_MEMBERS = {
     "xl/workbook.xml",
 }
 _EXPECTED_BATCH_IDS = ("strategy", "performance", "execution")
-
-
-def _douyin_root() -> Path:
-    return PROJECT_ROOT / "outputs" / "competitor-insight" / "douyin"
+_KNOWN_WORKBOOK_VALUE_ERRORS = {
+    "missing_title_field",
+    "no_work_rows",
+}
 
 
 def _reports_root() -> Path:
@@ -63,10 +68,39 @@ def _validate_size(size: int) -> None:
         raise ValueError("excel_too_large")
 
 
-def _validate_xlsx_archive(source: Path | io.BytesIO) -> None:
+def _validate_xlsx_archive(source: Path) -> None:
     try:
         with zipfile.ZipFile(source) as archive:
-            members = set(archive.namelist())
+            infos = archive.infolist()
+            if len(infos) > MAX_XLSX_MEMBERS:
+                raise ValueError("xlsx_archive_too_large")
+            members: set[str] = set()
+            total_uncompressed = 0
+            for info in infos:
+                if info.filename in members:
+                    raise ValueError("invalid_xlsx_signature")
+                members.add(info.filename)
+                if info.flag_bits & 0x1:
+                    raise ValueError("invalid_xlsx_signature")
+                member_path = Path(info.filename)
+                if member_path.is_absolute() or ".." in member_path.parts:
+                    raise ValueError("invalid_xlsx_signature")
+                if info.is_dir():
+                    continue
+                if (
+                    info.file_size < 0
+                    or info.compress_size < 0
+                    or info.file_size > MAX_XLSX_MEMBER_BYTES
+                ):
+                    raise ValueError("xlsx_archive_too_large")
+                total_uncompressed += info.file_size
+                if total_uncompressed > MAX_XLSX_TOTAL_UNCOMPRESSED_BYTES:
+                    raise ValueError("xlsx_archive_too_large")
+                if info.file_size:
+                    if info.compress_size == 0:
+                        raise ValueError("xlsx_archive_too_large")
+                    if info.file_size / info.compress_size > MAX_XLSX_COMPRESSION_RATIO:
+                        raise ValueError("xlsx_archive_too_large")
             if not _REQUIRED_XLSX_MEMBERS.issubset(members):
                 raise ValueError("invalid_xlsx_signature")
             if archive.testzip() is not None:
@@ -75,35 +109,123 @@ def _validate_xlsx_archive(source: Path | io.BytesIO) -> None:
         raise ValueError("invalid_xlsx_signature") from None
 
 
-def _controlled_workbook(path_text: str) -> Path:
+def _open_flags(*, directory: bool) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    if directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    return flags
+
+
+def _opened_component(
+    parent_fd: int | None,
+    component: str | Path,
+    *,
+    directory: bool,
+) -> int:
+    stat_kwargs = (
+        {"dir_fd": parent_fd, "follow_symlinks": False}
+        if parent_fd is not None
+        else {"follow_symlinks": False}
+    )
+    try:
+        before = os.stat(component, **stat_kwargs)
+    except FileNotFoundError:
+        raise ValueError("invalid_xlsx_path") from None
+    except OSError:
+        raise ValueError("invalid_xlsx_path") from None
+    if stat.S_ISLNK(before.st_mode):
+        raise ValueError("symlink_not_allowed")
+
+    open_kwargs = {"dir_fd": parent_fd} if parent_fd is not None else {}
+    try:
+        descriptor = os.open(component, _open_flags(directory=directory), **open_kwargs)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise ValueError("symlink_not_allowed") from None
+        raise ValueError("invalid_xlsx_path") from None
+    opened = os.fstat(descriptor)
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    if (
+        not expected_type(opened.st_mode)
+        or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        os.close(descriptor)
+        if stat.S_ISLNK(before.st_mode):
+            raise ValueError("symlink_not_allowed")
+        raise ValueError("invalid_xlsx_path")
+    return descriptor
+
+
+def _open_controlled_workbook(path_text: str) -> tuple[int, str]:
     candidate = Path(path_text)
     if not candidate.is_absolute():
         candidate = PROJECT_ROOT / candidate
     lexical_candidate = Path(os.path.abspath(candidate))
-    lexical_root = Path(os.path.abspath(_douyin_root()))
+    project_root = Path(os.path.abspath(PROJECT_ROOT))
+    lexical_root = project_root / "outputs" / "competitor-insight" / "douyin"
     try:
         relative = lexical_candidate.relative_to(lexical_root)
     except ValueError:
         raise ValueError("path_outside_douyin_output") from None
+    _validate_extension(lexical_candidate.name)
 
-    current = lexical_root
-    for component in relative.parts:
-        current = current / component
-        if current.is_symlink():
-            raise ValueError("symlink_not_allowed")
-
-    resolved_root = lexical_root.resolve()
-    resolved_candidate = lexical_candidate.resolve()
+    descriptor = _opened_component(None, project_root, directory=True)
+    components = (
+        "outputs",
+        "competitor-insight",
+        "douyin",
+        *relative.parts,
+    )
     try:
-        resolved_candidate.relative_to(resolved_root)
-    except ValueError:
-        raise ValueError("path_outside_douyin_output") from None
-    _validate_extension(resolved_candidate.name)
-    if not resolved_candidate.is_file():
-        raise ValueError("invalid_xlsx_path")
-    _validate_size(resolved_candidate.stat().st_size)
-    _validate_xlsx_archive(resolved_candidate)
-    return resolved_candidate
+        for index, component in enumerate(components):
+            next_descriptor = _opened_component(
+                descriptor,
+                component,
+                directory=index < len(components) - 1,
+            )
+            os.close(descriptor)
+            descriptor = next_descriptor
+        opened = os.fstat(descriptor)
+        _validate_size(opened.st_size)
+        return descriptor, lexical_candidate.name
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _metadata_identity(value: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+    )
+
+
+def _copy_open_workbook(descriptor: int, snapshot: Path) -> None:
+    before = os.fstat(descriptor)
+    copied = 0
+    duplicate = os.dup(descriptor)
+    try:
+        with os.fdopen(duplicate, "rb") as source, snapshot.open("xb") as destination:
+            source.seek(0)
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                destination.write(chunk)
+                copied += len(chunk)
+    except Exception:
+        snapshot.unlink(missing_ok=True)
+        raise
+    after = os.fstat(descriptor)
+    if (
+        copied != before.st_size
+        or _metadata_identity(before) != _metadata_identity(after)
+    ):
+        snapshot.unlink(missing_ok=True)
+        raise ValueError("workbook_changed_during_read")
 
 
 def _safe_source_name(filename: str) -> str:
@@ -118,8 +240,10 @@ def _persist_bundle(
 ) -> EvidenceBundle:
     try:
         parsed = read_account_workbook(workbook_path)
-    except ValueError:
-        raise
+    except ValueError as error:
+        if str(error) in _KNOWN_WORKBOOK_VALUE_ERRORS:
+            raise
+        raise ValueError("invalid_workbook") from None
     except Exception:
         raise ValueError("invalid_workbook") from None
     bundle = build_evidence_bundle(parsed, source)
@@ -153,11 +277,20 @@ def analyze_path(path_text: str) -> dict[str, object]:
     """Analyze one ordinary XLSX located under the controlled Douyin output."""
     if not isinstance(path_text, str) or not path_text.strip():
         raise ValueError("invalid_path")
-    workbook_path = _controlled_workbook(path_text)
-    bundle = _persist_bundle(
-        workbook_path,
-        {"kind": "path", "name": workbook_path.name},
-    )
+    descriptor, source_name = _open_controlled_workbook(path_text)
+    try:
+        with TemporaryDirectory(dir=_temporary_root()) as directory:
+            staging_dir = Path(directory)
+            workbook_path = staging_dir / "workbook.xlsx"
+            _copy_open_workbook(descriptor, workbook_path)
+            _validate_xlsx_archive(workbook_path)
+            bundle = _persist_bundle(
+                workbook_path,
+                {"kind": "path", "name": source_name},
+                staging_dir,
+            )
+    finally:
+        os.close(descriptor)
     return _evidence_ready(bundle)
 
 
@@ -169,12 +302,12 @@ def analyze_upload(filename: str, content: bytes) -> dict[str, object]:
         raise ValueError("invalid_upload_content")
     _validate_extension(filename)
     _validate_size(len(content))
-    _validate_xlsx_archive(io.BytesIO(content))
 
     with TemporaryDirectory(dir=_temporary_root()) as directory:
         staging_dir = Path(directory)
         workbook_path = staging_dir / "upload.xlsx"
         workbook_path.write_bytes(content)
+        _validate_xlsx_archive(workbook_path)
         bundle = _persist_bundle(
             workbook_path,
             {"kind": "upload", "name": _safe_source_name(filename)},
@@ -257,12 +390,26 @@ def _safe_nickname(value: object) -> str:
 
 def _write_report(filename: str, markdown: str) -> Path:
     reports_root = _reports_root()
-    target = reports_root / filename
-    with TemporaryDirectory(dir=_temporary_root()) as directory:
-        staged = Path(directory) / "report.md"
-        staged.write_text(markdown, encoding="utf-8")
-        os.replace(staged, target)
-    return target
+    base = Path(filename)
+    for attempt in range(1000):
+        suffix = "" if attempt == 0 else f"_{attempt:02d}"
+        target = reports_root / f"{base.stem}{suffix}{base.suffix}"
+        try:
+            descriptor = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+            )
+        except FileExistsError:
+            continue
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                output.write(markdown)
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+        return target
+    raise ValueError("report_filename_exhausted")
 
 
 def assemble(evidence_id: str, batches: list[object]) -> ReportArtifact:
@@ -286,7 +433,7 @@ def assemble(evidence_id: str, batches: list[object]) -> ReportArtifact:
         {
             "ok": True,
             "stage": "report_ready",
-            "filename": filename,
+            "filename": report_path.name,
             "reportPath": str(report_path),
             "markdown": markdown,
             "validationErrors": [],

@@ -13,7 +13,7 @@ import service
 
 HOST = "127.0.0.1"
 PORT = 8767
-MAX_REQUEST_BYTES = 50 * 1024 * 1024
+MAX_REQUEST_BYTES = ((service.MAX_EXCEL_BYTES + 2) // 3) * 4 + 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 ALLOWED_ORIGINS = {
     "http://localhost:3000",
@@ -33,12 +33,14 @@ _ERRORS = {
     "invalid_xlsx_path": (400, "INVALID_WORKBOOK", "Excel 文件不存在或不是普通文件。"),
     "invalid_extension": (400, "INVALID_WORKBOOK", "仅支持 .xlsx 文件。"),
     "invalid_xlsx_signature": (400, "INVALID_WORKBOOK", "上传内容不是有效的 XLSX 文件。"),
+    "xlsx_archive_too_large": (413, "XLSX_ARCHIVE_TOO_LARGE", "XLSX 解压规模超过安全上限。"),
     "invalid_workbook": (400, "INVALID_WORKBOOK", "Excel 中没有可用的作品数据。"),
     "missing_title_field": (400, "INVALID_WORKBOOK", "Excel 中没有可用的作品数据。"),
     "no_work_rows": (400, "INVALID_WORKBOOK", "Excel 中没有可用的作品数据。"),
     "excel_too_large": (413, "EXCEL_TOO_LARGE", "Excel 文件超过 50 MB 上限。"),
     "invalid_filename": (400, "INVALID_REQUEST", "上传文件名无效。"),
     "invalid_upload_content": (400, "INVALID_REQUEST", "上传内容无效。"),
+    "workbook_changed_during_read": (400, "INVALID_WORKBOOK", "Excel 在读取过程中发生变化。"),
     "invalid_evidence_id": (400, "INVALID_EVIDENCE_ID", "证据会话 ID 无效。"),
     "evidence_not_found": (404, "EVIDENCE_NOT_FOUND", "证据会话不存在。"),
     "invalid_evidence_bundle": (400, "INVALID_EVIDENCE", "证据包无效。"),
@@ -171,7 +173,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 {
                     "ok": False,
                     "error": "REQUEST_TOO_LARGE",
-                    "message": "请求体超过 50 MB 上限。",
+                    "message": "请求体超过本地桥接传输上限。",
                 },
                 origin=self._origin(),
             )

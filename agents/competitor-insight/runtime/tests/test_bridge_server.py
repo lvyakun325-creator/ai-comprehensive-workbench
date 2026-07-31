@@ -17,7 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bridge_server
 import service
-from test_service import valid_batches, workbook_bytes
+from test_service import (
+    malformed_account_workbook_bytes,
+    valid_batches,
+    workbook_bytes,
+    xlsx_with_compression_bomb,
+)
 
 
 class BridgeServerTests(unittest.TestCase):
@@ -126,6 +131,35 @@ class BridgeServerTests(unittest.TestCase):
         self.assertEqual(status, 413)
         self.assertEqual(json.loads(body)["error"], "REQUEST_TOO_LARGE")
 
+    def test_transport_limit_accommodates_base64_and_decoded_excel_limit_still_applies(self) -> None:
+        valid = workbook_bytes()
+        encoded_limit = ((service.MAX_EXCEL_BYTES + 2) // 3) * 4
+        self.assertGreaterEqual(
+            bridge_server.MAX_REQUEST_BYTES,
+            encoded_limit + 1024 * 1024,
+        )
+        self.handler_class.max_body_bytes = len(valid) * 2 + 1024
+
+        with patch.object(service, "MAX_EXCEL_BYTES", len(valid)):
+            status, _headers, body = self._post_json(
+                "/analyze-upload",
+                {
+                    "filename": "at-limit.xlsx",
+                    "contentBase64": base64.b64encode(valid).decode("ascii"),
+                },
+            )
+            self.assertEqual(status, 200)
+
+            status, _headers, body = self._post_json(
+                "/analyze-upload",
+                {
+                    "filename": "over-limit.xlsx",
+                    "contentBase64": base64.b64encode(valid + b"x").decode("ascii"),
+                },
+            )
+            self.assertEqual(status, 413)
+            self.assertEqual(json.loads(body)["error"], "EXCEL_TOO_LARGE")
+
     def test_rejects_non_json_and_invalid_base64_with_stable_errors(self) -> None:
         status, _headers, body = self._request(
             "POST",
@@ -170,6 +204,34 @@ class BridgeServerTests(unittest.TestCase):
         self.assertNotIn(secret_path, decoded)
         self.assertNotIn("Traceback", decoded)
         self.assertEqual(json.loads(body)["error"], "PATH_NOT_ALLOWED")
+
+    def test_archive_bomb_and_internal_workbook_value_error_have_safe_http_codes(self) -> None:
+        cases = (
+            (
+                xlsx_with_compression_bomb(),
+                "XLSX_ARCHIVE_TOO_LARGE",
+                "compression-bomb",
+            ),
+            (
+                malformed_account_workbook_bytes(),
+                "INVALID_WORKBOOK",
+                "not enough values to unpack",
+            ),
+        )
+        for content, error_code, forbidden in cases:
+            with self.subTest(error_code=error_code):
+                status, _headers, body = self._post_json(
+                    "/analyze-upload",
+                    {
+                        "filename": "sample.xlsx",
+                        "contentBase64": base64.b64encode(content).decode("ascii"),
+                    },
+                )
+                decoded = body.decode("utf-8")
+                expected_status = 413 if error_code == "XLSX_ARCHIVE_TOO_LARGE" else 400
+                self.assertEqual(status, expected_status)
+                self.assertEqual(json.loads(body)["error"], error_code)
+                self.assertNotIn(forbidden, decoded)
 
     def test_oversized_report_is_retained_but_not_returned_for_preview(self) -> None:
         evidence = service.analyze_upload("sample.xlsx", workbook_bytes())
