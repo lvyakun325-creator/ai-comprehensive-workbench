@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Competitor insight evidence report section batch",
+  "description": "Model output is schema-valid JSON only. Source evidence metrics, calculated rankings, and interaction totals are deterministic evidence-layer fields and are not model output fields.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -22,11 +23,13 @@
     },
     "topicDirections": {
       "type": "array",
+      "minItems": 5,
       "maxItems": 5,
       "items": { "$ref": "#/$defs/topicDirection" }
     },
     "filmingTemplates": {
       "type": "array",
+      "minItems": 3,
       "maxItems": 3,
       "items": { "$ref": "#/$defs/filmingTemplate" }
     },
@@ -36,8 +39,46 @@
     },
     "executionDays": {
       "type": "array",
+      "minItems": 7,
       "maxItems": 7,
-      "items": { "$ref": "#/$defs/executionDay" }
+      "items": { "$ref": "#/$defs/executionDay" },
+      "allOf": [
+        {
+          "contains": { "properties": { "day": { "const": 1 } }, "required": ["day"] },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": { "properties": { "day": { "const": 2 } }, "required": ["day"] },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": { "properties": { "day": { "const": 3 } }, "required": ["day"] },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": { "properties": { "day": { "const": 4 } }, "required": ["day"] },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": { "properties": { "day": { "const": 5 } }, "required": ["day"] },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": { "properties": { "day": { "const": 6 } }, "required": ["day"] },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": { "properties": { "day": { "const": 7 } }, "required": ["day"] },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
     }
   },
   "$defs": {
