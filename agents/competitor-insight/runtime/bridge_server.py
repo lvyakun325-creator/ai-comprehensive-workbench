@@ -29,6 +29,7 @@ WRITE_ENDPOINTS = {
 _ERRORS = {
     "path_outside_douyin_output": (400, "PATH_NOT_ALLOWED", "只能读取受控抖音输出目录中的 Excel。"),
     "symlink_not_allowed": (400, "SYMLINK_NOT_ALLOWED", "不允许读取符号链接。"),
+    "secure_nofollow_unavailable": (503, "INTERNAL_SECURITY_BOUNDARY", "当前系统缺少安全路径读取能力。"),
     "invalid_path": (400, "INVALID_REQUEST", "请求路径无效。"),
     "invalid_xlsx_path": (400, "INVALID_WORKBOOK", "Excel 文件不存在或不是普通文件。"),
     "invalid_extension": (400, "INVALID_WORKBOOK", "仅支持 .xlsx 文件。"),

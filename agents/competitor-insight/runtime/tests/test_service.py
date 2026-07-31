@@ -63,6 +63,20 @@ def xlsx_with_compression_bomb() -> bytes:
     return output.getvalue()
 
 
+def xlsx_with_member(member_name: str) -> bytes:
+    source = io.BytesIO(workbook_bytes())
+    output = io.BytesIO()
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(
+        output,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+    ) as modified:
+        for member in original.infolist():
+            modified.writestr(member, original.read(member.filename))
+        modified.writestr(member_name, b"unexpected")
+    return output.getvalue()
+
+
 def valid_batches(evidence_id: str = "DY-E0001") -> list[dict[str, object]]:
     empty = {
         "claims": [],
@@ -214,6 +228,50 @@ class ServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "symlink_not_allowed"):
                 service.analyze_path(str(workbook_path))
 
+    def test_fails_closed_for_ordinary_path_when_nofollow_is_zero(self) -> None:
+        workbook_path = self._douyin_root() / "account.xlsx"
+        workbook_path.write_bytes(workbook_bytes())
+
+        with patch.object(service.os, "O_NOFOLLOW", 0):
+            with self.assertRaisesRegex(ValueError, r"^secure_nofollow_unavailable$"):
+                service.analyze_path(str(workbook_path))
+
+    def test_fails_closed_before_path_swap_when_nofollow_is_missing(self) -> None:
+        workbook_path = self._douyin_root() / "account.xlsx"
+        workbook_path.write_bytes(workbook_bytes())
+        external = self.project_root / "outside.xlsx"
+        external.write_bytes(workbook_bytes("外部账号"))
+        real_open = os.open
+
+        def swap_if_opened(
+            path: str | Path,
+            flags: int,
+            mode: int = 0o777,
+            *,
+            dir_fd: int | None = None,
+        ) -> int:
+            if path == "account.xlsx" and dir_fd is not None:
+                workbook_path.unlink()
+                workbook_path.symlink_to(external)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        nofollow = service.os.O_NOFOLLOW
+        delattr(service.os, "O_NOFOLLOW")
+        try:
+            with patch.object(service.os, "open", side_effect=swap_if_opened):
+                with self.assertRaisesRegex(ValueError, r"^secure_nofollow_unavailable$"):
+                    service.analyze_path(str(workbook_path))
+        finally:
+            service.os.O_NOFOLLOW = nofollow
+
+    def test_fails_closed_when_nofollow_value_cannot_be_used(self) -> None:
+        workbook_path = self._douyin_root() / "account.xlsx"
+        workbook_path.write_bytes(workbook_bytes())
+
+        with patch.object(service.os, "O_NOFOLLOW", 1 << 100):
+            with self.assertRaisesRegex(ValueError, r"^secure_nofollow_unavailable$"):
+                service.analyze_path(str(workbook_path))
+
     def test_rejects_invalid_upload_extension_signature_and_excel_size(self) -> None:
         valid = workbook_bytes()
 
@@ -228,6 +286,20 @@ class ServiceTests(unittest.TestCase):
     def test_rejects_high_expansion_xlsx_before_decompression(self) -> None:
         with self.assertRaisesRegex(ValueError, "xlsx_archive_too_large"):
             service.analyze_upload("bomb.xlsx", xlsx_with_compression_bomb())
+
+    def test_rejects_backslash_parent_drive_and_unc_xlsx_member_paths(self) -> None:
+        for member_name in (
+            r"..\outside.txt",
+            "xl/./hidden.txt",
+            r"C:\outside.txt",
+            r"\\server\share.txt",
+        ):
+            with self.subTest(member_name=member_name):
+                with self.assertRaisesRegex(ValueError, "invalid_xlsx_signature"):
+                    service.analyze_upload(
+                        "unsafe-member.xlsx",
+                        xlsx_with_member(member_name),
+                    )
 
     def test_upload_persists_only_id_named_evidence_and_removes_temporary_copy(self) -> None:
         result = service.analyze_upload("sample.xlsx", workbook_bytes())

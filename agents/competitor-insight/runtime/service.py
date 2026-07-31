@@ -68,6 +68,20 @@ def _validate_size(size: int) -> None:
         raise ValueError("excel_too_large")
 
 
+def _normalized_xlsx_member_name(name: str) -> str:
+    normalized = name.replace("\\", "/")
+    without_trailing_slash = normalized[:-1] if normalized.endswith("/") else normalized
+    parts = without_trailing_slash.split("/")
+    if (
+        not without_trailing_slash
+        or normalized.startswith("/")
+        or re.match(r"^[A-Za-z]:", normalized)
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise ValueError("invalid_xlsx_signature")
+    return normalized
+
+
 def _validate_xlsx_archive(source: Path) -> None:
     try:
         with zipfile.ZipFile(source) as archive:
@@ -77,13 +91,11 @@ def _validate_xlsx_archive(source: Path) -> None:
             members: set[str] = set()
             total_uncompressed = 0
             for info in infos:
-                if info.filename in members:
+                normalized_name = _normalized_xlsx_member_name(info.filename)
+                if normalized_name in members:
                     raise ValueError("invalid_xlsx_signature")
-                members.add(info.filename)
+                members.add(normalized_name)
                 if info.flag_bits & 0x1:
-                    raise ValueError("invalid_xlsx_signature")
-                member_path = Path(info.filename)
-                if member_path.is_absolute() or ".." in member_path.parts:
                     raise ValueError("invalid_xlsx_signature")
                 if info.is_dir():
                     continue
@@ -109,9 +121,20 @@ def _validate_xlsx_archive(source: Path) -> None:
         raise ValueError("invalid_xlsx_signature") from None
 
 
+def _secure_nofollow_flag() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if (
+        isinstance(nofollow, bool)
+        or not isinstance(nofollow, int)
+        or nofollow <= 0
+    ):
+        raise ValueError("secure_nofollow_unavailable")
+    return nofollow
+
+
 def _open_flags(*, directory: bool) -> int:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= _secure_nofollow_flag()
     if directory:
         flags |= getattr(os, "O_DIRECTORY", 0)
     return flags
@@ -140,9 +163,18 @@ def _opened_component(
     open_kwargs = {"dir_fd": parent_fd} if parent_fd is not None else {}
     try:
         descriptor = os.open(component, _open_flags(directory=directory), **open_kwargs)
+    except OverflowError:
+        raise ValueError("secure_nofollow_unavailable") from None
     except OSError as error:
         if error.errno == errno.ELOOP:
             raise ValueError("symlink_not_allowed") from None
+        unsupported_errors = {
+            errno.EINVAL,
+            getattr(errno, "ENOTSUP", errno.EINVAL),
+            getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+        }
+        if error.errno in unsupported_errors:
+            raise ValueError("secure_nofollow_unavailable") from None
         raise ValueError("invalid_xlsx_path") from None
     opened = os.fstat(descriptor)
     expected_type = stat.S_ISDIR if directory else stat.S_ISREG
@@ -158,6 +190,7 @@ def _opened_component(
 
 
 def _open_controlled_workbook(path_text: str) -> tuple[int, str]:
+    _secure_nofollow_flag()
     candidate = Path(path_text)
     if not candidate.is_absolute():
         candidate = PROJECT_ROOT / candidate
