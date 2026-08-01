@@ -71,6 +71,19 @@ class EvidenceBundleTests(unittest.TestCase):
             output_b = write_evidence_bundle(bundle_b, Path(directory) / "b")
             self.assertEqual(output_a.read_text(encoding="utf-8"), output_b.read_text(encoding="utf-8"))
 
+    def test_rejects_untrusted_platform_kind_or_report_type(self) -> None:
+        """Would fail if an impossible v2 tuple were persisted with a plausible prefix."""
+        cases = (
+            {"platformId": "unknown", "inputKind": "account"},
+            {"platformId": "douyin", "inputKind": "bad-kind"},
+            {"platformId": "xiaohongshu", "inputKind": "content", "reportType": "douyin-account"},
+        )
+        for fields in cases:
+            with self.subTest(fields=fields):
+                parsed = self._parsed() | fields
+                with self.assertRaisesRegex(ValueError, r"^unsupported_report_source$"):
+                    build_evidence_bundle(parsed, {"platformId": "douyin", "inputKind": "account"})
+
 
 if __name__ == "__main__":
     unittest.main()

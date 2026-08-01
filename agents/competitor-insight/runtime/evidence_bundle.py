@@ -11,6 +11,14 @@ from analytics import calculate_metrics, rank_works
 from contracts import EvidenceBundle
 
 
+_REPORT_TYPES = {
+    ("douyin", "account"): "douyin-account",
+    ("douyin", "content"): "douyin-content",
+    ("xiaohongshu", "account"): "xhs-account",
+    ("xiaohongshu", "content"): "xhs-note",
+}
+
+
 def _source_row(work: dict[str, object]) -> int:
     value = work.get("sourceRow")
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
@@ -29,10 +37,19 @@ def _canonical_string_list(value: object) -> list[str]:
 def _canonical_parsed(parsed: dict[str, object]) -> dict[str, object]:
     raw_works = parsed.get("items", parsed.get("works", []))
     works = [dict(work) for work in cast(list[dict[str, object]], raw_works)]
+    platform_id = str(parsed.get("platformId") or "douyin")
+    input_kind = str(parsed.get("inputKind") or "account")
+    try:
+        report_type = _REPORT_TYPES[(platform_id, input_kind)]
+    except KeyError:
+        raise ValueError("unsupported_report_source") from None
+    supplied_report_type = parsed.get("reportType")
+    if supplied_report_type is not None and supplied_report_type != report_type:
+        raise ValueError("unsupported_report_source")
     return {
-        "platformId": str(parsed.get("platformId") or "douyin"),
-        "inputKind": str(parsed.get("inputKind") or "account"),
-        "reportType": str(parsed.get("reportType") or "douyin-account"),
+        "platformId": platform_id,
+        "inputKind": input_kind,
+        "reportType": report_type,
         "subject": dict(cast(dict[str, object], parsed.get("subject", parsed.get("account", {})))),
         "fieldMap": dict(cast(dict[str, object], parsed.get("fieldMap", {}))),
         "missingFields": _canonical_string_list(parsed.get("missingFields", [])),

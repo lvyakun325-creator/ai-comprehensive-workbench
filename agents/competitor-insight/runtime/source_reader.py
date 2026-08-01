@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import Callable
+import stat
+from typing import BinaryIO, Callable
 
 from metrics import parse_metric, parse_publish_time
 from workbook_reader import validate_workbook_source
@@ -15,20 +17,35 @@ MAX_XLSX_BYTES = 50 * 1024 * 1024
 _METRICS = ("likes", "comments", "collects", "shares")
 
 
-def _checked_path(path: Path, suffix: str, maximum: int) -> Path:
+def _open_source(path: Path, suffix: str, maximum: int) -> BinaryIO:
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
     try:
-        resolved = path.resolve(strict=True)
+        for part in absolute.parts[1:]:
+            current /= part
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                if current == Path("/var") and current.resolve() == Path("/private/var"):
+                    continue
+                raise ValueError("invalid_source_path")
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        if nofollow == 0:
+            raise ValueError("invalid_source_path")
+        descriptor = os.open(absolute, os.O_RDONLY | nofollow)
+        metadata = os.fstat(descriptor)
+    except ValueError:
+        raise
     except OSError as error:
         raise ValueError("invalid_source_path") from error
-    if path.is_symlink() or not resolved.is_file() or resolved.suffix.casefold() != suffix or resolved.stat().st_size > maximum:
+    if not stat.S_ISREG(metadata.st_mode) or absolute.suffix.casefold() != suffix or metadata.st_size > maximum:
+        os.close(descriptor)
         raise ValueError("invalid_source_path")
-    return resolved
+    return os.fdopen(descriptor, "rb")
 
 
 def _load_json(path: Path) -> dict[str, object]:
-    checked = _checked_path(path, ".json", MAX_JSON_BYTES)
     try:
-        value = json.loads(checked.read_text(encoding="utf-8"))
+        with _open_source(path, ".json", MAX_JSON_BYTES) as source:
+            value = json.loads(source.read().decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("invalid_source_json") from error
     if not isinstance(value, dict):
@@ -38,7 +55,8 @@ def _load_json(path: Path) -> dict[str, object]:
 
 def _validate_excel(path: Path | None) -> None:
     if path is not None:
-        validate_workbook_source(_checked_path(path, ".xlsx", MAX_XLSX_BYTES))
+        with _open_source(path, ".xlsx", MAX_XLSX_BYTES) as source:
+            validate_workbook_source(source)
 
 
 def _object(value: object) -> dict[str, object]:
@@ -57,6 +75,8 @@ def _text(value: object) -> str:
 
 
 def _metric(item: dict[str, object], paths: tuple[tuple[str, ...], ...]) -> tuple[int, bool, list[str]]:
+    warnings: list[str] = []
+    seen_nonempty = False
     for path in paths:
         current: object = item
         found = True
@@ -66,9 +86,14 @@ def _metric(item: dict[str, object], paths: tuple[tuple[str, ...], ...]) -> tupl
                 break
             current = current[key]
         if found:
-            parsed, warnings = parse_metric(current)
-            return parsed, current is not None and (not isinstance(current, str) or bool(current.strip())), warnings
-    return 0, False, []
+            if current is None or (isinstance(current, str) and not current.strip()):
+                continue
+            seen_nonempty = True
+            parsed, parsed_warnings = parse_metric(current)
+            if not parsed_warnings:
+                return parsed, True, warnings
+            warnings.extend(parsed_warnings)
+    return 0, seen_nonempty, warnings
 
 
 def _normalized_item(raw: dict[str, object], row: int, platform_id: str) -> tuple[dict[str, object], list[str], list[str]]:
@@ -77,7 +102,7 @@ def _normalized_item(raw: dict[str, object], row: int, platform_id: str) -> tupl
         title = ""
     metric_paths = {
         "likes": (("likes",), ("liked_count",), ("likedCount",), ("statistics", "digg_count"), ("interact_info", "likedCount"), ("interactInfo", "likedCount")),
-        "comments": (("comments",), ("comment_count",), ("commentCount",), ("statistics", "comment_count"), ("interact_info", "commentCount"), ("interactInfo", "commentCount")),
+        "comments": (("comments",), ("comment_count",), ("comment_count_declared",), ("commentCount",), ("statistics", "comment_count"), ("interact_info", "commentCount"), ("interactInfo", "commentCount")),
         "collects": (("collects",), ("collected_count",), ("collectedCount",), ("statistics", "collect_count"), ("interact_info", "collectedCount"), ("interactInfo", "collectedCount")),
         "shares": (("shares",), ("shared_count",), ("sharedCount",), ("statistics", "share_count"), ("interact_info", "sharedCount"), ("interactInfo", "sharedCount")),
     }
@@ -125,7 +150,7 @@ def _items(raw_items: object, platform_id: str) -> tuple[list[dict[str, object]]
     return items, sorted(missing), sorted(warnings)
 
 
-def _subject(raw: dict[str, object]) -> dict[str, object]:
+def _subject(raw: dict[str, object], *, allow_item_id: bool = False) -> dict[str, object]:
     author = _object(raw.get("author"))
     nickname_found, nickname = _first(raw, "nickname", "author")
     if not nickname_found:
@@ -133,7 +158,8 @@ def _subject(raw: dict[str, object]) -> dict[str, object]:
     if not nickname_found:
         nickname = ""
     result: dict[str, object] = {"nickname": _text(nickname)}
-    for field, keys in (("accountId", ("sec_uid", "user_id", "userId", "id", "red_id")), ("signature", ("signature", "desc", "description"))):
+    account_keys = ("sec_uid", "user_id", "userId", "red_id") + (("id",) if allow_item_id else ())
+    for field, keys in (("accountId", account_keys), ("signature", ("signature", "desc", "description"))):
         found, value = _first(raw, *keys)
         if not found:
             found, value = _first(author, *keys)
@@ -147,14 +173,22 @@ def _subject(raw: dict[str, object]) -> dict[str, object]:
     return result
 
 
-def _content(raw: dict[str, object], subject: dict[str, object], warnings: list[str]) -> dict[str, object]:
+def _content(raw: dict[str, object], subject: dict[str, object], warnings: list[str], envelope: dict[str, object]) -> dict[str, object]:
     result: dict[str, object] = {}
-    for target, keys in (("body", ("content", "desc", "summary")), ("transcript", ("transcript", "video_transcript")), ("ocr", ("ocr_cleaned_text", "ocr_raw_text"))):
+    for target, keys in (("body", ("content", "desc", "summary")), ("ocr", ("ocr_cleaned_text", "ocr_raw_text"))):
         found, value = _first(raw, *keys)
         if found and _text(value):
             result[target] = _text(value)
         else:
             warnings.append(f"missing_content:{target}")
+    transcription = _object(envelope.get("transcription"))
+    found, value = _first(transcription, "polished_transcript", "cleaned_transcript", "transcript")
+    if not found:
+        found, value = _first(raw, "transcript", "video_transcript")
+    if found and _text(value):
+        result["transcript"] = _text(value)
+    else:
+        warnings.append("missing_content:transcript")
     public_author = {key: value for key, value in subject.items() if key in {"nickname", "accountId", "followers", "signature"} and value not in ("", None)}
     if public_author:
         result["author"] = public_author
@@ -185,7 +219,7 @@ def _account_source(platform_id: str, raw: dict[str, object], item_keys: tuple[s
                 raw_items = raw[key]
                 break
     items, missing_fields, warnings = _items(raw_items, platform_id)
-    subject = _subject(profile)
+    subject = _subject(profile, allow_item_id=True)
     if not subject.get("nickname") and not subject.get("accountId"):
         raise ValueError("missing_account_identity")
     return {
@@ -210,9 +244,10 @@ def _content_source(platform_id: str, raw: dict[str, object], item_keys: tuple[s
         if candidate:
             item = candidate
             break
-    subject = _subject(item)
+    author = _object(data.get("author"))
+    subject = _subject(author if author else item)
     normalized, missing_fields, warnings = _normalized_item(item, 1, platform_id)
-    content = _content(item, subject, warnings)
+    content = _content(item, subject, warnings, data)
     return {
         "platformId": platform_id,
         "inputKind": "content",
