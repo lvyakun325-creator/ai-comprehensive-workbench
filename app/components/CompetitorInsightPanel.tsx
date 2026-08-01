@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   COMPETITOR_PLATFORM_ROUTES,
   detectCompetitorPlatform,
@@ -37,8 +37,10 @@ type CompetitorInsightPanelProps = {
 
 type PendingAnalysis = {
   taskId: string;
-  scrape: ScrapeReadyResponse;
+  scrape: ScrapeReadyResponse | null;
   epoch: number;
+  evidenceReady: boolean;
+  terminalWriteStarted: boolean;
 };
 
 type AnalysisTaskPatch = CompetitorTaskPatch & {
@@ -125,6 +127,7 @@ export function CompetitorInsightPanel({
     useState<CompetitorAnalysisRequest | null>(null);
   const [isTaskStateSettling, setIsTaskStateSettling] = useState(false);
   const pendingAnalysisRef = useRef<PendingAnalysis | null>(null);
+  const mountedRef = useRef(false);
   const runEpochRef = useRef(0);
   const taskWriteTailsRef = useRef(new Map<string, Promise<void>>());
   const detection = useMemo(() => detectCompetitorPlatform(source), [source]);
@@ -142,13 +145,17 @@ export function CompetitorInsightPanel({
   );
 
   const moveToPhase = (phase: AnalysisPhase, message: string) => {
+    if (!mountedRef.current) return;
     if (phase !== "failed") setLastActivePhase(phase);
     setAnalysisPhase(phase);
     setAnalysisMessage(message);
   };
 
+  const isMountedEpoch = (epoch: number) =>
+    mountedRef.current && runEpochRef.current === epoch;
+
   const isCurrentPending = (pending: PendingAnalysis) =>
-    runEpochRef.current === pending.epoch
+    isMountedEpoch(pending.epoch)
     && pendingAnalysisRef.current?.epoch === pending.epoch
     && pendingAnalysisRef.current.taskId === pending.taskId;
 
@@ -168,10 +175,39 @@ export function CompetitorInsightPanel({
     }
   };
 
+  const settleAbandonedTask = (taskId: string) => {
+    void writeTaskState(taskId, {
+      status: "failed",
+      errorSummary: "页面已关闭，本次竞品分析已取消。",
+    }).catch(() => undefined);
+  };
+
+  const settleAbandonedPending = (pending: PendingAnalysis) => {
+    if (pending.terminalWriteStarted) return;
+    pending.terminalWriteStarted = true;
+    settleAbandonedTask(pending.taskId);
+  };
+
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      const pending = pendingAnalysisRef.current;
+      mountedRef.current = false;
+      runEpochRef.current += 1;
+      pendingAnalysisRef.current = null;
+      if (
+        pending
+        && !pending.evidenceReady
+        && !pending.terminalWriteStarted
+      ) {
+        settleAbandonedPending(pending);
+      }
+    };
+  }, []);
+
   const failPersistedTask = async (taskId: string | null, errorSummary: string) => {
     if (!taskId) return;
     await writeTaskState(taskId, {status: "failed", errorSummary});
-    onRecordsChanged?.();
   };
 
   const failAnalysis = async (
@@ -180,18 +216,22 @@ export function CompetitorInsightPanel({
     epoch = runEpochRef.current,
     clearPending = false,
   ) => {
-    if (epoch !== runEpochRef.current) return;
+    if (!isMountedEpoch(epoch)) return;
     if (!taskId) {
       setIsDispatching(false);
       moveToPhase("failed", message);
       return;
+    }
+    if (pendingAnalysisRef.current?.epoch === epoch) {
+      pendingAnalysisRef.current.terminalWriteStarted = true;
     }
     setIsTaskStateSettling(true);
     setIsDispatching(true);
     moveToPhase("failed", `${message} 正在同步失败状态…`);
     try {
       await failPersistedTask(taskId, message);
-      if (epoch !== runEpochRef.current) return;
+      if (!isMountedEpoch(epoch)) return;
+      onRecordsChanged?.();
       if (clearPending && pendingAnalysisRef.current?.epoch === epoch) {
         pendingAnalysisRef.current = null;
       }
@@ -199,7 +239,7 @@ export function CompetitorInsightPanel({
       setIsDispatching(false);
       moveToPhase("failed", message);
     } catch {
-      if (epoch !== runEpochRef.current) return;
+      if (!isMountedEpoch(epoch)) return;
       setIsTaskStateSettling(true);
       setIsDispatching(false);
       moveToPhase("failed", `${message} 任务终态同步失败，请检查本地任务服务。`);
@@ -207,6 +247,10 @@ export function CompetitorInsightPanel({
   };
 
   const handleReportStageChange = (stage: ReportWorkflowStage, message: string) => {
+    if (!mountedRef.current) return;
+    if (stage === "generating" && pendingAnalysisRef.current) {
+      pendingAnalysisRef.current.evidenceReady = true;
+    }
     const nextPhase: AnalysisPhase = stage === "normalizing" ? "normalizing" : "generating";
     setIsDispatching(true);
     moveToPhase(nextPhase, message);
@@ -231,7 +275,7 @@ export function CompetitorInsightPanel({
       return true;
     } catch {
       if (!isCurrentPending(pending)) return false;
-      setIsTaskStateSettling(true);
+      setIsTaskStateSettling(false);
       setIsDispatching(false);
       moveToPhase("failed", "任务状态恢复失败，请检查本地任务服务后重试。");
       return false;
@@ -269,7 +313,7 @@ export function CompetitorInsightPanel({
 
   const completePendingReport = async (report: ReportReadyResponse) => {
     const pending = pendingAnalysisRef.current;
-    if (!pending || !isCurrentPending(pending)) return;
+    if (!pending || !pending.scrape || !isCurrentPending(pending)) return;
     const {taskId, scrape} = pending;
     const explicitPaths = Array.from(new Set([...scrape.explicitPaths, report.reportPath]));
     moveToPhase("bundling", "报告已生成，正在登记内部产物并封装成果包…");
@@ -330,6 +374,7 @@ export function CompetitorInsightPanel({
     const epoch = runEpochRef.current + 1;
     runEpochRef.current = epoch;
     let taskId: string | null = null;
+    let pending: PendingAnalysis | null = null;
     setIsDispatching(true);
     setIsTaskStateSettling(false);
     pendingAnalysisRef.current = null;
@@ -344,6 +389,18 @@ export function CompetitorInsightPanel({
         sourceUrl: detection.normalizedUrl,
       });
       taskId = createdTask.id;
+      pending = {
+        taskId,
+        scrape: null,
+        epoch,
+        evidenceReady: false,
+        terminalWriteStarted: false,
+      };
+      if (!isMountedEpoch(epoch)) {
+        settleAbandonedPending(pending);
+        return;
+      }
+      pendingAnalysisRef.current = pending;
       onRecordsChanged?.();
       moveToPhase("scraping", `${routeMessage}。正在调用本地抓取 Skill…`);
       const scrape = await scrapeCompetitorLink(
@@ -351,6 +408,11 @@ export function CompetitorInsightPanel({
         detection.normalizedUrl,
         taskId,
       );
+      if (!isCurrentPending(pending)) {
+        settleAbandonedPending(pending);
+        return;
+      }
+      pending.scrape = scrape;
 
       const authoritativePatch = {
         status: "running" as const,
@@ -360,9 +422,11 @@ export function CompetitorInsightPanel({
         category: scrape.category as CompetitorBundleCategory,
       };
       await writeTaskState(taskId, authoritativePatch);
-      if (epoch !== runEpochRef.current) return;
+      if (!isCurrentPending(pending)) {
+        settleAbandonedPending(pending);
+        return;
+      }
       onRecordsChanged?.();
-      pendingAnalysisRef.current = {taskId, scrape, epoch};
       setAnalysisRequest((current) => ({
         requestId: (current?.requestId ?? 0) + 1,
         taskId: createdTask.id,
@@ -374,6 +438,11 @@ export function CompetitorInsightPanel({
       }));
       moveToPhase("normalizing", "抓取完成，正在整理账号或作品数据…");
     } catch (error) {
+      if (!isMountedEpoch(epoch)) {
+        if (pending) settleAbandonedPending(pending);
+        else if (taskId) settleAbandonedTask(taskId);
+        return;
+      }
       await failAnalysis(taskId, safeAnalysisError(error), epoch, true);
     }
   };
