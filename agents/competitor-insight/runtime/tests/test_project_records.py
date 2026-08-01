@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+import zipfile
 
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1]
@@ -60,7 +61,8 @@ class ProjectRecordTests(unittest.TestCase):
         self.assertEqual(task["status"], "waiting")
         self.assertEqual(task["progress"], 10)
         persisted = json.loads(self.store_path.read_text("utf-8"))
-        self.assertEqual(persisted["schemaVersion"], 1)
+        self.assertEqual(persisted["schemaVersion"], 2)
+        self.assertEqual(persisted["bundles"], [])
         self.assertNotIn("secret", json.dumps(persisted))
         self.assertEqual(list(self.store_path.parent.glob("*.tmp")), [])
 
@@ -97,15 +99,15 @@ class ProjectRecordTests(unittest.TestCase):
         self.assertEqual(running["progress"], 60)
         self.assertEqual(running["currentStep"], "正在抓取平台数据")
 
-        completed = project_records.update_task(
-            "competitor-20260801-a1",
-            {
-                "status": "completed",
-                "progress": 100,
-                "currentStep": "成果已登记",
-            },
+        with self.assertRaisesRegex(ValueError, "invalid_status_transition"):
+            project_records.update_task(
+                "competitor-20260801-a1",
+                {"status": "completed", "progress": 100, "currentStep": "成果已登记"},
+            )
+        failed = project_records.update_task(
+            "competitor-20260801-a1", {"status": "failed"}
         )
-        self.assertIsInstance(completed["completedAt"], str)
+        self.assertEqual(failed["status"], "failed")
 
         with self.assertRaisesRegex(ValueError, "invalid_status_transition"):
             project_records.update_task(
@@ -308,6 +310,224 @@ class ProjectRecordTests(unittest.TestCase):
             project_records.read_records("competitor-insight")
 
         self.assertEqual(self.store_path.read_text("utf-8"), "{damaged")
+
+    def test_malformed_v2_task_is_preserved_and_rejected(self) -> None:
+        self.create_task()
+        corrupted = json.loads(self.store_path.read_text("utf-8"))
+        corrupted["tasks"][0]["status"] = 99
+        self.store_path.write_text(json.dumps(corrupted), "utf-8")
+
+        with self.assertRaisesRegex(ValueError, "record_store_damaged"):
+            project_records.read_records("competitor-insight")
+
+        self.assertEqual(json.loads(self.store_path.read_text("utf-8"))["tasks"][0]["status"], 99)
+
+    def write_v1_store_with_three_artifacts(self) -> list[Path]:
+        output = (
+            self.project_root
+            / "outputs"
+            / "competitor-insight"
+            / "xiaohongshu"
+            / "competitor-legacy-a1"
+        )
+        output.mkdir(parents=True)
+        report = output / "历史报告.md"
+        data = output / "数据.json"
+        sheet = output / "数据.xlsx"
+        report.write_text("# 历史报告", "utf-8")
+        data.write_text('{"items":[]}', "utf-8")
+        sheet.write_bytes(b"xlsx")
+        task = {
+            "id": "competitor-legacy-a1",
+            "agentId": "competitor-insight",
+            "title": "历史小红书作品",
+            "platformId": "xiaohongshu",
+            "platformLabel": "小红书",
+            "skillId": "xiaohongshu-scraper",
+            "sourceUrl": "https://www.xiaohongshu.com/explore/legacy",
+            "status": "completed",
+            "progress": 100,
+            "currentStep": "历史成果已登记",
+            "model": "xiaohongshu-scraper",
+            "createdAt": "2026-08-01T00:00:00.000Z",
+            "updatedAt": "2026-08-01T00:01:00.000Z",
+            "completedAt": "2026-08-01T00:01:00.000Z",
+            "stoppedAt": None,
+            "errorSummary": None,
+            "artifactIds": ["artifact-1111111111111111", "artifact-2222222222222222", "artifact-3333333333333333"],
+        }
+        artifacts = [
+            {
+                "id": f"artifact-{index * 1111111111111111:016x}",
+                "agentId": "competitor-insight",
+                "taskId": task["id"],
+                "kind": kind,
+                "name": path.name,
+                "filename": path.name,
+                "absolutePath": str(path),
+                "sizeBytes": path.stat().st_size,
+                "createdAt": task["createdAt"],
+                "completedAt": task["completedAt"],
+                "previewable": kind == "markdown",
+                "exists": True,
+                "isDirectory": False,
+                "markdown": None,
+            }
+            for index, (path, kind) in enumerate(
+                ((report, "markdown"), (data, "json"), (sheet, "excel")), start=1
+            )
+        ]
+        self.store_path.parent.mkdir(parents=True)
+        self.store_path.write_text(json.dumps({"schemaVersion": 1, "tasks": [task], "artifacts": artifacts}), "utf-8")
+        return [report, data, sheet]
+
+    def bundle_task_directory(self) -> Path:
+        return (
+            self.project_root
+            / "outputs"
+            / "competitor-insight"
+            / "xiaohongshu"
+            / "competitor-20260801-a1"
+        )
+
+    def bundle_payload(self, output: Path) -> dict[str, object]:
+        report = output / "竞品报告.md"
+        data = output / "结构化数据.json"
+        workbook = output / "竞品数据.xlsx"
+        return {
+            "platformId": "xiaohongshu",
+            "inputKind": "content",
+            "category": "xhs-note",
+            "outputDir": str(output),
+            "primaryReportPath": str(report),
+            "explicitPaths": [str(report), str(data), str(workbook)],
+            "subjectName": "公开作品",
+            "itemCount": 1,
+        }
+
+    def prepare_bundle_task(self) -> Path:
+        self.create_task()
+        project_records.update_task(
+            "competitor-20260801-a1", {"inputKind": "content", "category": "xhs-note"}
+        )
+        output = self.bundle_task_directory()
+        output.mkdir(parents=True)
+        (output / "竞品报告.md").write_text("# 竞品报告", "utf-8")
+        (output / "结构化数据.json").write_text('{"items":[]}', "utf-8")
+        (output / "竞品数据.xlsx").write_bytes(b"xlsx")
+        return output
+
+    def test_v1_completed_task_migrates_to_one_legacy_bundle_without_moving_files(self) -> None:
+        original_paths = self.write_v1_store_with_three_artifacts()
+
+        snapshot = project_records.read_records("competitor-insight")
+
+        self.assertEqual(len(snapshot["bundles"]), 1)
+        legacy = snapshot["bundles"][0]
+        self.assertEqual(legacy["status"], "legacy")
+        self.assertEqual(legacy["taskId"], "competitor-legacy-a1")
+        self.assertEqual(Path(legacy["primaryReportPath"]), original_paths[0])
+        self.assertFalse(Path(legacy["archivePath"]).exists())
+        self.assertTrue(all(path.exists() for path in original_paths))
+        self.assertEqual(json.loads(self.store_path.read_text("utf-8"))["schemaVersion"], 2)
+
+    def test_task_classification_can_only_resolve_unknown_once(self) -> None:
+        self.create_task()
+
+        task = project_records.update_task(
+            "competitor-20260801-a1",
+            {"inputKind": "account", "category": "xhs-account"},
+        )
+
+        self.assertEqual(task["inputKind"], "account")
+        self.assertEqual(task["category"], "xhs-account")
+        with self.assertRaisesRegex(ValueError, "invalid_task_classification"):
+            project_records.update_task(
+                "competitor-20260801-a1",
+                {"inputKind": "content", "category": "xhs-note"},
+            )
+        with self.assertRaisesRegex(ValueError, "invalid_task_classification"):
+            project_records.update_task(
+                "competitor-20260801-a1", {"inputKind": "content"}
+            )
+        with self.assertRaisesRegex(ValueError, "invalid_task_classification"):
+            project_records.update_task(
+                "competitor-20260801-a1",
+                {"inputKind": "content", "category": "douyin-content"},
+            )
+
+    def test_finalize_bundle_is_atomic_idempotent_and_completes_task_after_zip(self) -> None:
+        output = self.prepare_bundle_task()
+        payload = self.bundle_payload(output)
+
+        snapshot = project_records.finalize_bundle("competitor-20260801-a1", payload)
+        repeated = project_records.finalize_bundle("competitor-20260801-a1", payload)
+
+        task = snapshot["tasks"][0]
+        bundle = snapshot["bundles"][0]
+        self.assertEqual(task["status"], "completed")
+        self.assertEqual(task["bundleId"], bundle["id"])
+        self.assertEqual(len(snapshot["bundles"]), 1)
+        self.assertEqual(repeated["bundles"][0]["id"], bundle["id"])
+        self.assertTrue(Path(bundle["manifestPath"]).is_file())
+        self.assertTrue(Path(bundle["archivePath"]).is_file())
+
+    def test_zip_excludes_sensitive_symlink_and_unregistered_files(self) -> None:
+        output = self.prepare_bundle_task()
+        (output / "douyin_state.json").write_text("sentinel-state", "utf-8")
+        (output / "COOKIE.txt").write_text("sentinel-cookie", "utf-8")
+        (output / "not-registered.txt").write_text("sentinel-stray", "utf-8")
+        outside = self.project_root / "private.md"
+        outside.write_text("sentinel-private", "utf-8")
+        (output / "linked.md").symlink_to(outside)
+        snapshot = project_records.finalize_bundle(
+            "competitor-20260801-a1", self.bundle_payload(output)
+        )
+        bundle_id = snapshot["bundles"][0]["id"]
+
+        with zipfile.ZipFile(project_records.bundle_archive(bundle_id)) as archive:
+            names = set(archive.namelist())
+            contents = b"".join(archive.read(name) for name in names)
+
+        self.assertIn("竞品报告.md", names)
+        self.assertIn("bundle-manifest.json", names)
+        self.assertNotIn("douyin_state.json", names)
+        self.assertNotIn("COOKIE.txt", names)
+        self.assertNotIn("not-registered.txt", names)
+        self.assertNotIn("linked.md", names)
+        self.assertNotIn(b"sentinel", contents)
+        self.assertFalse(any(name.startswith("/") or ".." in Path(name).parts for name in names))
+
+    def test_legacy_archive_is_delayed_and_missing_files_preserve_history(self) -> None:
+        original_paths = self.write_v1_store_with_three_artifacts()
+        migrated = project_records.read_records("competitor-insight")
+        bundle = migrated["bundles"][0]
+        bundle_id = bundle["id"]
+
+        archive = project_records.bundle_archive(bundle_id)
+        original_paths[1].unlink()
+        refreshed = project_records.read_records("competitor-insight")
+
+        self.assertTrue(archive.is_file())
+        self.assertEqual(refreshed["bundles"][0]["status"], "missing")
+        self.assertEqual(refreshed["bundles"][0]["id"], bundle_id)
+
+    def test_bundle_reveal_accepts_only_persisted_id_and_root_directory(self) -> None:
+        output = self.prepare_bundle_task()
+        snapshot = project_records.finalize_bundle(
+            "competitor-20260801-a1", self.bundle_payload(output)
+        )
+        bundle_id = snapshot["bundles"][0]["id"]
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        result = project_records.reveal_bundle(
+            bundle_id, runner=lambda argv, **kwargs: calls.append((argv, kwargs))
+        )
+
+        self.assertEqual(result, {"ok": True, "bundleId": bundle_id})
+        self.assertEqual(calls[0][0], ["open", "--", str(output.resolve())])
+        with self.assertRaisesRegex(ValueError, "invalid_bundle_id"):
+            project_records.reveal_bundle(str(output), runner=lambda *_: None)
 
 
 if __name__ == "__main__":
