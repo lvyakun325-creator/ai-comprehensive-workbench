@@ -9,7 +9,7 @@ sys.path.insert(0, str(RUNTIME_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from report_renderer import assemble_report, render_evidence_reference, validate_final_report
-from test_section_validator import evidence_bundle, execution_batch
+from test_section_validator import content_batch, evidence_bundle, execution_batch, xhs_note_bundle
 
 
 def valid_batches() -> list[dict[str, object]]:
@@ -72,6 +72,35 @@ def valid_batches() -> list[dict[str, object]]:
 
 
 class ReportRendererTests(unittest.TestCase):
+    def test_account_report_has_the_confirmed_fixed_heading_structure(self) -> None:
+        markdown = assemble_report(evidence_bundle(), valid_batches())
+
+        for heading in (
+            "## 账号概览",
+            "## 一、战略层：账号定位与人设分析",
+            "## 二、业务层：转化路径与商业价值分析",
+            "### 3.1 Top 10 高表现作品",
+            "### 3.2 起号期 Top 5 作品",
+            "### 3.3 高收藏 / 高分享 / 高评论作品观察",
+            "### 第一步：拍什么",
+            "### 第二步：怎么拍",
+            "### 第三步：怎么承接转化",
+            "### 对标执行清单",
+        ):
+            self.assertIn(heading, markdown)
+
+    def test_single_note_report_never_renders_account_rankings(self) -> None:
+        markdown = assemble_report(xhs_note_bundle(), [content_batch()])
+
+        self.assertIn("# 小红书单篇笔记分析报告", markdown)
+        self.assertIn("## 内容概览", markdown)
+        self.assertIn("## 数据完整性", markdown)
+        self.assertIn("## 可复用角度", markdown)
+        self.assertNotIn("Top 10", markdown)
+        self.assertNotIn("起号期", markdown)
+        self.assertNotIn("7 天", markdown)
+        self.assertEqual(validate_final_report(markdown, xhs_note_bundle(), [content_batch()]), [])
+
     def test_renders_bundle_rankings_and_evidence_numbers_in_fixed_section_order(self) -> None:
         bundle = evidence_bundle()
 
@@ -80,20 +109,20 @@ class ReportRendererTests(unittest.TestCase):
         headings = [
             "# 抖音账号分析报告 - @测试账号",
             "## 账号概览",
-            "## 战略层：账号定位与人设分析",
-            "## 业务层：转化路径与商业价值分析",
-            "## 内容层：选题策略与爆款内容分析",
-            "## Top 10 高表现作品",
-            "## 起号期 Top 5",
-            "## 高收藏、高分享、高评论作品",
-            "## 流量层：传播与互动表现分析",
-            "## 数据层：关键指标与账号健康度分析",
-            "## 对标建议：拍什么、怎么拍、怎么承接",
-            "## 7 天对标执行清单",
+            "## 一、战略层：账号定位与人设分析",
+            "## 二、业务层：转化路径与商业价值分析",
+            "## 三、内容层：选题策略与爆款内容分析",
+            "### 3.1 Top 10 高表现作品",
+            "### 3.2 起号期 Top 5 作品",
+            "### 3.3 高收藏 / 高分享 / 高评论作品观察",
+            "## 四、流量层：传播与互动表现分析",
+            "## 五、数据层：关键指标与账号健康度分析",
+            "## 六、对标建议",
+            "### 对标执行清单",
         ]
         positions = [markdown.index(heading) for heading in headings]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn("| 排名 | 标题 | 点赞 | 评论 | 收藏 | 分享 | 综合互动量 |", markdown)
+        self.assertIn("| 排名 | 标题 | 作品/视频链接 | 点赞 | 评论 | 收藏 | 分享 | 综合互动量 |", markdown)
         self.assertIn("DY-E0001", markdown)
         self.assertIn("点赞：12,000", markdown)
         self.assertIn("基于标题和互动数据的弱判断", markdown)
@@ -119,8 +148,8 @@ class ReportRendererTests(unittest.TestCase):
         batches[0]["claims"].reverse()
         markdown = assemble_report(evidence_bundle(), batches)
 
-        strategy_body = markdown.split("## 战略层：账号定位与人设分析", 1)[1].split("## 业务层", 1)[0]
-        business_body = markdown.split("## 业务层：转化路径与商业价值分析", 1)[1].split("## 内容层", 1)[0]
+        strategy_body = markdown.split("## 一、战略层：账号定位与人设分析", 1)[1].split("## 二、业务层", 1)[0]
+        business_body = markdown.split("## 二、业务层：转化路径与商业价值分析", 1)[1].split("## 三、内容层", 1)[0]
         self.assertIn("标题结构呈现生活化表达", strategy_body)
         self.assertNotIn("业务判断", strategy_body)
         self.assertIn("业务判断", business_body)
@@ -152,9 +181,9 @@ class ReportRendererTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             validate_final_report(markdown, bundle)
         self.assertEqual(validate_final_report(markdown, bundle, batches), [])
-        missing = markdown.replace("## 数据层：关键指标与账号健康度分析", "")
+        missing = markdown.replace("## 五、数据层：关键指标与账号健康度分析", "")
         self.assertIn(
-            "missing_section:数据层：关键指标与账号健康度分析",
+            "missing_section:五、数据层：关键指标与账号健康度分析",
             validate_final_report(missing, bundle, batches),
         )
         unknown = markdown + "\n  - 证据 `DY-E9999`：伪造引用\n"
@@ -189,14 +218,14 @@ class ReportRendererTests(unittest.TestCase):
             validate_final_report(swapped_overview, bundle, batches),
         )
 
-        top_row = "| 1 | 作品一 | 12,000 | 320 | 860 | 210 | 13,390 |"
+        top_row = "| 1 | 作品一 | https://example.com/1 | 12,000 | 320 | 860 | 210 | 13,390 |"
         swapped_table = markdown.replace(
             top_row,
-            "| 1 | 作品一 | 1,000 | 320 | 860 | 210 | 13,390 |",
+            "| 1 | 作品一 | https://example.com/1 | 1,000 | 320 | 860 | 210 | 13,390 |",
             1,
         )
         self.assertIn(
-            "deterministic_block_mismatch:Top 10 高表现作品",
+            "deterministic_block_mismatch:3.1 Top 10 高表现作品",
             validate_final_report(swapped_table, bundle, batches),
         )
 
@@ -314,7 +343,7 @@ class ReportRendererTests(unittest.TestCase):
         self.assertEqual(markdown.count("该指标在源数据中不可用，未生成榜单。"), 3)
         tampered = markdown.replace("该指标在源数据中不可用，未生成榜单。", "无数据。", 1)
         self.assertIn(
-            "deterministic_block_mismatch:高收藏、高分享、高评论作品",
+            "deterministic_block_mismatch:3.3 高收藏 / 高分享 / 高评论作品观察",
             validate_final_report(tampered, bundle, batches),
         )
 
@@ -322,29 +351,29 @@ class ReportRendererTests(unittest.TestCase):
         bundle = evidence_bundle()
         batches = valid_batches()
         markdown = assemble_report(bundle, batches)
-        duplicated = markdown + "\n## 数据层：关键指标与账号健康度分析\n"
+        duplicated = markdown + "\n## 五、数据层：关键指标与账号健康度分析\n"
         self.assertIn(
-            "duplicate_section:数据层：关键指标与账号健康度分析",
+            "duplicate_section:五、数据层：关键指标与账号健康度分析",
             validate_final_report(duplicated, bundle, batches),
         )
 
         quoted = markdown.replace(
-            "## 数据层：关键指标与账号健康度分析",
-            "> ## 数据层：关键指标与账号健康度分析",
+            "## 五、数据层：关键指标与账号健康度分析",
+            "> ## 五、数据层：关键指标与账号健康度分析",
             1,
         )
         self.assertIn(
-            "missing_section:数据层：关键指标与账号健康度分析",
+            "missing_section:五、数据层：关键指标与账号健康度分析",
             validate_final_report(quoted, bundle, batches),
         )
 
         fenced = markdown.replace(
-            "## 数据层：关键指标与账号健康度分析",
-            "```\n## 数据层：关键指标与账号健康度分析\n```",
+            "## 五、数据层：关键指标与账号健康度分析",
+            "```\n## 五、数据层：关键指标与账号健康度分析\n```",
             1,
         )
         self.assertIn(
-            "missing_section:数据层：关键指标与账号健康度分析",
+            "missing_section:五、数据层：关键指标与账号健康度分析",
             validate_final_report(fenced, bundle, batches),
         )
 
@@ -355,47 +384,47 @@ class ReportRendererTests(unittest.TestCase):
 
         cases = (
             (
-                markdown.replace("### 选题方向", "", 1),
-                "missing_subsection:选题方向",
+                markdown.replace("### 第一步：拍什么", "", 1),
+                "missing_subsection:第一步：拍什么",
             ),
             (
-                markdown.replace("### 选题方向", "### 选题改名", 1),
-                "missing_subsection:选题方向",
+                markdown.replace("### 第一步：拍什么", "### 选题改名", 1),
+                "missing_subsection:第一步：拍什么",
             ),
             (
-                markdown.replace("### 拍法模板", "### 选题方向\n### 拍法模板", 1),
-                "duplicate_subsection:选题方向",
+                markdown.replace("### 第二步：怎么拍", "### 第一步：拍什么\n### 第二步：怎么拍", 1),
+                "duplicate_subsection:第一步：拍什么",
             ),
             (
-                markdown.replace("### 选题方向", "### 临时", 1).replace(
-                    "### 拍法模板",
-                    "### 选题方向",
+                markdown.replace("### 第一步：拍什么", "### 临时", 1).replace(
+                    "### 第二步：怎么拍",
+                    "### 第一步：拍什么",
                     1,
-                ).replace("### 临时", "### 拍法模板", 1),
+                ).replace("### 临时", "### 第二步：怎么拍", 1),
                 "subsection_out_of_order:对标建议",
             ),
             (
-                markdown.replace("### 第 1 天", "", 1),
+                markdown.replace("#### 第 1 天", "", 1),
                 "missing_execution_day:1",
             ),
             (
-                markdown.replace("### 第 1 天", "### 第一天", 1),
+                markdown.replace("#### 第 1 天", "#### 第一天", 1),
                 "missing_execution_day:1",
             ),
             (
-                markdown.replace("### 第 2 天", "### 第 1 天\n### 第 2 天", 1),
+                markdown.replace("#### 第 2 天", "#### 第 1 天\n#### 第 2 天", 1),
                 "duplicate_execution_day:1",
             ),
             (
-                markdown.replace("### 第 1 天", "### 临时天", 1).replace(
-                    "### 第 2 天",
-                    "### 第 1 天",
+                markdown.replace("#### 第 1 天", "#### 临时天", 1).replace(
+                    "#### 第 2 天",
+                    "#### 第 1 天",
                     1,
-                ).replace("### 临时天", "### 第 2 天", 1),
+                ).replace("#### 临时天", "#### 第 2 天", 1),
                 "execution_days_out_of_order",
             ),
             (
-                "### 第 1 天\n" + markdown,
+                "#### 第 1 天\n" + markdown,
                 "execution_day_outside_section:1",
             ),
         )

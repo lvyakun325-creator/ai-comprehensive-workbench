@@ -16,23 +16,32 @@ from section_validator import (
 
 
 _SECTION_HEADINGS = (
-    "# 抖音账号分析报告 - @{nickname}",
+    "# {platform}账号分析报告 - @{nickname}",
     "## 账号概览",
-    "## 战略层：账号定位与人设分析",
-    "## 业务层：转化路径与商业价值分析",
-    "## 内容层：选题策略与爆款内容分析",
-    "## Top 10 高表现作品",
-    "## 起号期 Top 5",
-    "## 高收藏、高分享、高评论作品",
-    "## 流量层：传播与互动表现分析",
-    "## 数据层：关键指标与账号健康度分析",
-    "## 对标建议：拍什么、怎么拍、怎么承接",
-    "## 7 天对标执行清单",
+    "## 一、战略层：账号定位与人设分析",
+    "## 二、业务层：转化路径与商业价值分析",
+    "## 三、内容层：选题策略与爆款内容分析",
+    "### 3.1 Top 10 高表现作品",
+    "### 3.2 起号期 Top 5 作品",
+    "### 3.3 高收藏 / 高分享 / 高评论作品观察",
+    "## 四、流量层：传播与互动表现分析",
+    "## 五、数据层：关键指标与账号健康度分析",
+    "## 六、对标建议",
+    "### 对标执行清单",
 )
-_TABLE_HEADER = "| 排名 | 标题 | 点赞 | 评论 | 收藏 | 分享 | 综合互动量 |"
-_TABLE_DIVIDER = "| ---: | --- | ---: | ---: | ---: | ---: | ---: |"
+_CONTENT_SECTION_HEADINGS = (
+    "# {platform}单篇{label}分析报告",
+    "## 内容概览",
+    "## 数据完整性",
+    "## 主题与钩子",
+    "## 互动结构",
+    "## 可复用角度",
+    "## 拍法",
+    "## 转化假设",
+    "## 合规边界",
+)
 _EVIDENCE_LINE_PATTERN = re.compile(
-    r"^  - 证据 `(?P<evidence_id>DY-E\d{4,})`："
+    r"^  - 证据 `(?P<evidence_id>(?:DY|XHS)-E\d{4,})`："
 )
 _MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+|>])")
 
@@ -49,6 +58,14 @@ def _integer(value: object) -> int:
 
 def _format_count(value: object) -> str:
     return f"{_integer(value):,}"
+
+
+def _platform_label(bundle: EvidenceBundle) -> str:
+    return "小红书" if bundle.get("platformId") == "xiaohongshu" else "抖音"
+
+
+def _content_label(bundle: EvidenceBundle) -> str:
+    return "笔记" if bundle.get("platformId") == "xiaohongshu" else "内容"
 
 
 def _items_by_id(bundle: EvidenceBundle) -> dict[str, dict[str, object]]:
@@ -118,7 +135,11 @@ def _ranking_table(bundle: EvidenceBundle, ranking_name: str) -> str:
     if isinstance(ranking, dict) and ranking.get("status") == "unavailable":
         return "该指标在源数据中不可用，未生成榜单。"
     rows = _ranking_rows(bundle, ranking_name)
-    lines = [_TABLE_HEADER, _TABLE_DIVIDER]
+    link_label = "笔记链接" if bundle.get("platformId") == "xiaohongshu" else "作品/视频链接"
+    lines = [
+        f"| 排名 | 标题 | {link_label} | 点赞 | 评论 | 收藏 | 分享 | 综合互动量 |",
+        "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
     for position, item in enumerate(rows, start=1):
         lines.append(
             "| "
@@ -126,6 +147,7 @@ def _ranking_table(bundle: EvidenceBundle, ranking_name: str) -> str:
                 (
                     str(position),
                     _safe_text(item.get("title")),
+                    _safe_text(item.get("url") or "缺失"),
                     _format_count(item.get("likes")),
                     _format_count(item.get("comments")),
                     _format_count(item.get("collects")),
@@ -209,11 +231,16 @@ def _account_overview(bundle: EvidenceBundle) -> str:
     warnings = completeness.get("warnings", []) if isinstance(completeness, dict) else []
     lines.append(f"- 缺失字段：{_safe_text('、'.join(map(str, missing)) if missing else '无')}")
     lines.append(f"- 数据警告：{_safe_text('；'.join(map(str, warnings)) if warnings else '无')}")
-    return "\n".join(lines)
+    summary_rows = ["| 指标 | 证据包数值 |", "| --- | ---: |"]
+    for line in lines:
+        if "：" in line:
+            label, value = line.removeprefix("- ").split("：", 1)
+            summary_rows.append(f"| {_safe_text(label)} | {_safe_text(value)} |")
+    return "\n".join(("\n".join(lines), "", "### 数据摘要", "\n".join(summary_rows)))
 
 
 def _recommendations(batch: dict[str, object], bundle: EvidenceBundle) -> str:
-    lines = ["### 选题方向"]
+    lines = ["### 第一步：拍什么"]
     for index, topic in enumerate(cast(list[dict[str, object]], batch["topicDirections"]), start=1):
         lines.append(
             f"{index}. **{_safe_text(topic.get('title'))}**：{_safe_text(topic.get('angle'))}"
@@ -222,7 +249,7 @@ def _recommendations(batch: dict[str, object], bundle: EvidenceBundle) -> str:
         notes = cast(list[str], topic.get("complianceNotes", []))
         lines.append(f"   - 合规提示：{_safe_text('；'.join(notes))}")
 
-    lines.append("\n### 拍法模板")
+    lines.append("\n### 第二步：怎么拍")
     for index, template in enumerate(cast(list[dict[str, object]], batch["filmingTemplates"]), start=1):
         structure = " → ".join(
             _safe_text(item) for item in cast(list[str], template.get("structure", []))
@@ -235,12 +262,16 @@ def _recommendations(batch: dict[str, object], bundle: EvidenceBundle) -> str:
         notes = cast(list[str], template.get("complianceNotes", []))
         lines.append(f"   - 合规提示：{_safe_text('；'.join(notes))}")
 
-    lines.append("\n### 转化与承接")
+    lines.append("\n### 第三步：怎么承接转化")
     conversions = cast(list[dict[str, object]], batch["conversionItems"])
     if not conversions:
         lines.append("本批未提供转化与承接动作。")
+    else:
+        lines.append("#### A/B 转化判断")
     for item in conversions:
-        lines.append(f"- {_safe_text(item.get('action'))}")
+        action = _safe_text(item.get("action"))
+        lines.append(f"- A 方案：{action}")
+        lines.append("- B 方案：同一合规承接动作以资料记录方式待验证，不对转化效果作出承诺。")
         lines.extend(_evidence_lines(item.get("evidenceIds"), bundle))
         notes = cast(list[str], item.get("complianceNotes", []))
         lines.append(f"  - 合规提示：{_safe_text('；'.join(notes))}")
@@ -249,13 +280,19 @@ def _recommendations(batch: dict[str, object], bundle: EvidenceBundle) -> str:
 
 
 def _execution_plan(batch: dict[str, object], bundle: EvidenceBundle) -> str:
-    lines = []
+    lines = ["| 天数 | 动作 | 合规提示 |", "| ---: | --- | --- |"]
     days = sorted(
         cast(list[dict[str, object]], batch["executionDays"]),
         key=lambda item: _integer(item.get("day")),
     )
     for item in days:
-        lines.append(f"### 第 {_integer(item.get('day'))} 天")
+        notes = cast(list[str], item.get("complianceNotes", []))
+        lines.append(
+            f"| {_integer(item.get('day'))} | {_safe_text(item.get('action'))} | "
+            f"{_safe_text('；'.join(notes))} |"
+        )
+    for item in days:
+        lines.append(f"#### 第 {_integer(item.get('day'))} 天")
         lines.append(f"- 动作：{_safe_text(item.get('action'))}")
         lines.extend(_evidence_lines(item.get("evidenceIds"), bundle))
         notes = cast(list[str], item.get("complianceNotes", []))
@@ -285,10 +322,11 @@ def _validated_batch_map(
         if batch_id in by_id:
             raise ValueError(f"duplicate_batch_id:{batch_id}")
         by_id[batch_id] = batch
-    for batch_id in ("strategy", "performance", "execution"):
+    expected_ids = ("content",) if bundle.get("inputKind") == "content" else ("strategy", "performance", "execution")
+    for batch_id in expected_ids:
         if batch_id not in by_id:
             raise ValueError(f"missing_batch_id:{batch_id}")
-    if len(by_id) != 3:
+    if len(by_id) != len(expected_ids):
         raise ValueError("unexpected_report_batch_count")
     return by_id
 
@@ -302,6 +340,18 @@ def _expected_evidence_lines(
     def append_from(items: list[dict[str, object]]) -> None:
         for item in items:
             evidence_ids.extend(cast(list[str], item["evidenceIds"]))
+
+    if bundle.get("inputKind") == "content":
+        content = by_id["content"]
+        for section in ("content-overview", "content-structure", "interaction", "conversion"):
+            append_from(_claims_for_section(content, section))
+        append_from(cast(list[dict[str, object]], content["topicDirections"]))
+        append_from(cast(list[dict[str, object]], content["filmingTemplates"]))
+        append_from(cast(list[dict[str, object]], content["conversionItems"]))
+        return [
+            f"  - {render_evidence_reference(evidence_id, bundle)}"
+            for evidence_id in evidence_ids
+        ]
 
     strategy = by_id["strategy"]
     performance = by_id["performance"]
@@ -331,6 +381,8 @@ def assemble_report(
 ) -> str:
     """Assemble the fixed report using only validated model text and bundle numbers."""
     by_id = _validated_batch_map(bundle, batches)
+    if bundle.get("inputKind") == "content":
+        return _assemble_content_report(bundle, by_id)
 
     strategy = by_id["strategy"]
     performance = by_id["performance"]
@@ -339,7 +391,7 @@ def assemble_report(
     nickname = _safe_text(account.get("nickname", "未命名账号"))
 
     sections = (
-        (_SECTION_HEADINGS[0].format(nickname=nickname), ""),
+        (_SECTION_HEADINGS[0].format(platform=_platform_label(bundle), nickname=nickname), ""),
         (_SECTION_HEADINGS[1], _account_overview(bundle)),
         (
             _SECTION_HEADINGS[2],
@@ -373,6 +425,78 @@ def assemble_report(
     ) + "\n"
 
 
+def _content_overview(bundle: EvidenceBundle) -> str:
+    items = cast(list[dict[str, object]], bundle.get("items", []))
+    item = items[0] if items else {}
+    link_label = "笔记链接" if bundle.get("platformId") == "xiaohongshu" else "内容链接"
+    return "\n".join((
+        f"- 标题：{_safe_text(item.get('title'))}",
+        f"- {link_label}：{_safe_text(item.get('url') or '缺失')}",
+        f"- 发布时间：{_safe_text(item.get('publishedAt') or '缺失')}",
+        f"- 点赞：{_format_count(item.get('likes'))}",
+        f"- 评论：{_format_count(item.get('comments'))}",
+        f"- 收藏：{_format_count(item.get('collects'))}",
+        f"- 分享：{_format_count(item.get('shares'))}",
+        f"- 综合互动量：{_format_count(item.get('totalInteractions'))}",
+    ))
+
+
+def _content_completeness(bundle: EvidenceBundle) -> str:
+    completeness = cast(dict[str, object], bundle.get("completeness", {}))
+    missing = cast(list[object], completeness.get("missingFields", []))
+    warnings = cast(list[object], completeness.get("warnings", []))
+    return "\n".join((
+        f"- 缺失字段：{_safe_text('、'.join(map(str, missing)) if missing else '无')}",
+        f"- 数据警告：{_safe_text('；'.join(map(str, warnings)) if warnings else '无')}",
+        "- 未提供的评论正文、画面结构、商品、私域、直播或转化链路，均仅作为待验证假设。",
+    ))
+
+
+def _content_topics(batch: dict[str, object], bundle: EvidenceBundle) -> str:
+    lines: list[str] = []
+    for index, topic in enumerate(cast(list[dict[str, object]], batch["topicDirections"]), start=1):
+        lines.append(f"{index}. **{_safe_text(topic.get('title'))}**：{_safe_text(topic.get('angle'))}")
+        lines.extend(_evidence_lines(topic.get("evidenceIds"), bundle))
+        lines.append(f"   - 合规提示：{_safe_text('；'.join(cast(list[str], topic.get('complianceNotes', []))))}")
+    return "\n".join(lines)
+
+
+def _content_filming(batch: dict[str, object], bundle: EvidenceBundle) -> str:
+    template = cast(list[dict[str, object]], batch["filmingTemplates"])[0]
+    structure = " → ".join(_safe_text(item) for item in cast(list[str], template.get("structure", [])))
+    return "\n".join((
+        f"- **{_safe_text(template.get('name'))}**：开场 {_safe_text(template.get('hook'))}；结构 {structure}",
+        *_evidence_lines(template.get("evidenceIds"), bundle),
+        f"  - 合规提示：{_safe_text('；'.join(cast(list[str], template.get('complianceNotes', []))))}",
+    ))
+
+
+def _content_conversion(batch: dict[str, object], bundle: EvidenceBundle) -> str:
+    lines: list[str] = ["仅基于已提供证据输出；商品、私域、直播与实际转化链路未提供时均为待验证假设。"]
+    for item in cast(list[dict[str, object]], batch["conversionItems"]):
+        lines.append(f"- {_safe_text(item.get('action'))}")
+        lines.extend(_evidence_lines(item.get("evidenceIds"), bundle))
+        lines.append(f"  - 合规提示：{_safe_text('；'.join(cast(list[str], item.get('complianceNotes', []))))}")
+    return "\n".join(lines)
+
+
+def _assemble_content_report(bundle: EvidenceBundle, by_id: dict[str, dict[str, object]]) -> str:
+    content = by_id["content"]
+    headings = [heading.format(platform=_platform_label(bundle), label=_content_label(bundle)) for heading in _CONTENT_SECTION_HEADINGS]
+    sections = (
+        (headings[0], ""),
+        (headings[1], _content_overview(bundle)),
+        (headings[2], _content_completeness(bundle)),
+        (headings[3], _render_claims(_claims_for_section(content, "content-overview"), bundle) + "\n\n" + _render_claims(_claims_for_section(content, "content-structure"), bundle)),
+        (headings[4], _render_claims(_claims_for_section(content, "interaction"), bundle)),
+        (headings[5], _content_topics(content, bundle)),
+        (headings[6], _content_filming(content, bundle)),
+        (headings[7], _render_claims(_claims_for_section(content, "conversion"), bundle) + "\n\n" + _content_conversion(content, bundle)),
+        (headings[8], "- 不作疾病诊断，不替代医生建议，不承诺疗效，不引导停药、换药、加量或减量。"),
+    )
+    return "\n\n".join(heading if not body else f"{heading}\n\n{body}" for heading, body in sections) + "\n"
+
+
 def _active_lines(markdown: str) -> tuple[list[str], set[int], bool]:
     lines = markdown.splitlines()
     active: set[int] = set()
@@ -403,6 +527,63 @@ def _append_once(errors: list[str], error: str) -> None:
         errors.append(error)
 
 
+def _validate_content_final_report(
+    markdown: str,
+    bundle: EvidenceBundle,
+    by_id: dict[str, dict[str, object]],
+) -> list[str]:
+    errors: list[str] = []
+    expected = _assemble_content_report(bundle, by_id)
+    if markdown != expected:
+        errors.append("report_content_mismatch")
+    lines, active, found_fence = _active_lines(markdown)
+    if found_fence:
+        errors.append("forbidden_code_fence")
+    expected_headings = [
+        heading.format(platform=_platform_label(bundle), label=_content_label(bundle))
+        for heading in _CONTENT_SECTION_HEADINGS
+    ]
+    positions: dict[str, list[int]] = {
+        heading: [index for index, line in enumerate(lines) if index in active and line == heading]
+        for heading in expected_headings
+    }
+    for heading in expected_headings:
+        if not positions[heading]:
+            errors.append(f"missing_section:{heading.lstrip('# ')}")
+        elif len(positions[heading]) > 1:
+            errors.append(f"duplicate_section:{heading.lstrip('# ')}")
+    first_positions = [positions[heading][0] for heading in expected_headings if positions[heading]]
+    if first_positions != sorted(first_positions):
+        errors.append("section_out_of_order")
+
+    known_ids = set(_items_by_id(bundle))
+    actual_evidence_lines: list[str] = []
+    evidence_lines: set[int] = set()
+    for index in sorted(active):
+        match = _EVIDENCE_LINE_PATTERN.match(lines[index])
+        if match is None:
+            continue
+        evidence_lines.add(index)
+        actual_evidence_lines.append(lines[index])
+        evidence_id = match.group("evidence_id")
+        if evidence_id not in known_ids:
+            _append_once(errors, f"unknown_evidence_id:{evidence_id}")
+        elif lines[index] != f"  - {render_evidence_reference(evidence_id, bundle)}":
+            _append_once(errors, f"evidence_reference_mismatch:{evidence_id}")
+    if actual_evidence_lines != _expected_evidence_lines(bundle, by_id):
+        errors.append("evidence_reference_sequence_mismatch")
+
+    expected_lines = set(expected.splitlines())
+    for index in sorted(active):
+        if index in evidence_lines or lines[index] in expected_lines:
+            continue
+        for claim in untrusted_numeric_claims(lines[index]):
+            _append_once(errors, f"untrusted_numeric_claim:{claim}")
+        for phrase in medical_compliance_violations(lines[index]):
+            _append_once(errors, f"medical_compliance_violation:{phrase}")
+    return errors
+
+
 def validate_final_report(
     markdown: str,
     bundle: EvidenceBundle,
@@ -411,6 +592,8 @@ def validate_final_report(
     """Return stable final-report errors for structure, evidence, and numeric leaks."""
     errors: list[str] = []
     by_id = _validated_batch_map(bundle, batches)
+    if bundle.get("inputKind") == "content":
+        return _validate_content_final_report(markdown, bundle, by_id)
     if markdown != assemble_report(bundle, batches):
         errors.append("report_content_mismatch")
     lines, active, found_fence = _active_lines(markdown)
@@ -419,7 +602,8 @@ def validate_final_report(
     account = bundle.get("account", {})
     nickname = _safe_text(account.get("nickname", "未命名账号"))
     expected_headings = [
-        heading.format(nickname=nickname) if "{nickname}" in heading else heading
+        heading.format(platform=_platform_label(bundle), nickname=nickname)
+        if "{" in heading else heading
         for heading in _SECTION_HEADINGS
     ]
     heading_positions: dict[str, list[int]] = {
@@ -434,7 +618,7 @@ def validate_final_report(
         positions = heading_positions[heading]
         if not positions:
             label = heading.lstrip("# ")
-            if label.startswith("抖音账号分析报告"):
+            if label.endswith("账号分析报告 - @" + nickname):
                 errors.append("missing_section:报告标题")
             else:
                 errors.append(f"missing_section:{label}")
@@ -456,9 +640,9 @@ def validate_final_report(
             _append_once(errors, f"unexpected_heading:{line.lstrip('# ')}")
 
     subsection_headings = (
-        "### 选题方向",
-        "### 拍法模板",
-        "### 转化与承接",
+        "### 第一步：拍什么",
+        "### 第二步：怎么拍",
+        "### 第三步：怎么承接转化",
     )
     subsection_positions = {
         heading: [
@@ -506,7 +690,7 @@ def validate_final_report(
         day: [
             index
             for index, line in enumerate(lines)
-            if index in active and line == f"### 第 {day} 天"
+            if index in active and line == f"#### 第 {day} 天"
         ]
         for day in range(1, 8)
     }
@@ -572,16 +756,17 @@ def validate_final_report(
         for positions in heading_positions.values()
         for position in positions
     }
-    execution_heading = re.compile(r"^### 第 [1-7] 天$")
-    topic_position = subsection_positions["### 选题方向"]
-    filming_position = subsection_positions["### 拍法模板"]
-    conversion_position = subsection_positions["### 转化与承接"]
+    execution_heading = re.compile(r"^#### 第 [1-7] 天$")
+    topic_position = subsection_positions["### 第一步：拍什么"]
+    filming_position = subsection_positions["### 第二步：怎么拍"]
+    conversion_position = subsection_positions["### 第三步：怎么承接转化"]
     for index in sorted(active):
         if (
             index in deterministic_lines
             or index in heading_line_indexes
             or index in evidence_lines
             or execution_heading.fullmatch(lines[index])
+            or lines[index].startswith("|")
         ):
             continue
         model_line = lines[index]

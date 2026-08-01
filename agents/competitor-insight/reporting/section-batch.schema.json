@@ -14,7 +14,7 @@
   ],
   "properties": {
     "batchId": {
-      "enum": ["strategy", "performance", "execution"]
+      "enum": ["strategy", "performance", "execution", "content"]
     },
     "claims": {
       "type": "array",
@@ -133,6 +133,45 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": { "batchId": { "const": "content" } },
+        "required": ["batchId"]
+      },
+      "then": {
+        "properties": {
+          "claims": {
+            "minItems": 4,
+            "maxItems": 4,
+            "allOf": [
+              {
+                "contains": { "properties": { "section": { "const": "content-overview" } }, "required": ["section"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "section": { "const": "content-structure" } }, "required": ["section"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "section": { "const": "interaction" } }, "required": ["section"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "section": { "const": "conversion" } }, "required": ["section"] },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            ]
+          },
+          "topicDirections": { "minItems": 3, "maxItems": 3 },
+          "filmingTemplates": { "minItems": 1, "maxItems": 1 },
+          "executionDays": { "maxItems": 0 }
+        }
+      }
     }
   ],
   "$defs": {
@@ -147,7 +186,7 @@
       "required": ["section", "statement", "strength", "evidenceIds"],
       "properties": {
         "section": {
-          "enum": ["strategy", "business", "content", "traffic", "data"]
+          "enum": ["strategy", "business", "content", "traffic", "data", "content-overview", "content-structure", "interaction", "conversion"]
         },
         "statement": { "type": "string", "minLength": 1 },
         "strength": { "enum": ["direct", "weak", "hypothesis"] },

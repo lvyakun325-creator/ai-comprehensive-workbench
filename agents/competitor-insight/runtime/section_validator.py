@@ -36,6 +36,7 @@ _BATCH_SECTIONS = {
     "strategy": {"strategy", "business", "content"},
     "performance": {"traffic", "data"},
     "execution": set(),
+    "content": {"content-overview", "content-structure", "interaction", "conversion"},
 }
 _TOPIC_KEYS = {"title", "angle", "evidenceIds", "complianceNotes"}
 _FILMING_KEYS = {"name", "hook", "structure", "evidenceIds", "complianceNotes"}
@@ -390,6 +391,20 @@ def _validate_execution_contract(
             raise ValueError("recommendation_requires_ranked_evidence")
 
 
+def _validate_content_contract(batch: dict[str, object]) -> None:
+    claims = cast(list[dict[str, object]], batch["claims"])
+    sections = [str(item.get("section")) for item in claims]
+    required_sections = _BATCH_SECTIONS["content"]
+    if len(sections) != len(required_sections) or set(sections) != required_sections:
+        raise ValueError("content_claims_must_cover_fixed_sections")
+    if len(cast(list[dict[str, object]], batch["topicDirections"])) != 3:
+        raise ValueError("content_topic_directions_must_equal_3")
+    if len(cast(list[dict[str, object]], batch["filmingTemplates"])) != 1:
+        raise ValueError("content_filming_templates_must_equal_1")
+    if cast(list[dict[str, object]], batch["executionDays"]):
+        raise ValueError("content_execution_days_must_be_empty")
+
+
 def validate_section_batch(batch: object, bundle: EvidenceBundle) -> dict[str, object]:
     """Return a detached validated batch or raise a stable validation error."""
     normalized = deepcopy(_object(batch, "expected_section_batch_object"))
@@ -424,4 +439,6 @@ def validate_section_batch(batch: object, bundle: EvidenceBundle) -> dict[str, o
 
     if batch_id == "execution":
         _validate_execution_contract(normalized, bundle, known)
+    if batch_id == "content":
+        _validate_content_contract(normalized)
     return normalized

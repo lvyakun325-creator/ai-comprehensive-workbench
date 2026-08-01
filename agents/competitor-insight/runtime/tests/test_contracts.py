@@ -71,6 +71,29 @@ class ContractTests(unittest.TestCase):
                 }
                 for index in range(1, 8)
             ]
+        elif batch_id == "content":
+            batch["claims"] = [
+                self.claim(section)
+                for section in ("content-overview", "content-structure", "interaction", "conversion")
+            ]
+            batch["topicDirections"] = [
+                {
+                    "title": f"复用方向{label}",
+                    "angle": "生活方式提醒",
+                    "evidenceIds": evidence_ids,
+                    "complianceNotes": compliance_notes,
+                }
+                for label in ("一", "二", "三")
+            ]
+            batch["filmingTemplates"] = [
+                {
+                    "name": "单内容拍法",
+                    "hook": "先讲观察",
+                    "structure": ["证据", "建议"],
+                    "evidenceIds": evidence_ids,
+                    "complianceNotes": compliance_notes,
+                }
+            ]
         return batch
 
     def test_contract_rejects_missing_required_key(self):
@@ -94,7 +117,7 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             schema["properties"]["batchId"]["enum"],
-            ["strategy", "performance", "execution"],
+            ["strategy", "performance", "execution", "content"],
         )
         self.assertIn("section", schema["$defs"]["claim"]["required"])
         for conditional in schema["$defs"]["claim"]["allOf"]:
@@ -115,7 +138,7 @@ class ContractTests(unittest.TestCase):
     def test_section_batch_schema_accepts_exact_fixed_deliverables(self):
         validator = Draft202012Validator(self.load_section_batch_schema())
 
-        for batch_id in ("strategy", "performance", "execution"):
+        for batch_id in ("strategy", "performance", "execution", "content"):
             with self.subTest(batch_id=batch_id):
                 self.assertEqual(
                     list(validator.iter_errors(self.valid_section_batch(batch_id))),

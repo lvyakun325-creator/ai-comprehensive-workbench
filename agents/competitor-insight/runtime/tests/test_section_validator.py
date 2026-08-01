@@ -118,6 +118,40 @@ def execution_batch() -> dict[str, object]:
     }
 
 
+def xhs_note_bundle() -> dict[str, object]:
+    bundle = evidence_bundle()
+    bundle["platformId"] = "xiaohongshu"
+    bundle["inputKind"] = "content"
+    bundle["reportType"] = "xhs-note"
+    bundle["account"] = {"nickname": "单篇笔记"}
+    bundle["subject"] = {"title": "笔记标题"}
+    bundle["items"][0]["evidenceId"] = "XHS-E0001"
+    bundle["items"] = [bundle["items"][0]]
+    bundle["rankings"] = {}
+    bundle["metrics"] = {}
+    return bundle
+
+
+def content_batch() -> dict[str, object]:
+    evidence_fields = {"evidenceIds": ["XHS-E0001"], "complianceNotes": ["不承诺疗效"]}
+    return {
+        "batchId": "content",
+        "claims": [
+            {"section": "content-overview", "statement": "标题呈现日常管理主题", "strength": "direct", "rationale": "来自标题字段", **evidence_fields},
+            {"section": "content-structure", "statement": "画面结构未提供，作为待验证假设", "strength": "hypothesis", "rationale": "证据包未提供画面字段", "verificationPlan": "补充画面记录后核验", **evidence_fields},
+            {"section": "interaction", "statement": "互动数据可作为后续观察信号", "strength": "weak", "rationale": "仅来自单条内容数据", "verificationPlan": "结合更多内容核验", **evidence_fields},
+            {"section": "conversion", "statement": "转化链路未提供，作为待验证假设", "strength": "hypothesis", "rationale": "输入未提供商品或私域字段", "verificationPlan": "补充承接记录后核验", **evidence_fields},
+        ],
+        "topicDirections": [
+            {"title": f"复用角度{label}", "angle": "从日常管理场景切入", **evidence_fields}
+            for label in ("一", "二", "三")
+        ],
+        "filmingTemplates": [{"name": "单内容拍法", "hook": "用主题自然开场", "structure": ["主题", "日常提醒"], **evidence_fields}],
+        "conversionItems": [{"action": "仅作为待验证假设，不承诺转化效果", **evidence_fields}],
+        "executionDays": [],
+    }
+
+
 def strategy_batch() -> dict[str, object]:
     return {
         "batchId": "strategy",
@@ -139,6 +173,17 @@ def strategy_batch() -> dict[str, object]:
 
 
 class SectionValidatorTests(unittest.TestCase):
+    def test_content_contract_accepts_xhs_evidence_and_rejects_account_plan_fields(self) -> None:
+        self.assertEqual(
+            validate_section_batch(content_batch(), xhs_note_bundle())["batchId"],
+            "content",
+        )
+        invalid = content_batch()
+        invalid["executionDays"] = [
+            {"day": 1, "action": "不应出现", "evidenceIds": ["XHS-E0001"], "complianceNotes": ["不承诺疗效"]}
+        ]
+        with self.assertRaisesRegex(ValueError, "content_execution_days_must_be_empty"):
+            validate_section_batch(invalid, xhs_note_bundle())
     def test_rejects_unknown_evidence_id(self) -> None:
         batch = {
             "batchId": "strategy",

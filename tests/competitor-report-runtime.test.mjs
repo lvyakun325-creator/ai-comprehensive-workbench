@@ -114,6 +114,65 @@ function validBatch(batchId = "strategy") {
   };
 }
 
+function validContentBatch() {
+  const evidenceFields = {
+    evidenceIds: ["XHS-E0001"],
+    complianceNotes: ["不承诺疗效"],
+  };
+  return {
+    batchId: "content",
+    claims: [
+      {
+        section: "content-overview",
+        statement: "标题呈现日常管理主题",
+        strength: "direct",
+        rationale: "来自输入标题字段",
+        ...evidenceFields,
+      },
+      {
+        section: "content-structure",
+        statement: "画面结构未提供，作为待验证假设",
+        strength: "hypothesis",
+        rationale: "证据包未提供画面字段",
+        verificationPlan: "补充画面记录后核验",
+        ...evidenceFields,
+      },
+      {
+        section: "interaction",
+        statement: "互动数据可作为后续观察信号",
+        strength: "weak",
+        rationale: "仅来自单条内容的既有数据",
+        verificationPlan: "结合更多同类内容核验",
+        ...evidenceFields,
+      },
+      {
+        section: "conversion",
+        statement: "转化链路未提供，作为待验证假设",
+        strength: "hypothesis",
+        rationale: "输入未提供商品或私域字段",
+        verificationPlan: "补充合规承接记录后核验",
+        ...evidenceFields,
+      },
+    ],
+    topicDirections: ["一", "二", "三"].map((label) => ({
+      title: `复用角度${label}`,
+      angle: "从日常管理场景切入",
+      ...evidenceFields,
+    })),
+    filmingTemplates: [{
+      name: "单内容拍法",
+      hook: "用作品主题自然开场",
+      structure: ["主题", "日常提醒"],
+      ...evidenceFields,
+    }],
+    conversionItems: [{
+      action: "仅作为待验证假设，不对转化效果作出承诺",
+      ...evidenceFields,
+    }],
+    executionDays: [],
+  };
+}
+
 function chatResponse(content, init) {
   return Response.json({
     id: "chatcmpl_fixture",
@@ -146,7 +205,7 @@ test("strategy prompt isolates untrusted evidence and states the exact validated
   assert.match(turns[0].content, /不得生成证据数值、排名或数字结论/);
   assert.match(
     turns[0].content,
-    /只能原样复制输入中存在的 DY-E 格式 evidenceId/,
+    /只能原样复制输入 allowedEvidenceIds 中的 evidenceId/,
   );
   assert.match(turns[0].content, /对象不得包含额外字段/);
   assert.match(turns[0].content, /evidenceIds.*非空字符串数组/);
@@ -169,6 +228,30 @@ test("performance and execution prompts enforce their distinct section and recom
   assert.match(execution[0].content, /executionDays 必须覆盖 day 1 到 7/);
   assert.match(execution[0].content, /structure.*非空字符串数组/);
   assert.match(execution[0].content, /complianceNotes.*非空字符串数组/);
+});
+
+test("content prompt and parser accept XHS evidence IDs with the exact 3/1/0 contract", () => {
+  const input = {
+    allowedEvidenceIds: ["XHS-E0001"],
+    evidence: [{ evidenceId: "XHS-E0001", title: "笔记标题" }],
+  };
+  const turns = buildCompetitorBatchPrompt("content", input);
+
+  assert.match(turns[0].content, /allowedEvidenceIds/);
+  assert.doesNotMatch(turns[0].content, /DY-E 格式/);
+  assert.match(turns[0].content, /content-overview、content-structure、interaction、conversion/);
+  assert.match(turns[0].content, /topicDirections 必须恰好 3 项/);
+  assert.match(turns[0].content, /filmingTemplates 必须恰好 1 项/);
+  assert.match(turns[0].content, /executionDays 必须为空数组/);
+  assert.deepEqual(parseCompetitorBatchResponse(JSON.stringify(validContentBatch())), validContentBatch());
+
+  const invalid = validContentBatch();
+  invalid.executionDays = [{ day: 1, action: "不应出现", evidenceIds: ["XHS-E0001"], complianceNotes: ["不承诺疗效"] }];
+  assert.throws(
+    () => parseCompetitorBatchResponse(JSON.stringify(invalid)),
+    (error) => error instanceof CompetitorReportRuntimeError
+      && error.code === "INVALID_MODEL_OUTPUT",
+  );
 });
 
 test("batch prompt exact-validates bounded strategy account context", () => {
