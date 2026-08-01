@@ -349,3 +349,13 @@ test("scraper artifact bridge endpoint is 8768 and matches the Python fixed port
   );
   assert.match(pythonSource, /^PORT = 8768$/mu);
 });
+
+test("analyze artifacts supports the documented one-argument signal default", async () => {
+  globalThis.fetch = async () => Response.json(evidenceReadyFixture());
+  const result = await analyzeScrapeArtifacts({
+    taskId: "competitor-20260801-a1", platformId: "douyin", inputKind: "account",
+    outputDir: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-a1",
+    dataPath: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-a1/结构化数据.json", excelPath: null,
+  });
+  assert.equal(result.stage, "evidence_ready");
+});

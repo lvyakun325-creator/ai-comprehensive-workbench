@@ -865,6 +865,7 @@ def _validate_evidence_bundle(loaded: object, evidence_id: str) -> EvidenceBundl
         "platformId",
         "inputKind",
         "reportType",
+        "subject",
         "account",
         "completeness",
         "metrics",
@@ -888,6 +889,25 @@ def _validate_evidence_bundle(loaded: object, evidence_id: str) -> EvidenceBundl
     }.get((platform_id, input_kind))
     if expected_type is None or loaded.get("reportType") != expected_type or not isinstance(loaded.get("items"), list):
         raise ValueError("invalid_evidence_bundle")
+    allowed_keys = required | {"content", "source"}
+    if set(loaded) - allowed_keys or not all(isinstance(loaded.get(key), dict) for key in ("subject", "account", "completeness", "metrics", "rankings")):
+        raise ValueError("invalid_evidence_bundle")
+    items = cast(list[object], loaded["items"])
+    if not 1 <= len(items) <= 500:
+        raise ValueError("invalid_evidence_bundle")
+    prefix = "DY" if platform_id == "douyin" else "XHS"
+    ids: list[str] = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("evidenceId"), str) or not re.fullmatch(rf"{prefix}-E\d{{4,8}}", item["evidenceId"]):
+            raise ValueError("invalid_evidence_bundle")
+        ids.append(cast(str, item["evidenceId"]))
+    if len(set(ids)) != len(ids):
+        raise ValueError("invalid_evidence_bundle")
+    if input_kind == "content":
+        if len(items) != 1 or not isinstance(loaded.get("content"), dict) or loaded.get("rankings") != {}:
+            raise ValueError("invalid_evidence_bundle")
+    elif "content" in loaded or not loaded.get("rankings"):
+        raise ValueError("invalid_evidence_bundle")
     return cast(EvidenceBundle, loaded)
 
 
@@ -905,7 +925,7 @@ def _validate_contexts(bundle: EvidenceBundle, contexts: object) -> list[dict[st
             raise ValueError("invalid_evidence_bundle")
         batch_id = cast(str, context["batchId"])
         allowed = context["allowedEvidenceIds"]
-        if batch_id in by_id or not allowed or any(not isinstance(item, str) or item not in known for item in allowed) or len(set(allowed)) != len(allowed):
+        if batch_id in by_id or not allowed or len(allowed) > 30 or any(not isinstance(item, str) or item not in known for item in allowed) or len(set(allowed)) != len(allowed):
             raise ValueError("invalid_evidence_bundle")
         by_id[batch_id] = cast(dict[str, object], context)
     if set(by_id) != set(expected):

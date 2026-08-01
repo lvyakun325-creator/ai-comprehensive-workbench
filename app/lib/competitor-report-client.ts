@@ -76,7 +76,7 @@ export class CompetitorReportClientError extends Error {
 
 export async function analyzeScrapeArtifacts(
   input: AnalyzeScrapeArtifactsInput,
-  signal: AbortSignal,
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<EvidenceReadyResponse> {
   if (!validArtifactInput(input)) {
     throw new CompetitorReportClientError("INVALID_REQUEST", "抓取成果路径无效。");

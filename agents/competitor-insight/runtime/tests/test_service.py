@@ -226,6 +226,23 @@ class ServiceTests(unittest.TestCase):
                 service.validate_batch("../foreign", valid_batches()[0], str(request["outputDir"]))
         self.assertFalse(any("foreign" in str(call.args[0]) for call in opened.call_args_list))
 
+    def test_task_session_rejects_incomplete_and_untrusted_v2_evidence(self) -> None:
+        request = self._artifact_request()
+        result = service.analyze_artifacts(request)
+        session_path = Path(str(request["outputDir"])) / f"{result['evidenceId']}.evidence-session.json"
+        original = json.loads(session_path.read_text(encoding="utf-8"))
+        mutations = (
+            lambda value: value["evidence"].pop("subject"),
+            lambda value: value["evidence"]["items"].append(dict(value["evidence"]["items"][0])),
+            lambda value: value["trustedBatchContexts"][0].update({"allowedEvidenceIds": ["DY-E0001"] * 31}),
+        )
+        for mutate in mutations:
+            session = json.loads(json.dumps(original))
+            mutate(session)
+            session_path.write_text(json.dumps(session), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid_evidence_bundle"):
+                service.validate_batch(str(result["evidenceId"]), valid_batches()[0], str(request["outputDir"]))
+
     def test_rejects_paths_outside_the_controlled_douyin_directory(self) -> None:
         outside = self.project_root / "private.xlsx"
         outside.write_bytes(workbook_bytes())
