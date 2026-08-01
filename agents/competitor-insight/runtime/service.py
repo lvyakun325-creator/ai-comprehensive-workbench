@@ -170,20 +170,40 @@ def _write_task_json(platform_id: str, task_id: str, filename: str, value: objec
 
 def _write_task_markdown(platform_id: str, task_id: str, filename: str, markdown: str) -> Path:
     directory_fd, task_dir = _open_task_directory(platform_id, task_id)
-    base = Path(filename)
     try:
-        for attempt in range(1000):
-            suffix = "" if attempt == 0 else f"_{attempt:02d}"
-            name = f"{base.stem}{suffix}{base.suffix}"
-            try:
-                descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=directory_fd)
-            except FileExistsError:
-                continue
-            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-                output.write(markdown)
-            return task_dir / name
+        return task_dir / _atomic_markdown_name(directory_fd, filename, markdown)
     finally:
         os.close(directory_fd)
+    raise ValueError("report_filename_exhausted")
+
+
+def _atomic_markdown_name(directory_fd: int, filename: str, markdown: str) -> str:
+    base = Path(filename)
+    content = markdown.encode("utf-8")
+    for attempt in range(1000):
+        suffix = "" if attempt == 0 else f"_{attempt:02d}"
+        name = f"{base.stem}{suffix}{base.suffix}"
+        temporary = f".{name}.{secrets.token_hex(16)}.tmp"
+        descriptor = -1
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=directory_fd)
+            _write_all(descriptor, content)
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = -1
+            try:
+                os.link(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd, follow_symlinks=False)
+            except FileExistsError:
+                continue
+            os.fsync(directory_fd)
+            return name
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
     raise ValueError("report_filename_exhausted")
 
 
@@ -835,6 +855,10 @@ def _load_evidence(evidence_id: str) -> EvidenceBundle:
         raise ValueError("invalid_evidence_bundle") from None
     finally:
         os.close(directory_fd)
+    return _validate_evidence_bundle(loaded, evidence_id)
+
+
+def _validate_evidence_bundle(loaded: object, evidence_id: str) -> EvidenceBundle:
     required = {
         "evidenceVersion",
         "evidenceId",
@@ -854,7 +878,39 @@ def _load_evidence(evidence_id: str) -> EvidenceBundle:
         or not required.issubset(loaded)
     ):
         raise ValueError("invalid_evidence_bundle")
+    platform_id = loaded.get("platformId")
+    input_kind = loaded.get("inputKind")
+    expected_type = {
+        ("douyin", "account"): "douyin-account",
+        ("douyin", "content"): "douyin-content",
+        ("xiaohongshu", "account"): "xhs-account",
+        ("xiaohongshu", "content"): "xhs-note",
+    }.get((platform_id, input_kind))
+    if expected_type is None or loaded.get("reportType") != expected_type or not isinstance(loaded.get("items"), list):
+        raise ValueError("invalid_evidence_bundle")
     return cast(EvidenceBundle, loaded)
+
+
+def _validate_contexts(bundle: EvidenceBundle, contexts: object) -> list[dict[str, object]]:
+    if not isinstance(contexts, list):
+        raise ValueError("invalid_evidence_bundle")
+    expected = ("content",) if bundle.get("inputKind") == "content" else _EXPECTED_BATCH_IDS
+    known = {
+        item.get("evidenceId") for item in cast(list[dict[str, object]], bundle.get("items", []))
+        if isinstance(item, dict) and isinstance(item.get("evidenceId"), str)
+    }
+    by_id: dict[str, dict[str, object]] = {}
+    for context in contexts:
+        if not isinstance(context, dict) or not isinstance(context.get("batchId"), str) or not isinstance(context.get("allowedEvidenceIds"), list):
+            raise ValueError("invalid_evidence_bundle")
+        batch_id = cast(str, context["batchId"])
+        allowed = context["allowedEvidenceIds"]
+        if batch_id in by_id or not allowed or any(not isinstance(item, str) or item not in known for item in allowed) or len(set(allowed)) != len(allowed):
+            raise ValueError("invalid_evidence_bundle")
+        by_id[batch_id] = cast(dict[str, object], context)
+    if set(by_id) != set(expected):
+        raise ValueError("invalid_evidence_bundle")
+    return [by_id[batch_id] for batch_id in expected]
 
 
 def _legacy_contexts(evidence_id: str) -> list[dict[str, object]]:
@@ -876,6 +932,8 @@ def _legacy_contexts(evidence_id: str) -> list[dict[str, object]]:
 
 
 def _task_session(evidence_id: str, output_dir_text: str) -> tuple[EvidenceBundle, list[dict[str, object]]]:
+    if not isinstance(evidence_id, str) or not _EVIDENCE_ID.fullmatch(evidence_id):
+        raise ValueError("invalid_evidence_id")
     candidate = Path(output_dir_text)
     root = PROJECT_ROOT.resolve() / "outputs" / "competitor-insight"
     try:
@@ -896,9 +954,10 @@ def _task_session(evidence_id: str, output_dir_text: str) -> tuple[EvidenceBundl
         raise ValueError("evidence_not_found") from None
     finally:
         os.close(directory_fd)
-    if not isinstance(loaded, dict) or loaded.get("evidenceId") != evidence_id or not isinstance(loaded.get("evidence"), dict) or not isinstance(loaded.get("trustedBatchContexts"), list):
+    if not isinstance(loaded, dict) or loaded.get("evidenceId") != evidence_id:
         raise ValueError("invalid_evidence_bundle")
-    return cast(EvidenceBundle, loaded["evidence"]), cast(list[dict[str, object]], loaded["trustedBatchContexts"])
+    bundle = _validate_evidence_bundle(loaded.get("evidence"), evidence_id)
+    return bundle, _validate_contexts(bundle, loaded.get("trustedBatchContexts"))
 
 
 def _context_for_batch(contexts: list[dict[str, object]], batch: object) -> dict[str, object]:
@@ -962,36 +1021,10 @@ def _safe_nickname(value: object) -> str:
 
 def _write_report(filename: str, markdown: str) -> Path:
     reports_fd, reports_root = _open_output_directory()
-    base = Path(filename)
-    for attempt in range(1000):
-        suffix = "" if attempt == 0 else f"_{attempt:02d}"
-        target = reports_root / f"{base.stem}{suffix}{base.suffix}"
-        try:
-            descriptor = os.open(
-                target.name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
-                0o600,
-                dir_fd=reports_fd,
-            )
-        except FileExistsError:
-            continue
-        except Exception:
-            os.close(reports_fd)
-            raise
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-                output.write(markdown)
-        except Exception:
-            try:
-                os.unlink(target.name, dir_fd=reports_fd)
-            except FileNotFoundError:
-                pass
-            os.close(reports_fd)
-            raise
+    try:
+        return reports_root / _atomic_markdown_name(reports_fd, filename, markdown)
+    finally:
         os.close(reports_fd)
-        return target
-    os.close(reports_fd)
-    raise ValueError("report_filename_exhausted")
 
 
 def assemble(evidence_id: str, batches: list[object], output_dir: str | None = None) -> ReportArtifact:

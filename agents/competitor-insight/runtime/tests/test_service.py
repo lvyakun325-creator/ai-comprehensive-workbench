@@ -212,6 +212,20 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "path_not_allowed"):
             service.analyze_artifacts(request)
 
+    def test_task_session_rejects_v1_and_traversal_before_opening_a_file(self) -> None:
+        request = self._artifact_request()
+        result = service.analyze_artifacts(request)
+        session_path = Path(str(request["outputDir"])) / f"{result['evidenceId']}.evidence-session.json"
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        session["evidence"]["evidenceVersion"] = "1.0"
+        session_path.write_text(json.dumps(session), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "invalid_evidence_bundle"):
+            service.validate_batch(str(result["evidenceId"]), valid_batches()[0], str(request["outputDir"]))
+        with patch.object(service.os, "open", wraps=os.open) as opened:
+            with self.assertRaisesRegex(ValueError, "invalid_evidence_id"):
+                service.validate_batch("../foreign", valid_batches()[0], str(request["outputDir"]))
+        self.assertFalse(any("foreign" in str(call.args[0]) for call in opened.call_args_list))
+
     def test_rejects_paths_outside_the_controlled_douyin_directory(self) -> None:
         outside = self.project_root / "private.xlsx"
         outside.write_bytes(workbook_bytes())

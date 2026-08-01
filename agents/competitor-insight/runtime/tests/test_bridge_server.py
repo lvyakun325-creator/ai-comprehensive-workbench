@@ -314,6 +314,18 @@ class BridgeServerTests(unittest.TestCase):
                 self.assertEqual(status, 404)
                 self.assertEqual(json.loads(body)["error"], "NOT_FOUND")
 
+    def test_analyze_upload_tombstone_is_404_for_every_http_verb(self) -> None:
+        for method in ("GET", "POST", "OPTIONS", "PATCH", "PUT", "DELETE", "HEAD"):
+            for origin in (None, "https://evil.example", "http://localhost:3000"):
+                with self.subTest(method=method, origin=origin):
+                    headers = {} if origin is None else {"Origin": origin}
+                    status, _headers, body = self._request(method, "/analyze-upload", b"{}" if method == "POST" else None, headers)
+                    self.assertEqual(status, 404)
+                    if method == "HEAD":
+                        self.assertEqual(body, b"")
+                    else:
+                        self.assertEqual(json.loads(body)["error"], "NOT_FOUND")
+
     def test_analyze_artifacts_accepts_only_a_task_scoped_result_bundle(self) -> None:
         task_dir = self.project_root / "outputs" / "competitor-insight" / "douyin" / "competitor-20260801-http-a1"
         task_dir.mkdir(parents=True)

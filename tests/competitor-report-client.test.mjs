@@ -107,6 +107,25 @@ function evidenceReadyFixture() {
   };
 }
 
+function contentEvidenceReadyFixture(platformId = "douyin") {
+  const prefix = platformId === "xiaohongshu" ? "XHS" : "DY";
+  const inputKind = "content";
+  return {
+    ok: true, stage: "evidence_ready", evidenceId: "0123456789abcdef",
+    platformId, inputKind,
+    reportType: platformId === "xiaohongshu" ? "xhs-note" : "douyin-content",
+    outputDir: `/controlled/outputs/competitor-insight/${platformId}/competitor-20260801-a1`,
+    subjectName: "公开作者", itemCount: 1,
+    account: { nickname: "公开作者" }, completeness: {},
+    batchInputs: { content: {
+      batchId: "content", allowedEvidenceIds: [`${prefix}-E0001`],
+      author: { nickname: "公开作者" },
+      content: { title: "公开作品", body: "已抓取文本", transcript: "" },
+      evidence: [{ evidenceId: `${prefix}-E0001`, title: "公开作品", likes: 1, comments: 1, collects: 1, shares: 1, totalInteractions: 4, publishedAt: "2026-07-01" }],
+    }},
+  };
+}
+
 function assertClientCode(code) {
   return (error) =>
     error instanceof CompetitorReportClientError && error.code === code;
@@ -239,6 +258,30 @@ test("ranking evidence IDs must belong to evidence from the same batch", async (
   globalThis.fetch = async () => Response.json(fixture);
 
   await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
+});
+
+test("accepts xiaohongshu account IDs and rejects a cross-platform prefix", async () => {
+  const fixture = evidenceReadyFixture();
+  fixture.platformId = "xiaohongshu";
+  fixture.reportType = "xhs-account";
+  for (const batch of Object.values(fixture.batchInputs)) {
+    batch.allowedEvidenceIds = ["XHS-E0001"];
+    batch.evidence[0].evidenceId = "XHS-E0001";
+    for (const ranking of Object.values(batch.rankings)) ranking.evidenceIds = ["XHS-E0001"];
+  }
+  globalThis.fetch = async () => Response.json(fixture);
+  await analyze();
+  fixture.batchInputs.strategy.evidence[0].evidenceId = "DY-E0001";
+  globalThis.fetch = async () => Response.json(fixture);
+  await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
+});
+
+test("accepts exact bounded content batches for douyin and xiaohongshu", async () => {
+  for (const platformId of ["douyin", "xiaohongshu"]) {
+    globalThis.fetch = async () => Response.json(contentEvidenceReadyFixture(platformId));
+    const accepted = await analyze();
+    assert.equal(accepted.batchInputs.content.batchId, "content");
+  }
 });
 
 test("every batch requires a nonempty available overall ranking", async () => {

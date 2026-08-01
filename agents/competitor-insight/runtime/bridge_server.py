@@ -146,6 +146,27 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _request_path(self) -> str:
         return urlsplit(self.path).path
 
+    def _not_found(self, *, head: bool = False) -> None:
+        payload = {"ok": False, "error": "NOT_FOUND", "message": "接口不存在。"}
+        if not head:
+            self._send_json(404, payload)
+            return
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self.send_response(404)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+    def do_HEAD(self) -> None:
+        self._not_found(head=True)
+
+    def do_PUT(self) -> None:
+        self._not_found()
+
+    def do_DELETE(self) -> None:
+        self._not_found()
+
     def _is_write_endpoint(self) -> bool:
         path = self._request_path()
         return bool(

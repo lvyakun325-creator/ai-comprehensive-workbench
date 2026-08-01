@@ -29,7 +29,7 @@ export type ValidatedBatchResponse = {
   ok: true;
   stage: "section_validated";
   evidenceId: string;
-  batchId: "strategy" | "performance" | "execution";
+  batchId: "strategy" | "performance" | "execution" | "content";
   batch: Record<string, unknown>;
 };
 
@@ -244,14 +244,14 @@ function parseEvidenceReady(value: unknown): EvidenceReadyResponse {
     || body.itemCount < 1
     || !validAccount(body.account)
     || !isRecord(body.completeness)
-    || !validBatchInputs(body.batchInputs)
+    || !validBatchInputs(body.batchInputs, body.platformId)
   ) {
     throw invalidResponse();
   }
   return body as EvidenceReadyResponse;
 }
 
-function validBatchInputs(value: unknown): value is EvidenceReadyResponse["batchInputs"] {
+function validBatchInputs(value: unknown, platformId: unknown): value is EvidenceReadyResponse["batchInputs"] {
   if (!isRecord(value)) return false;
   const batchIds = Object.keys(value);
   const account = hasExactKeys(value, ["strategy", "performance", "execution"]);
@@ -263,12 +263,13 @@ function validBatchInputs(value: unknown): value is EvidenceReadyResponse["batch
   } catch {
     return false;
   }
-  return batchIds.every((batchId) => validBatchInput(batchId, value[batchId]));
+  return batchIds.every((batchId) => validBatchInput(batchId, value[batchId], platformId));
 }
 
 function validBatchInput(
   batchId: string,
   value: unknown,
+  platformId: unknown,
 ): boolean {
   if (!isRecord(value)) return false;
   const expectedKeys = batchId === "strategy"
@@ -278,20 +279,14 @@ function validBatchInput(
       : batchId === "execution"
         ? ["batchId", "allowedEvidenceIds", "availability", "evidence", "rankings"]
         : ["batchId", "allowedEvidenceIds", "author", "content", "evidence"];
-  if (
-    !hasExactKeys(value, expectedKeys)
-    || !validAvailability(value.availability)
-  ) {
-    return false;
-  }
-  if (value.batchId !== batchId || !validAllowedEvidenceIds(value.allowedEvidenceIds)) return false;
+  if (!hasExactKeys(value, expectedKeys) || value.batchId !== batchId || !validAllowedEvidenceIds(value.allowedEvidenceIds, platformId)) return false;
   if (batchId === "content") {
     return validEvidenceItems(value.evidence)
-      && validAllowedEvidenceIds(value.allowedEvidenceIds)
-      && validEvidenceIdsMatch(value.evidence, value.allowedEvidenceIds)
+      && validEvidenceIdsMatch(value.evidence, value.allowedEvidenceIds, platformId)
       && isRecord(value.author)
       && isRecord(value.content);
   }
+  if (!validAvailability(value.availability)) return false;
   if (batchId === "strategy" && !validAccount(value.account)) return false;
   const evidenceIds = validEvidenceIdSet(value.evidence);
   if (
@@ -301,6 +296,7 @@ function validBatchInput(
       value.rankings,
       evidenceIds,
       value.availability as Record<string, boolean>,
+      platformId,
     )
   ) {
     return false;
@@ -308,18 +304,18 @@ function validBatchInput(
   return batchId !== "performance" || validMetrics(value.metrics);
 }
 
-function validAllowedEvidenceIds(value: unknown): value is string[] {
+function validAllowedEvidenceIds(value: unknown, platformId: unknown): value is string[] {
   return Array.isArray(value)
     && value.length > 0
     && value.length <= 30
-    && value.every(validEvidenceId)
+    && value.every((id) => validPlatformEvidenceId(id, platformId))
     && new Set(value).size === value.length;
 }
 
-function validEvidenceIdsMatch(evidence: unknown, allowed: unknown): boolean {
-  if (!validEvidenceItems(evidence) || !validAllowedEvidenceIds(allowed)) return false;
+function validEvidenceIdsMatch(evidence: unknown, allowed: unknown, platformId: unknown): boolean {
+  if (!validEvidenceItems(evidence) || !validAllowedEvidenceIds(allowed, platformId)) return false;
   const ids = (evidence as Array<Record<string, unknown>>).map((item) => item.evidenceId);
-  return ids.length === allowed.length && ids.every((id, index) => id === allowed[index]);
+  return ids.length === allowed.length && ids.every((id, index) => validPlatformEvidenceId(id, platformId) && id === allowed[index]);
 }
 
 function validReportType(platformId: unknown, inputKind: unknown, reportType: unknown): boolean {
@@ -387,6 +383,7 @@ function validRankings(
   value: unknown,
   batchEvidenceIds: ReadonlySet<string>,
   availability: Readonly<Record<string, boolean>>,
+  platformId: unknown,
 ): boolean {
   if (!isRecord(value)) return false;
   const expected = batchId === "strategy"
@@ -403,7 +400,7 @@ function validRankings(
       || (ranking.status !== "available" && ranking.status !== "unavailable")
       || !Array.isArray(ranking.evidenceIds)
       || ranking.evidenceIds.length > 10
-      || !ranking.evidenceIds.every(validEvidenceId)
+      || !ranking.evidenceIds.every((id) => validPlatformEvidenceId(id, platformId))
     ) {
       return false;
     }
@@ -501,7 +498,12 @@ function validMetrics(value: unknown): boolean {
 }
 
 function validEvidenceId(value: unknown): value is string {
-  return typeof value === "string" && /^DY-E\d{4,8}$/u.test(value);
+  return typeof value === "string" && /^(?:DY|XHS)-E\d{4,8}$/u.test(value);
+}
+
+function validPlatformEvidenceId(value: unknown, platformId: unknown): value is string {
+  const prefix = platformId === "xiaohongshu" ? "XHS" : platformId === "douyin" ? "DY" : "";
+  return typeof value === "string" && new RegExp(`^${prefix}-E\\d{4,8}$`, "u").test(value);
 }
 
 function hasExactKeys(
@@ -529,7 +531,7 @@ function parseValidatedBatch(value: unknown): ValidatedBatchResponse {
     || body.stage !== "section_validated"
     || typeof body.evidenceId !== "string"
     || !/^[0-9a-f]{16}$/u.test(body.evidenceId)
-    || !["strategy", "performance", "execution"].includes(String(body.batchId))
+    || !["strategy", "performance", "execution", "content"].includes(String(body.batchId))
     || !isRecord(body.batch)
     || body.batch.batchId !== body.batchId
   ) {
