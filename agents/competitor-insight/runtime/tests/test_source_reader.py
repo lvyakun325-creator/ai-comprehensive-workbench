@@ -158,9 +158,21 @@ class SourceReaderTests(unittest.TestCase):
                     os.symlink(outside, safe)
                 return real_open(name, flags, mode, dir_fd=dir_fd)
 
-            with patch.object(source_reader.os, "open", side_effect=swap_before_open):
-                with self.assertRaisesRegex(ValueError, r"^invalid_source_path$"):
-                    read_scrape_source("douyin", "account", source, None)
+            with patch.object(source_reader.os, "open", side_effect=swap_before_open) as mocked_open:
+                with patch.object(
+                    source_reader.os,
+                    "supports_dir_fd",
+                    set(source_reader.os.supports_dir_fd) | {mocked_open},
+                ):
+                    with self.assertRaisesRegex(ValueError, r"^invalid_source_path$"):
+                        read_scrape_source("douyin", "account", source, None)
+            self.assertTrue(swapped)
+            self.assertTrue(
+                any(
+                    call.args[0] == "safe" and call.kwargs.get("dir_fd") is not None
+                    for call in mocked_open.call_args_list
+                )
+            )
 
     def test_rejects_ancestor_swap_before_xlsx_leaf_open(self) -> None:
         """Would fail if an XLSX companion followed an ancestor symlink during open."""
@@ -186,9 +198,21 @@ class SourceReaderTests(unittest.TestCase):
                     os.symlink(outside, safe)
                 return real_open(name, flags, mode, dir_fd=dir_fd)
 
-            with patch.object(source_reader.os, "open", side_effect=swap_before_open):
-                with self.assertRaisesRegex(ValueError, r"^invalid_source_path$"):
-                    read_scrape_source("douyin", "account", source, workbook_path)
+            with patch.object(source_reader.os, "open", side_effect=swap_before_open) as mocked_open:
+                with patch.object(
+                    source_reader.os,
+                    "supports_dir_fd",
+                    set(source_reader.os.supports_dir_fd) | {mocked_open},
+                ):
+                    with self.assertRaisesRegex(ValueError, r"^invalid_source_path$"):
+                        read_scrape_source("douyin", "account", source, workbook_path)
+            self.assertTrue(swapped)
+            self.assertTrue(
+                any(
+                    call.args[0] == "safe-xlsx" and call.kwargs.get("dir_fd") is not None
+                    for call in mocked_open.call_args_list
+                )
+            )
 
     def test_douyin_account_and_xhs_note_normalize_platform_specific_metrics(self) -> None:
         """Would fail if either platform adapter uses the wrong interaction field mapping."""
