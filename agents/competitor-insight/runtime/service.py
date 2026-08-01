@@ -6,6 +6,7 @@ from datetime import datetime
 from contextlib import contextmanager
 import errno
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -15,7 +16,8 @@ from typing import BinaryIO, Iterator, cast
 import zipfile
 
 from contracts import EvidenceBundle, ReportArtifact
-from evidence_bundle import build_evidence_bundle
+from analytics import calculate_metrics, rank_works
+from evidence_bundle import build_evidence_bundle, canonical_evidence_input
 from report_renderer import assemble_report, validate_final_report
 from section_validator import validate_section_batch
 from source_reader import read_scrape_source
@@ -28,6 +30,10 @@ MAX_XLSX_MEMBERS = 10_000
 MAX_XLSX_MEMBER_BYTES = 100 * 1024 * 1024
 MAX_XLSX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 MAX_XLSX_COMPRESSION_RATIO = 100
+MAX_EVIDENCE_SESSION_BYTES = 16 * 1024 * 1024
+MAX_EVIDENCE_ITEMS = 500
+MAX_WARNING_ITEMS = 5_000
+MAX_ITEM_METRIC = 1_000_000_000_000
 
 _EVIDENCE_ID = re.compile(r"^[0-9a-f]{16}$")
 _TASK_ID = re.compile(r"^competitor-[0-9A-Za-z-]{4,120}$")
@@ -56,6 +62,29 @@ _METRIC_KEYS = (
     "top10InteractionShare",
     "maxToAverageMultiple",
 )
+_DANGEROUS_KEYS = {"__proto__", "constructor", "prototype"}
+_SUBJECT_KEYS = {"nickname", "accountId", "signature", "followers"}
+_FIELD_MAP_KEYS = {"title", "likes", "comments", "collects", "shares", "publishedAt", "url"}
+_AVAILABILITY_KEYS = {"comments", "collects", "shares"}
+_RANKING_KEYS = {"overall", "startup", "collect", "share", "comment"}
+_ITEM_KEYS = {
+    "evidenceId", "sourceRow", "title", "likes", "comments", "collects",
+    "shares", "totalInteractions", "publishedAt", "url", "ranks",
+}
+_WORK_KEYS = {
+    "sourceRow", "title", "likes", "comments", "collects", "shares",
+    "totalInteractions", "publishedAt", "url",
+}
+_CONTENT_KEYS = {
+    "body", "ocr", "transcript", "transcriptSource", "author",
+    "imageCount", "videoDuration",
+}
+_REPORT_TYPES = {
+    ("douyin", "account"): "douyin-account",
+    ("douyin", "content"): "douyin-content",
+    ("xiaohongshu", "account"): "xhs-account",
+    ("xiaohongshu", "content"): "xhs-note",
+}
 _KNOWN_WORKBOOK_VALUE_ERRORS = {
     "invalid_account_identity",
     "missing_account_identity",
@@ -763,11 +792,16 @@ def analyze_artifacts(payload: dict[str, object]) -> dict[str, object]:
         cast(Path, request["dataPath"]),
         cast(Path | None, request["excelPath"]),
     )
-    bundle = build_evidence_bundle(parsed, {
+    source_metadata: dict[str, object] = {
         "kind": "scrape-artifacts",
         "taskId": task_id,
         "platformId": platform_id,
-    })
+    }
+    canonical_input = canonical_evidence_input(parsed, source_metadata)
+    bundle = build_evidence_bundle(
+        canonical_input["parsed"],
+        canonical_input["source"],
+    )
     evidence_id = str(bundle.get("evidenceId", ""))
     if not _EVIDENCE_ID.fullmatch(evidence_id):
         raise ValueError("invalid_evidence_bundle")
@@ -781,13 +815,23 @@ def analyze_artifacts(payload: dict[str, object]) -> dict[str, object]:
         }
         for batch_id, batch in cast(dict[str, object], batch_inputs).items()
     ]
-    _write_task_json(platform_id, task_id, evidence_name, bundle)
-    _write_task_json(platform_id, task_id, f"{evidence_id}.evidence-session.json", {
+    session = {
+        "sessionVersion": "2.0",
         "evidenceId": evidence_id,
+        "canonicalInput": canonical_input,
         "evidence": bundle,
         "trustedBatchContexts": contexts,
-    })
-    return _evidence_ready(bundle, output_dir)
+    }
+    canonical_bundle, _validated_contexts = _validate_task_session(
+        session,
+        evidence_id=evidence_id,
+        platform_id=platform_id,
+        input_kind=cast(str, request["inputKind"]),
+        task_id=task_id,
+    )
+    _write_task_json(platform_id, task_id, evidence_name, canonical_bundle)
+    _write_task_json(platform_id, task_id, f"{evidence_id}.evidence-session.json", session)
+    return _evidence_ready(canonical_bundle, output_dir)
 
 
 def analyze_path(path_text: str) -> dict[str, object]:
@@ -858,59 +902,469 @@ def _load_evidence(evidence_id: str) -> EvidenceBundle:
     return _validate_evidence_bundle(loaded, evidence_id)
 
 
-def _validate_evidence_bundle(loaded: object, evidence_id: str) -> EvidenceBundle:
-    required = {
-        "evidenceVersion",
-        "evidenceId",
-        "platformId",
-        "inputKind",
-        "reportType",
-        "subject",
-        "account",
-        "completeness",
-        "metrics",
-        "rankings",
-        "items",
-    }
-    if (
-        not isinstance(loaded, dict)
-        or loaded.get("evidenceVersion") != "2.0"
-        or loaded.get("evidenceId") != evidence_id
-        or not required.issubset(loaded)
+def _invalid_bundle() -> None:
+    raise ValueError("invalid_evidence_bundle")
+
+
+def _closed_object(
+    value: object,
+    required: set[str],
+    optional: set[str] | None = None,
+) -> dict[str, object]:
+    if not isinstance(value, dict):
+        _invalid_bundle()
+    result = cast(dict[str, object], value)
+    allowed = required | (optional or set())
+    keys = set(result)
+    if _DANGEROUS_KEYS.intersection(keys) or required - keys or keys - allowed:
+        _invalid_bundle()
+    return result
+
+
+def _bounded_text(value: object, maximum_bytes: int, *, allow_empty: bool = True) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
+        _invalid_bundle()
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeError:
+        _invalid_bundle()
+    if size > maximum_bytes or "\x00" in value:
+        _invalid_bundle()
+    return value
+
+
+def _bounded_integer(value: object, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        _invalid_bundle()
+    return value
+
+
+def _bounded_number_or_none(value: object, minimum: float, maximum: float) -> int | float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _invalid_bundle()
+    numeric = float(value)
+    if not math.isfinite(numeric) or not minimum <= numeric <= maximum:
+        _invalid_bundle()
+    return value
+
+
+def _bounded_string_list(
+    value: object,
+    *,
+    maximum_items: int,
+    maximum_item_bytes: int,
+    allowed_values: set[str] | None = None,
+) -> list[str]:
+    if not isinstance(value, list) or len(value) > maximum_items:
+        _invalid_bundle()
+    result: list[str] = []
+    for item in value:
+        text = _bounded_text(item, maximum_item_bytes, allow_empty=False)
+        if allowed_values is not None and text not in allowed_values:
+            _invalid_bundle()
+        result.append(text)
+    if len(result) != len(set(result)) and allowed_values is not None:
+        _invalid_bundle()
+    return result
+
+
+def _validate_subject(value: object, *, require_nickname: bool = False) -> dict[str, object]:
+    subject = _closed_object(value, {"nickname"} if require_nickname else set(), _SUBJECT_KEYS)
+    if not subject or not any(subject.get(key) not in (None, "") for key in ("nickname", "accountId")):
+        _invalid_bundle()
+    if "nickname" in subject:
+        _bounded_text(subject["nickname"], 200)
+    if "accountId" in subject:
+        _bounded_text(subject["accountId"], 256, allow_empty=False)
+    if "signature" in subject:
+        _bounded_text(subject["signature"], 1_000, allow_empty=False)
+    if "followers" in subject:
+        _bounded_integer(subject["followers"], 0, MAX_ITEM_METRIC)
+    return subject
+
+
+def _validate_field_map(value: object, *, task_source: bool) -> dict[str, object]:
+    required = _FIELD_MAP_KEYS if task_source else set()
+    field_map = _closed_object(value, required, _FIELD_MAP_KEYS)
+    for mapped in field_map.values():
+        _bounded_text(mapped, 200, allow_empty=False)
+    return field_map
+
+
+def _validate_content(value: object) -> dict[str, object]:
+    content = _closed_object(value, set(), _CONTENT_KEYS)
+    if not content:
+        _invalid_bundle()
+    for field in ("body", "ocr", "transcript"):
+        if field in content:
+            _bounded_text(content[field], 65_536, allow_empty=False)
+    if "transcriptSource" in content:
+        transcript_source = _bounded_text(content["transcriptSource"], 64, allow_empty=False)
+        if transcript_source not in {
+            "transcription.transcript",
+            "transcription.cleaned_transcript",
+            "item.transcript",
+        } or "transcript" not in content:
+            _invalid_bundle()
+    if "author" in content:
+        _validate_subject(content["author"], require_nickname=False)
+    for field in ("imageCount", "videoDuration"):
+        if field in content:
+            _bounded_integer(content[field], 0, 1_000_000_000)
+    return content
+
+
+def _validate_source(value: object, platform_id: str, *, task_source: bool) -> dict[str, object]:
+    if task_source:
+        source = _closed_object(value, {"kind", "taskId", "platformId"})
+        if source.get("kind") != "scrape-artifacts" or source.get("platformId") != platform_id:
+            _invalid_bundle()
+        task_id = _bounded_text(source["taskId"], 128, allow_empty=False)
+        if not _TASK_ID.fullmatch(task_id):
+            _invalid_bundle()
+        return source
+    source = _closed_object(value, {"kind", "name"})
+    if source.get("kind") not in {"path", "upload"}:
+        _invalid_bundle()
+    _bounded_text(source["name"], 1_024, allow_empty=False)
+    return source
+
+
+def _validate_completeness(value: object, *, task_source: bool) -> dict[str, object]:
+    completeness = _closed_object(
+        value,
+        {"fieldMap", "missingFields", "warnings", "availability"},
+    )
+    _validate_field_map(completeness["fieldMap"], task_source=task_source)
+    _bounded_string_list(
+        completeness["missingFields"],
+        maximum_items=len(_FIELD_MAP_KEYS),
+        maximum_item_bytes=32,
+        allowed_values=_FIELD_MAP_KEYS,
+    )
+    _bounded_string_list(
+        completeness["warnings"],
+        maximum_items=MAX_WARNING_ITEMS,
+        maximum_item_bytes=1_000,
+    )
+    availability = _closed_object(completeness["availability"], _AVAILABILITY_KEYS)
+    if any(type(availability[key]) is not bool for key in _AVAILABILITY_KEYS):
+        _invalid_bundle()
+    return completeness
+
+
+def _validate_metrics(value: object, item_count: int) -> dict[str, object]:
+    metrics = _closed_object(value, set(_METRIC_KEYS))
+    if metrics["workCount"] != item_count:
+        _invalid_bundle()
+    _bounded_integer(metrics["workCount"], 1, MAX_EVIDENCE_ITEMS)
+    _bounded_integer(metrics["maxInteractions"], 0, MAX_ITEM_METRIC * 4)
+    _bounded_integer(metrics["aboveAverageInteractionCount"], 0, item_count)
+    for key in (
+        "averageLikes", "averageComments", "averageCollects", "averageShares",
+        "averageInteractions",
     ):
-        raise ValueError("invalid_evidence_bundle")
-    platform_id = loaded.get("platformId")
-    input_kind = loaded.get("inputKind")
-    expected_type = {
-        ("douyin", "account"): "douyin-account",
-        ("douyin", "content"): "douyin-content",
-        ("xiaohongshu", "account"): "xhs-account",
-        ("xiaohongshu", "content"): "xhs-note",
-    }.get((platform_id, input_kind))
-    if expected_type is None or loaded.get("reportType") != expected_type or not isinstance(loaded.get("items"), list):
-        raise ValueError("invalid_evidence_bundle")
-    allowed_keys = required | {"content", "source"}
-    if set(loaded) - allowed_keys or not all(isinstance(loaded.get(key), dict) for key in ("subject", "account", "completeness", "metrics", "rankings")):
-        raise ValueError("invalid_evidence_bundle")
-    if set(cast(dict[str, object], loaded["subject"])) - {"nickname", "accountId", "signature", "followers"} or set(cast(dict[str, object], loaded["account"])) - {"nickname", "accountId", "signature", "followers"}:
-        raise ValueError("invalid_evidence_bundle")
-    items = cast(list[object], loaded["items"])
-    if not 1 <= len(items) <= 500:
-        raise ValueError("invalid_evidence_bundle")
-    prefix = "DY" if platform_id == "douyin" else "XHS"
-    ids: list[str] = []
-    for item in items:
-        if not isinstance(item, dict) or not isinstance(item.get("evidenceId"), str) or not re.fullmatch(rf"{prefix}-E\d{{4,8}}", item["evidenceId"]):
-            raise ValueError("invalid_evidence_bundle")
-        ids.append(cast(str, item["evidenceId"]))
-    if len(set(ids)) != len(ids):
-        raise ValueError("invalid_evidence_bundle")
+        if not isinstance(metrics[key], float):
+            _invalid_bundle()
+        _bounded_number_or_none(metrics[key], 0, MAX_ITEM_METRIC * 4)
+    top_share = metrics["top10InteractionShare"]
+    if top_share is not None and not isinstance(top_share, float):
+        _invalid_bundle()
+    _bounded_number_or_none(top_share, 0, 1)
+    multiple = metrics["maxToAverageMultiple"]
+    if multiple is not None and not isinstance(multiple, float):
+        _invalid_bundle()
+    _bounded_number_or_none(multiple, 0, MAX_EVIDENCE_ITEMS)
+    return metrics
+
+
+def _validate_row_list(
+    value: object,
+    *,
+    maximum_items: int,
+    known_rows: set[int],
+) -> list[int]:
+    if not isinstance(value, list) or len(value) > maximum_items:
+        _invalid_bundle()
+    rows = [_bounded_integer(row, 1, 20_000) for row in value]
+    if len(rows) != len(set(rows)) or any(row not in known_rows for row in rows):
+        _invalid_bundle()
+    return rows
+
+
+def _validate_rankings(
+    value: object,
+    *,
+    input_kind: str,
+    known_rows: set[int],
+    availability: dict[str, object],
+) -> dict[str, object]:
     if input_kind == "content":
-        if len(items) != 1 or not isinstance(loaded.get("content"), dict) or loaded.get("rankings") != {}:
-            raise ValueError("invalid_evidence_bundle")
-    elif "content" in loaded or not loaded.get("rankings"):
-        raise ValueError("invalid_evidence_bundle")
-    return cast(EvidenceBundle, loaded)
+        rankings = _closed_object(value, set())
+        return rankings
+    rankings = _closed_object(value, _RANKING_KEYS)
+    for name in ("overall", "collect", "share", "comment"):
+        ranking = _closed_object(rankings[name], {"status", "rows"})
+        status = ranking["status"]
+        if status not in {"available", "unavailable"}:
+            _invalid_bundle()
+        maximum = 10 if name == "overall" else 5
+        rows = _validate_row_list(ranking["rows"], maximum_items=maximum, known_rows=known_rows)
+        availability_key = {
+            "collect": "collects",
+            "share": "shares",
+            "comment": "comments",
+        }.get(name)
+        expected_available = (
+            True
+            if name == "overall"
+            else availability[cast(str, availability_key)] is True
+        )
+        if (status == "available") != expected_available or (status == "unavailable" and rows):
+            _invalid_bundle()
+    startup = _closed_object(rankings["startup"], {"status", "rows", "sampleRows"})
+    if startup["status"] != "available":
+        _invalid_bundle()
+    startup_rows = _validate_row_list(startup["rows"], maximum_items=5, known_rows=known_rows)
+    sample_rows = _validate_row_list(
+        startup["sampleRows"],
+        maximum_items=math.ceil(MAX_EVIDENCE_ITEMS * 0.25),
+        known_rows=known_rows,
+    )
+    if any(row not in sample_rows for row in startup_rows):
+        _invalid_bundle()
+    return rankings
+
+
+def _validate_item(
+    value: object,
+    *,
+    expected_id: str,
+    input_kind: str,
+) -> dict[str, object]:
+    item = _closed_object(value, _ITEM_KEYS)
+    if item["evidenceId"] != expected_id:
+        _invalid_bundle()
+    _bounded_integer(item["sourceRow"], 1, 20_000)
+    _bounded_text(item["title"], 32_768)
+    total = 0
+    for field in ("likes", "comments", "collects", "shares"):
+        total += _bounded_integer(item[field], 0, MAX_ITEM_METRIC)
+    if _bounded_integer(item["totalInteractions"], 0, MAX_ITEM_METRIC * 4) != total:
+        _invalid_bundle()
+    published_at = _bounded_text(item["publishedAt"], 64)
+    if published_at:
+        try:
+            datetime.fromisoformat(published_at)
+        except ValueError:
+            _invalid_bundle()
+    _bounded_text(item["url"], 4_096)
+    expected_rank_keys = _RANKING_KEYS if input_kind == "account" else set()
+    ranks = _closed_object(item["ranks"], expected_rank_keys)
+    for rank in ranks.values():
+        if rank is not None:
+            _bounded_integer(rank, 1, MAX_EVIDENCE_ITEMS)
+    return item
+
+
+def _validate_evidence_bundle(
+    loaded: object,
+    evidence_id: str,
+    *,
+    task_source: bool = False,
+) -> EvidenceBundle:
+    common = {
+        "evidenceVersion", "evidenceId", "platformId", "inputKind", "reportType",
+        "source", "subject", "account", "completeness", "metrics", "rankings", "items",
+    }
+    if not isinstance(loaded, dict):
+        _invalid_bundle()
+    input_kind = loaded.get("inputKind")
+    required = common | ({"content"} if input_kind == "content" else set())
+    bundle = _closed_object(loaded, required)
+    if bundle["evidenceVersion"] != "2.0" or bundle["evidenceId"] != evidence_id:
+        _invalid_bundle()
+    platform_id = bundle["platformId"]
+    if platform_id not in _PLATFORMS or input_kind not in _INPUT_KINDS:
+        _invalid_bundle()
+    if bundle["reportType"] != _REPORT_TYPES[(cast(str, platform_id), cast(str, input_kind))]:
+        _invalid_bundle()
+    _validate_source(bundle["source"], cast(str, platform_id), task_source=task_source)
+    subject = _validate_subject(bundle["subject"], require_nickname=task_source)
+    account = _validate_subject(bundle["account"], require_nickname=task_source)
+    if subject != account:
+        _invalid_bundle()
+    completeness = _validate_completeness(bundle["completeness"], task_source=task_source)
+    raw_items = bundle["items"]
+    if not isinstance(raw_items, list) or not 1 <= len(raw_items) <= MAX_EVIDENCE_ITEMS:
+        _invalid_bundle()
+    if input_kind == "content" and len(raw_items) != 1:
+        _invalid_bundle()
+    prefix = "DY" if platform_id == "douyin" else "XHS"
+    items = [
+        _validate_item(item, expected_id=f"{prefix}-E{index:04d}", input_kind=cast(str, input_kind))
+        for index, item in enumerate(raw_items, start=1)
+    ]
+    source_rows = [cast(int, item["sourceRow"]) for item in items]
+    if len(source_rows) != len(set(source_rows)) or source_rows != sorted(source_rows):
+        _invalid_bundle()
+    _validate_metrics(bundle["metrics"], len(items))
+    availability = cast(dict[str, object], completeness["availability"])
+    _validate_rankings(
+        bundle["rankings"],
+        input_kind=cast(str, input_kind),
+        known_rows=set(source_rows),
+        availability=availability,
+    )
+    if input_kind == "content":
+        _validate_content(bundle["content"])
+    return cast(EvidenceBundle, bundle)
+
+
+def _validate_canonical_work(value: object) -> dict[str, object]:
+    work = _closed_object(value, _WORK_KEYS)
+    _bounded_integer(work["sourceRow"], 1, 20_000)
+    _bounded_text(work["title"], 32_768)
+    total = 0
+    for field in ("likes", "comments", "collects", "shares"):
+        total += _bounded_integer(work[field], 0, MAX_ITEM_METRIC)
+    if _bounded_integer(work["totalInteractions"], 0, MAX_ITEM_METRIC * 4) != total:
+        _invalid_bundle()
+    published_at = work["publishedAt"]
+    if published_at is not None:
+        text = _bounded_text(published_at, 64)
+        if text:
+            try:
+                datetime.fromisoformat(text)
+            except ValueError:
+                _invalid_bundle()
+    _bounded_text(work["url"], 4_096)
+    return work
+
+
+def _validate_canonical_input(
+    value: object,
+    *,
+    platform_id: str,
+    input_kind: str,
+    task_id: str,
+) -> dict[str, object]:
+    canonical = _closed_object(value, {"parsed", "source"})
+    source = _validate_source(canonical["source"], platform_id, task_source=True)
+    if source["taskId"] != task_id:
+        _invalid_bundle()
+    parsed = _closed_object(
+        canonical["parsed"],
+        {
+            "platformId", "inputKind", "reportType", "subject", "fieldMap",
+            "missingFields", "warnings", "works", "content",
+        },
+    )
+    if (
+        parsed["platformId"] != platform_id
+        or parsed["inputKind"] != input_kind
+        or parsed["reportType"] != _REPORT_TYPES[(platform_id, input_kind)]
+    ):
+        _invalid_bundle()
+    _validate_subject(parsed["subject"], require_nickname=True)
+    _validate_field_map(parsed["fieldMap"], task_source=True)
+    _bounded_string_list(
+        parsed["missingFields"],
+        maximum_items=len(_FIELD_MAP_KEYS),
+        maximum_item_bytes=32,
+        allowed_values=_FIELD_MAP_KEYS,
+    )
+    _bounded_string_list(
+        parsed["warnings"],
+        maximum_items=MAX_WARNING_ITEMS,
+        maximum_item_bytes=1_000,
+    )
+    works = parsed["works"]
+    if not isinstance(works, list) or not 1 <= len(works) <= MAX_EVIDENCE_ITEMS:
+        _invalid_bundle()
+    validated_works = [_validate_canonical_work(work) for work in works]
+    rows = [cast(int, work["sourceRow"]) for work in validated_works]
+    if rows != sorted(rows) or len(rows) != len(set(rows)):
+        _invalid_bundle()
+    content = parsed["content"]
+    if input_kind == "content":
+        if len(works) != 1:
+            _invalid_bundle()
+        _validate_content(content)
+    elif content != {}:
+        _invalid_bundle()
+    return canonical
+
+
+def _recompute_bundle_derivatives(bundle: EvidenceBundle) -> None:
+    works = [
+        {
+            key: item[key]
+            for key in _WORK_KEYS
+        }
+        for item in cast(list[dict[str, object]], bundle["items"])
+    ]
+    completeness = cast(dict[str, object], bundle["completeness"])
+    availability = cast(dict[str, bool], completeness["availability"])
+    rankings = rank_works(
+        works,
+        dict(availability),
+        account=bundle["inputKind"] == "account",
+    )
+    metrics = calculate_metrics(works, rankings)
+    if rankings != bundle["rankings"] or metrics != bundle["metrics"]:
+        _invalid_bundle()
+
+
+def _validate_task_session(
+    loaded: object,
+    *,
+    evidence_id: str,
+    platform_id: str,
+    input_kind: str,
+    task_id: str,
+) -> tuple[EvidenceBundle, list[dict[str, object]]]:
+    try:
+        encoded_size = len(
+            json.dumps(loaded, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+    except (TypeError, UnicodeError, ValueError):
+        _invalid_bundle()
+    if encoded_size > MAX_EVIDENCE_SESSION_BYTES:
+        _invalid_bundle()
+    session = _closed_object(
+        loaded,
+        {"sessionVersion", "evidenceId", "canonicalInput", "evidence", "trustedBatchContexts"},
+    )
+    if session["sessionVersion"] != "2.0" or session["evidenceId"] != evidence_id:
+        _invalid_bundle()
+    canonical = _validate_canonical_input(
+        session["canonicalInput"],
+        platform_id=platform_id,
+        input_kind=input_kind,
+        task_id=task_id,
+    )
+    persisted = _validate_evidence_bundle(session["evidence"], evidence_id, task_source=True)
+    if persisted["platformId"] != platform_id or persisted["inputKind"] != input_kind:
+        _invalid_bundle()
+    persisted_source = cast(dict[str, object], persisted["source"])
+    if persisted_source["taskId"] != task_id:
+        _invalid_bundle()
+    _recompute_bundle_derivatives(persisted)
+    try:
+        rebuilt = build_evidence_bundle(
+            cast(dict[str, object], canonical["parsed"]),
+            cast(dict[str, object], canonical["source"]),
+        )
+        rebuilt = _validate_evidence_bundle(rebuilt, evidence_id, task_source=True)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        _invalid_bundle()
+    if rebuilt != persisted or rebuilt["evidenceId"] != evidence_id:
+        _invalid_bundle()
+    contexts = _validate_contexts(rebuilt, session["trustedBatchContexts"])
+    return rebuilt, contexts
 
 
 def _validate_contexts(bundle: EvidenceBundle, contexts: object) -> list[dict[str, object]]:
@@ -976,8 +1430,13 @@ def _task_session(evidence_id: str, output_dir_text: str) -> tuple[EvidenceBundl
     try:
         descriptor = os.open(f"{evidence_id}.evidence-session.json", _open_flags(directory=False), dir_fd=directory_fd)
         try:
-            with os.fdopen(descriptor, "r", encoding="utf-8") as source:
-                loaded = json.load(source)
+            with os.fdopen(descriptor, "rb") as source:
+                if os.fstat(source.fileno()).st_size > MAX_EVIDENCE_SESSION_BYTES:
+                    raise ValueError("invalid_evidence_bundle")
+                payload = source.read(MAX_EVIDENCE_SESSION_BYTES + 1)
+            if len(payload) > MAX_EVIDENCE_SESSION_BYTES:
+                raise ValueError("invalid_evidence_bundle")
+            loaded = json.loads(payload.decode("utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             raise ValueError("invalid_evidence_bundle") from None
     except FileNotFoundError:
@@ -986,8 +1445,16 @@ def _task_session(evidence_id: str, output_dir_text: str) -> tuple[EvidenceBundl
         os.close(directory_fd)
     if not isinstance(loaded, dict) or loaded.get("evidenceId") != evidence_id:
         raise ValueError("invalid_evidence_bundle")
-    bundle = _validate_evidence_bundle(loaded.get("evidence"), evidence_id)
-    return bundle, _validate_contexts(bundle, loaded.get("trustedBatchContexts"))
+    raw_evidence = loaded.get("evidence")
+    if not isinstance(raw_evidence, dict) or raw_evidence.get("inputKind") not in _INPUT_KINDS:
+        raise ValueError("invalid_evidence_bundle")
+    return _validate_task_session(
+        loaded,
+        evidence_id=evidence_id,
+        platform_id=platform_id,
+        input_kind=cast(str, raw_evidence["inputKind"]),
+        task_id=task_id,
+    )
 
 
 def _context_for_batch(contexts: list[dict[str, object]], batch: object) -> dict[str, object]:

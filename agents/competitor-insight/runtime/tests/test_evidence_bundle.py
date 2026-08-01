@@ -8,6 +8,7 @@ import unittest
 RUNTIME_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RUNTIME_DIR))
 
+import evidence_bundle
 from evidence_bundle import build_evidence_bundle, write_evidence_bundle
 
 
@@ -83,6 +84,20 @@ class EvidenceBundleTests(unittest.TestCase):
                 parsed = self._parsed() | fields
                 with self.assertRaisesRegex(ValueError, r"^unsupported_report_source$"):
                     build_evidence_bundle(parsed, {"platformId": "douyin", "inputKind": "account"})
+
+    def test_exposes_the_same_canonical_identity_preimage_used_by_bundle_generation(self) -> None:
+        """Would fail if session integrity persisted a digest preimage that diverges from Task 2 generation."""
+        canonicalizer = getattr(evidence_bundle, "canonical_evidence_input", None)
+        self.assertTrue(callable(canonicalizer))
+        parsed = self._parsed()
+        source = {"kind": "scrape-artifacts", "taskId": "competitor-test", "platformId": "douyin"}
+
+        canonical = canonicalizer(parsed, source)
+        from_raw = build_evidence_bundle(parsed, source)
+        from_canonical = build_evidence_bundle(canonical["parsed"], canonical["source"])
+
+        self.assertEqual(from_canonical, from_raw)
+        self.assertEqual(from_canonical["evidenceId"], from_raw["evidenceId"])
 
 
 if __name__ == "__main__":

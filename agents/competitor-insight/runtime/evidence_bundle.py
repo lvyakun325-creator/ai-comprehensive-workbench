@@ -59,6 +59,17 @@ def _canonical_parsed(parsed: dict[str, object]) -> dict[str, object]:
     }
 
 
+def canonical_evidence_input(
+    parsed: dict[str, object],
+    source: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    """Return the exact canonical digest preimage used by bundle generation."""
+    return {
+        "parsed": _canonical_parsed(parsed),
+        "source": dict(source),
+    }
+
+
 def _bundle_digest(parsed: dict[str, object], source: dict[str, object]) -> str:
     canonical_input = {"parsed": parsed, "source": source}
     payload = json.dumps(canonical_input, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -75,7 +86,9 @@ def _rank_by_row(rankings: dict[str, dict[str, object]]) -> dict[str, dict[int, 
 
 def build_evidence_bundle(parsed: dict[str, object], source: dict[str, object]) -> EvidenceBundle:
     """Create a repeatable evidence bundle without relying on current time or input list order."""
-    canonical_parsed = _canonical_parsed(parsed)
+    canonical_input = canonical_evidence_input(parsed, source)
+    canonical_parsed = canonical_input["parsed"]
+    canonical_source = canonical_input["source"]
     works = cast(list[dict[str, object]], canonical_parsed["works"])
     input_kind = str(canonical_parsed["inputKind"])
     rankings = rank_works(works, _availability(canonical_parsed), account=input_kind == "account")
@@ -104,11 +117,11 @@ def build_evidence_bundle(parsed: dict[str, object], source: dict[str, object]) 
         EvidenceBundle,
         {
             "evidenceVersion": "2.0",
-            "evidenceId": _bundle_digest(canonical_parsed, source),
+            "evidenceId": _bundle_digest(canonical_parsed, canonical_source),
             "platformId": canonical_parsed["platformId"],
             "inputKind": canonical_parsed["inputKind"],
             "reportType": canonical_parsed["reportType"],
-            "source": dict(source),
+            "source": dict(canonical_source),
             "subject": dict(cast(dict[str, object], canonical_parsed["subject"])),
             "account": dict(cast(dict[str, object], canonical_parsed["subject"])),
             "completeness": {

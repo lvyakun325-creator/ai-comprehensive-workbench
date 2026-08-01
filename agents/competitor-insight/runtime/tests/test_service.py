@@ -134,6 +134,57 @@ def valid_batches(evidence_id: str = "DY-E0001") -> list[dict[str, object]]:
     ]
 
 
+def valid_content_batch(evidence_id: str) -> dict[str, object]:
+    evidence_fields = {
+        "evidenceIds": [evidence_id],
+        "complianceNotes": ["不承诺疗效"],
+    }
+    return {
+        "batchId": "content",
+        "claims": [
+            {
+                "section": section,
+                "statement": statement,
+                "strength": "hypothesis",
+                "rationale": rationale,
+                "verificationPlan": plan,
+                **evidence_fields,
+            }
+            for section, statement, rationale, plan in (
+                ("content-overview", "标题呈现日常管理主题", "来自标题字段的有限观察", "补充同主题内容样本后核验"),
+                ("content-structure", "画面结构未提供，作为待验证假设", "证据包未提供画面字段", "补充画面记录后核验"),
+                ("interaction", "互动数据可作为后续观察信号", "仅来自单条内容数据", "结合更多内容核验"),
+                ("conversion", "转化链路未提供，作为待验证假设", "输入未提供商品或私域字段", "补充承接记录后核验"),
+            )
+        ],
+        "topicDirections": [
+            {
+                "title": f"复用角度{label}",
+                "angle": "从日常管理场景切入",
+                "strength": "hypothesis",
+                "verificationPlan": "补充同类内容样本后核验",
+                **evidence_fields,
+            }
+            for label in ("一", "二", "三")
+        ],
+        "filmingTemplates": [{
+            "name": "单内容拍法",
+            "hook": "用主题自然开场",
+            "structure": ["主题", "日常提醒"],
+            "strength": "hypothesis",
+            "verificationPlan": "补充画面与口播记录后核验",
+            **evidence_fields,
+        }],
+        "conversionItems": [{
+            "action": "提供合规资料记录入口",
+            "strength": "hypothesis",
+            "verificationPlan": "补充承接记录后核验",
+            **evidence_fields,
+        }],
+        "executionDays": [],
+    }
+
+
 class ServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = TemporaryDirectory()
@@ -144,6 +195,15 @@ class ServiceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.project_patch.stop()
         self.temporary_directory.cleanup()
+
+    def _assert_invalid_evidence(self, operation: object) -> None:
+        try:
+            operation()
+        except Exception as error:
+            self.assertIs(type(error), ValueError)
+            self.assertEqual(str(error), "invalid_evidence_bundle")
+        else:
+            self.fail("invalid persisted evidence was accepted")
 
     def _douyin_root(self) -> Path:
         path = self.project_root / "outputs" / "competitor-insight" / "douyin"
@@ -170,6 +230,100 @@ class ServiceTests(unittest.TestCase):
             "taskId": task_id,
             "platformId": "douyin",
             "inputKind": "account",
+            "outputDir": str(task_dir.resolve()),
+            "dataPath": str(data_path.resolve()),
+            "excelPath": None,
+        }
+
+    def _artifact_request_with_31_ranked_items(self) -> dict[str, object]:
+        request = self._artifact_request(task_id="competitor-20260801-ranked31")
+        data_path = Path(str(request["dataPath"]))
+        payload = json.loads(data_path.read_text(encoding="utf-8"))
+        payload["data"]["videos"] = [
+            {
+                "desc": f"公开作品 {index}",
+                "statistics": {
+                    "digg_count": 1_001 - index if index <= 10 else 32 - index,
+                    "comment_count": 101 - index if index <= 10 else 0,
+                    "collect_count": 101 - index if index <= 10 else 0,
+                    "share_count": 101 - index if index <= 10 else 0,
+                },
+                "create_time": (
+                    f"2026-07-{32 - index:02d} 10:00:00"
+                    if index <= 23
+                    else f"2026-01-{index - 23:02d} 10:00:00"
+                ),
+                "share_url": f"https://example.com/{index}",
+            }
+            for index in range(1, 32)
+        ]
+        data_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return request
+
+    def _artifact_variant_request(self, platform_id: str, input_kind: str) -> dict[str, object]:
+        suffix = f"{platform_id}-{input_kind}"
+        task_id = f"competitor-20260801-{suffix}"
+        task_dir = self.project_root / "outputs" / "competitor-insight" / platform_id / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        if platform_id == "douyin" and input_kind == "account":
+            payload = {
+                "data": {
+                    "profile": {"nickname": "抖音账号", "sec_uid": "dy-public"},
+                    "videos": [{
+                        "desc": "抖音公开作品",
+                        "statistics": {"digg_count": 20, "comment_count": 2, "collect_count": 3, "share_count": 1},
+                        "create_time": "2026-07-01 10:00:00",
+                        "share_url": "https://www.douyin.com/video/1",
+                    }],
+                },
+            }
+        elif platform_id == "xiaohongshu" and input_kind == "account":
+            payload = {
+                "data": {
+                    "profile": {"nickname": "小红书账号", "red_id": "xhs-public"},
+                    "notes": [{
+                        "display_title": "小红书公开笔记",
+                        "interact_info": {"likedCount": 20, "commentCount": 2, "collectedCount": 3, "sharedCount": 1},
+                        "time": "2026-07-01 10:00:00",
+                        "url": "https://www.xiaohongshu.com/explore/1",
+                    }],
+                },
+            }
+        elif platform_id == "douyin" and input_kind == "content":
+            payload = {
+                "data": {
+                    "author": {"nickname": "抖音作者", "sec_uid": "dy-author"},
+                    "video": {
+                        "desc": "抖音单条正文",
+                        "statistics": {"digg_count": 20, "comment_count": 2, "collect_count": 3, "share_count": 1},
+                        "create_time": "2026-07-01 10:00:00",
+                        "share_url": "https://www.douyin.com/video/1",
+                        "duration": 15,
+                    },
+                    "transcription": {"transcript": "抖音抓取转写"},
+                },
+            }
+        else:
+            payload = {
+                "data": {
+                    "author": {"nickname": "小红书作者", "red_id": "xhs-author"},
+                    "note": {
+                        "display_title": "小红书单篇标题",
+                        "content": "小红书单篇正文",
+                        "ocr_cleaned_text": "小红书抓取 OCR",
+                        "interact_info": {"likedCount": 20, "commentCount": 2, "collectedCount": 3, "sharedCount": 1},
+                        "time": "2026-07-01 10:00:00",
+                        "url": "https://www.xiaohongshu.com/explore/1",
+                        "image_count": 3,
+                    },
+                },
+            }
+        data_path = task_dir / "结构化数据.json"
+        data_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return {
+            "taskId": task_id,
+            "platformId": platform_id,
+            "inputKind": input_kind,
             "outputDir": str(task_dir.resolve()),
             "dataPath": str(data_path.resolve()),
             "excelPath": None,
@@ -260,6 +414,161 @@ class ServiceTests(unittest.TestCase):
             session_path.write_text(json.dumps(session), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "invalid_evidence_bundle"):
                 service.validate_batch(str(result["evidenceId"]), valid_batches()[0], str(request["outputDir"]))
+
+    def test_task_session_rejects_rankings_and_contexts_mutated_together_for_validate_and_assemble(self) -> None:
+        """Would fail if a strategy-only item can be reassigned into execution by editing both persisted operands."""
+        request = self._artifact_request_with_31_ranked_items()
+        result = service.analyze_artifacts(request)
+        evidence_id = str(result["evidenceId"])
+        output_dir = str(request["outputDir"])
+        session_path = Path(output_dir) / f"{evidence_id}.evidence-session.json"
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+
+        self.assertIn("DY-E0028", session["trustedBatchContexts"][0]["allowedEvidenceIds"])
+        self.assertNotIn("DY-E0028", session["trustedBatchContexts"][2]["allowedEvidenceIds"])
+        session["evidence"]["rankings"]["overall"]["rows"] = [28]
+        session["trustedBatchContexts"] = [
+            {
+                "batchId": "strategy",
+                "allowedEvidenceIds": ["DY-E0028", "DY-E0024", "DY-E0025", "DY-E0026", "DY-E0027"],
+            },
+            {
+                "batchId": "performance",
+                "allowedEvidenceIds": [
+                    "DY-E0028", "DY-E0024", "DY-E0025", "DY-E0026", "DY-E0027",
+                    "DY-E0001", "DY-E0002", "DY-E0003", "DY-E0004", "DY-E0005",
+                ],
+            },
+            {
+                "batchId": "execution",
+                "allowedEvidenceIds": [
+                    "DY-E0028", "DY-E0001", "DY-E0002", "DY-E0003", "DY-E0004", "DY-E0005",
+                ],
+            },
+        ]
+        session_path.write_text(json.dumps(session, ensure_ascii=False), encoding="utf-8")
+        batches = valid_batches("DY-E0028")
+
+        with self.assertRaisesRegex(ValueError, r"^invalid_evidence_bundle$"):
+            service.validate_batch(evidence_id, batches[2], output_dir)
+        with self.assertRaisesRegex(ValueError, r"^invalid_evidence_bundle$"):
+            service.assemble(evidence_id, batches, output_dir)
+
+    def test_task_session_rejects_closed_schema_type_and_bound_mutations_at_every_account_layer(self) -> None:
+        request = self._artifact_request()
+        result = service.analyze_artifacts(request)
+        evidence_id = str(result["evidenceId"])
+        output_dir = str(request["outputDir"])
+        session_path = Path(output_dir) / f"{evidence_id}.evidence-session.json"
+        original = json.loads(session_path.read_text(encoding="utf-8"))
+        batches = valid_batches()
+        mutations = (
+            ("session_unknown", lambda value: value.update({"unexpected": True})),
+            ("session_dangerous", lambda value: value.update({"__proto__": {}})),
+            ("canonical_unknown", lambda value: value["canonicalInput"].update({"unexpected": True})),
+            ("canonical_source_dangerous", lambda value: value["canonicalInput"]["source"].update({"prototype": {}})),
+            ("canonical_parsed_unknown", lambda value: value["canonicalInput"]["parsed"].update({"raw": {}})),
+            ("canonical_work_unknown", lambda value: value["canonicalInput"]["parsed"]["works"][0].update({"constructor": {}})),
+            ("evidence_dangerous", lambda value: value["evidence"].update({"constructor": {}})),
+            ("subject_unknown", lambda value: value["evidence"]["subject"].update({"rawProfile": "forbidden"})),
+            ("subject_dangerous", lambda value: value["evidence"]["subject"].update({"prototype": {}})),
+            ("account_unknown", lambda value: value["evidence"]["account"].update({"rawComments": []})),
+            ("source_unknown", lambda value: value["evidence"]["source"].update({"cookie": "forbidden"})),
+            ("source_wrong_type", lambda value: value["evidence"].update({"source": "not-an-object"})),
+            ("completeness_unknown", lambda value: value["evidence"]["completeness"].update({"dangerous": True})),
+            ("completeness_wrong_type", lambda value: value["evidence"].update({"completeness": []})),
+            ("field_map_unknown", lambda value: value["evidence"]["completeness"]["fieldMap"].update({"raw": "raw"})),
+            ("field_map_wrong_type", lambda value: value["evidence"]["completeness"].update({"fieldMap": []})),
+            ("missing_fields_oversized", lambda value: value["evidence"]["completeness"].update({"missingFields": ["url"] * 501})),
+            ("warnings_oversized_text", lambda value: value["evidence"]["completeness"].update({"warnings": ["x" * 100_000]})),
+            ("warnings_oversized_array", lambda value: value["evidence"]["completeness"].update({"warnings": ["warning"] * 5_001})),
+            ("availability_unknown", lambda value: value["evidence"]["completeness"]["availability"].update({"prototype": False})),
+            ("availability_wrong_type", lambda value: value["evidence"]["completeness"]["availability"].update({"comments": 1})),
+            ("metrics_unknown", lambda value: value["evidence"]["metrics"].update({"dangerous": 1})),
+            ("metrics_wrong_type", lambda value: value["evidence"]["metrics"].update({"workCount": "not-a-number"})),
+            ("rankings_unknown", lambda value: value["evidence"]["rankings"].update({"dangerous": {}})),
+            ("ranking_wrong_type", lambda value: value["evidence"]["rankings"].update({"overall": []})),
+            ("ranking_unknown", lambda value: value["evidence"]["rankings"]["overall"].update({"__proto__": {}})),
+            ("ranking_rows_wrong_type", lambda value: value["evidence"]["rankings"]["overall"].update({"rows": "not-a-list"})),
+            ("ranking_rows_oversized", lambda value: value["evidence"]["rankings"]["overall"].update({"rows": list(range(1, 12))})),
+            ("items_wrong_type", lambda value: value["evidence"].update({"items": {}})),
+            ("items_oversized", lambda value: value["evidence"].update({"items": value["evidence"]["items"] * 501})),
+            ("item_unknown", lambda value: value["evidence"]["items"][0].update({"dangerous": True})),
+            ("item_title_wrong_type", lambda value: value["evidence"]["items"][0].update({"title": {"object": "not-text"}})),
+            ("item_title_oversized", lambda value: value["evidence"]["items"][0].update({"title": "x" * 100_000})),
+            ("item_metric_wrong_type", lambda value: value["evidence"]["items"][0].update({"likes": True})),
+            ("item_url_oversized", lambda value: value["evidence"]["items"][0].update({"url": "https://example.com/" + "x" * 100_000})),
+            ("item_ranks_unknown", lambda value: value["evidence"]["items"][0]["ranks"].update({"prototype": 1})),
+            ("item_rank_wrong_type", lambda value: value["evidence"]["items"][0]["ranks"].update({"overall": "first"})),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                session = json.loads(json.dumps(original))
+                mutate(session)
+                session_path.write_text(json.dumps(session, ensure_ascii=False), encoding="utf-8")
+                self._assert_invalid_evidence(
+                    lambda: service.validate_batch(evidence_id, batches[0], output_dir)
+                )
+                self._assert_invalid_evidence(
+                    lambda: service.assemble(evidence_id, batches, output_dir)
+                )
+
+    def test_content_task_session_rejects_open_wrong_type_oversized_and_extra_item_shapes(self) -> None:
+        request = self._artifact_variant_request("xiaohongshu", "content")
+        result = service.analyze_artifacts(request)
+        evidence_id = str(result["evidenceId"])
+        output_dir = str(request["outputDir"])
+        session_path = Path(output_dir) / f"{evidence_id}.evidence-session.json"
+        original = json.loads(session_path.read_text(encoding="utf-8"))
+        batch = valid_content_batch("XHS-E0001")
+        mutations = (
+            ("content_unknown", lambda value: value["evidence"]["content"].update({"dangerous": True})),
+            ("canonical_content_unknown", lambda value: value["canonicalInput"]["parsed"]["content"].update({"dangerous": True})),
+            ("content_dangerous", lambda value: value["evidence"]["content"].update({"constructor": {}})),
+            ("content_wrong_type", lambda value: value["evidence"].update({"content": "not-an-object"})),
+            ("content_body_wrong_type", lambda value: value["evidence"]["content"].update({"body": {"not": "text"}})),
+            ("content_body_oversized", lambda value: value["evidence"]["content"].update({"body": "x" * 100_000})),
+            ("content_author_unknown", lambda value: value["evidence"]["content"]["author"].update({"rawProfile": "forbidden"})),
+            ("content_author_wrong_type", lambda value: value["evidence"]["content"].update({"author": []})),
+            ("content_numeric_wrong_type", lambda value: value["evidence"]["content"].update({"imageCount": True})),
+            ("content_rankings_nonempty", lambda value: value["evidence"].update({"rankings": {"overall": {"status": "available", "rows": [1]}}})),
+            ("content_extra_item", lambda value: value["evidence"]["items"].append(dict(value["evidence"]["items"][0]))),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                session = json.loads(json.dumps(original))
+                mutate(session)
+                session_path.write_text(json.dumps(session, ensure_ascii=False), encoding="utf-8")
+                self._assert_invalid_evidence(
+                    lambda: service.validate_batch(evidence_id, batch, output_dir)
+                )
+                self._assert_invalid_evidence(
+                    lambda: service.assemble(evidence_id, [batch], output_dir)
+                )
+
+    def test_all_four_artifact_variants_validate_and_assemble_from_their_task_session(self) -> None:
+        for platform_id, input_kind, evidence_id in (
+            ("douyin", "account", "DY-E0001"),
+            ("xiaohongshu", "account", "XHS-E0001"),
+            ("douyin", "content", "DY-E0001"),
+            ("xiaohongshu", "content", "XHS-E0001"),
+        ):
+            with self.subTest(platform_id=platform_id, input_kind=input_kind):
+                request = self._artifact_variant_request(platform_id, input_kind)
+                result = service.analyze_artifacts(request)
+                batches = valid_batches(evidence_id) if input_kind == "account" else [valid_content_batch(evidence_id)]
+                validated = service.validate_batch(
+                    str(result["evidenceId"]),
+                    batches[-1],
+                    str(request["outputDir"]),
+                )
+                artifact = service.assemble(
+                    str(result["evidenceId"]),
+                    batches,
+                    str(request["outputDir"]),
+                )
+                self.assertEqual(validated["stage"], "section_validated")
+                self.assertEqual(artifact["stage"], "report_ready")
 
     def test_rejects_paths_outside_the_controlled_douyin_directory(self) -> None:
         outside = self.project_root / "private.xlsx"
