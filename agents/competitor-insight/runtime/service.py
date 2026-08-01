@@ -970,9 +970,15 @@ def _bounded_string_list(
     return result
 
 
-def _validate_subject(value: object, *, require_nickname: bool = False) -> dict[str, object]:
+def _validate_subject(
+    value: object,
+    *,
+    require_nickname: bool = False,
+    allow_anonymous: bool = False,
+) -> dict[str, object]:
     subject = _closed_object(value, {"nickname"} if require_nickname else set(), _SUBJECT_KEYS)
-    if not subject or not any(subject.get(key) not in (None, "") for key in ("nickname", "accountId")):
+    has_identity = any(subject.get(key) not in (None, "") for key in ("nickname", "accountId"))
+    if not subject or (not allow_anonymous and not has_identity):
         _invalid_bundle()
     if "nickname" in subject:
         _bounded_text(subject["nickname"], 200)
@@ -993,9 +999,9 @@ def _validate_field_map(value: object, *, task_source: bool) -> dict[str, object
     return field_map
 
 
-def _validate_content(value: object) -> dict[str, object]:
+def _validate_content(value: object, *, allow_empty: bool = False) -> dict[str, object]:
     content = _closed_object(value, set(), _CONTENT_KEYS)
-    if not content:
+    if not content and not allow_empty:
         _invalid_bundle()
     for field in ("body", "ocr", "transcript"):
         if field in content:
@@ -1192,8 +1198,17 @@ def _validate_evidence_bundle(
     if bundle["reportType"] != _REPORT_TYPES[(cast(str, platform_id), cast(str, input_kind))]:
         _invalid_bundle()
     _validate_source(bundle["source"], cast(str, platform_id), task_source=task_source)
-    subject = _validate_subject(bundle["subject"], require_nickname=task_source)
-    account = _validate_subject(bundle["account"], require_nickname=task_source)
+    allow_anonymous = input_kind == "content"
+    subject = _validate_subject(
+        bundle["subject"],
+        require_nickname=task_source,
+        allow_anonymous=allow_anonymous,
+    )
+    account = _validate_subject(
+        bundle["account"],
+        require_nickname=task_source,
+        allow_anonymous=allow_anonymous,
+    )
     if subject != account:
         _invalid_bundle()
     completeness = _validate_completeness(bundle["completeness"], task_source=task_source)
@@ -1219,7 +1234,7 @@ def _validate_evidence_bundle(
         availability=availability,
     )
     if input_kind == "content":
-        _validate_content(bundle["content"])
+        _validate_content(bundle["content"], allow_empty=True)
     return cast(EvidenceBundle, bundle)
 
 
@@ -1268,7 +1283,11 @@ def _validate_canonical_input(
         or parsed["reportType"] != _REPORT_TYPES[(platform_id, input_kind)]
     ):
         _invalid_bundle()
-    _validate_subject(parsed["subject"], require_nickname=True)
+    _validate_subject(
+        parsed["subject"],
+        require_nickname=True,
+        allow_anonymous=input_kind == "content",
+    )
     _validate_field_map(parsed["fieldMap"], task_source=True)
     _bounded_string_list(
         parsed["missingFields"],
@@ -1292,8 +1311,17 @@ def _validate_canonical_input(
     if input_kind == "content":
         if len(works) != 1:
             _invalid_bundle()
-        _validate_content(content)
+        _validate_content(content, allow_empty=True)
     elif content != {}:
+        _invalid_bundle()
+    try:
+        normalized = canonical_evidence_input(
+            cast(dict[str, object], parsed),
+            cast(dict[str, object], source),
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        _invalid_bundle()
+    if normalized != canonical:
         _invalid_bundle()
     return canonical
 

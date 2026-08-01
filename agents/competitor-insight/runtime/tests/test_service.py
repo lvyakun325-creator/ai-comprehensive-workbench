@@ -329,6 +329,42 @@ class ServiceTests(unittest.TestCase):
             "excelPath": None,
         }
 
+    def _partial_content_request(self, platform_id: str) -> dict[str, object]:
+        request = self._artifact_variant_request(platform_id, "content")
+        if platform_id == "douyin":
+            payload = {
+                "data": {
+                    "video": {
+                        "title": "只抓到标题和互动的抖音内容",
+                        "likes": 8,
+                        "comments": 2,
+                        "collects": 1,
+                        "shares": 1,
+                        "create_time": "2026-07-01 10:00:00",
+                        "url": "https://www.douyin.com/video/partial-1",
+                    },
+                },
+            }
+        else:
+            payload = {
+                "data": {
+                    "note": {
+                        "display_title": "只抓到标题和互动的小红书笔记",
+                        "liked_count": 8,
+                        "comment_count_declared": 2,
+                        "collected_count": 1,
+                        "shared_count": 1,
+                        "time": "2026-07-01 10:00:00",
+                        "url": "https://www.xiaohongshu.com/explore/partial-1",
+                    },
+                },
+            }
+        Path(str(request["dataPath"])).write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return request
+
     def test_analyze_artifacts_uses_only_the_exact_task_directory_and_persists_context(self) -> None:
         request = self._artifact_request()
 
@@ -454,6 +490,37 @@ class ServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"^invalid_evidence_bundle$"):
             service.assemble(evidence_id, batches, output_dir)
 
+    def test_task_session_rejects_reversed_digest_equivalent_canonical_lists_in_both_paths(self) -> None:
+        """Would fail if persisted digest preimage order can change while retaining the same identity."""
+        for list_field in ("missingFields", "warnings"):
+            with self.subTest(list_field=list_field):
+                request = self._artifact_request(
+                    task_id=f"competitor-20260801-canonical-order-{list_field.lower()}"
+                )
+                source_path = Path(str(request["dataPath"]))
+                payload = json.loads(source_path.read_text(encoding="utf-8"))
+                payload["data"]["videos"] = [{"desc": "只有标题的公开作品"}]
+                source_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                result = service.analyze_artifacts(request)
+                evidence_id = str(result["evidenceId"])
+                output_dir = str(request["outputDir"])
+                session_path = Path(output_dir) / f"{evidence_id}.evidence-session.json"
+                session = json.loads(session_path.read_text(encoding="utf-8"))
+                canonical = session["canonicalInput"]["parsed"]
+                original = list(canonical[list_field])
+                self.assertGreater(len(original), 1)
+                canonical[list_field] = list(reversed(original))
+                self.assertNotEqual(canonical[list_field], original)
+                session_path.write_text(json.dumps(session, ensure_ascii=False), encoding="utf-8")
+                batches = valid_batches()
+
+                self._assert_invalid_evidence(
+                    lambda: service.validate_batch(evidence_id, batches[0], output_dir)
+                )
+                self._assert_invalid_evidence(
+                    lambda: service.assemble(evidence_id, batches, output_dir)
+                )
+
     def test_task_session_rejects_closed_schema_type_and_bound_mutations_at_every_account_layer(self) -> None:
         request = self._artifact_request()
         result = service.analyze_artifacts(request)
@@ -567,6 +634,45 @@ class ServiceTests(unittest.TestCase):
                     batches,
                     str(request["outputDir"]),
                 )
+                self.assertEqual(validated["stage"], "section_validated")
+                self.assertEqual(artifact["stage"], "report_ready")
+
+    def test_partial_anonymous_content_from_both_platforms_validates_and_assembles_without_invention(self) -> None:
+        """Would fail if strict session integrity rejects source-reader-valid missing author/content fields."""
+        for platform_id, evidence_id in (
+            ("douyin", "DY-E0001"),
+            ("xiaohongshu", "XHS-E0001"),
+        ):
+            with self.subTest(platform_id=platform_id):
+                request = self._partial_content_request(platform_id)
+                try:
+                    result = service.analyze_artifacts(request)
+                except ValueError as error:
+                    self.fail(f"valid partial content was rejected: {error}")
+                batch = valid_content_batch(evidence_id)
+                validated = service.validate_batch(
+                    str(result["evidenceId"]),
+                    batch,
+                    str(request["outputDir"]),
+                )
+                artifact = service.assemble(
+                    str(result["evidenceId"]),
+                    [batch],
+                    str(request["outputDir"]),
+                )
+                session_path = Path(str(request["outputDir"])) / f"{result['evidenceId']}.evidence-session.json"
+                session = json.loads(session_path.read_text(encoding="utf-8"))
+
+                self.assertEqual(result["subjectName"], "未命名对象")
+                self.assertEqual(result["batchInputs"]["content"]["author"], {})
+                self.assertEqual(result["batchInputs"]["content"]["content"]["body"], "")
+                self.assertEqual(result["batchInputs"]["content"]["content"]["transcript"], "")
+                self.assertEqual(session["canonicalInput"]["parsed"]["subject"], {"nickname": ""})
+                self.assertEqual(session["canonicalInput"]["parsed"]["content"], {})
+                self.assertEqual(session["evidence"]["subject"], {"nickname": ""})
+                self.assertEqual(session["evidence"]["content"], {})
+                self.assertIn("missing_content:body", session["evidence"]["completeness"]["warnings"])
+                self.assertIn("待验证假设", artifact["markdown"])
                 self.assertEqual(validated["stage"], "section_validated")
                 self.assertEqual(artifact["stage"], "report_ready")
 

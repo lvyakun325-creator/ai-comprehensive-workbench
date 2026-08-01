@@ -133,7 +133,11 @@ def build_evidence_bundle(parsed: dict[str, object], source: dict[str, object]) 
             "metrics": metrics,
             "rankings": rankings,
             "items": items,
-            **({"content": dict(cast(dict[str, object], canonical_parsed["content"]))} if canonical_parsed["content"] else {}),
+            **(
+                {"content": dict(cast(dict[str, object], canonical_parsed["content"]))}
+                if input_kind == "content"
+                else {}
+            ),
         },
     )
 
