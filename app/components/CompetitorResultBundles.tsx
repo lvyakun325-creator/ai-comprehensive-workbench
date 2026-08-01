@@ -52,7 +52,11 @@ const ARTIFACT_LABELS = {
   "output-directory": "目录",
 } as const;
 
-const EMBEDDED_URL = /https?:\/\/[^\s<>"'，。；！？、（）()\[\]{}]+/giu;
+const URL_CONTEXT_BOUNDARIES = new Set([
+  "<", ">", "\"", "'", "`", ",", ";",
+  "，", "。", "；", "！", "？", "、",
+]);
+const AUTHORIZATION_BEARER_ASSIGNMENT = /\bauthorization\b[ \t]*[:=][ \t]*bearer[ \t]+[^\s,，;；]+/giu;
 const SENSITIVE_ASSIGNMENT = /\b(?:token|credentials?|cookies?|authorization|api[ _-]?key|secret|password|passwd|session)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,，;；]+)/giu;
 const HIDDEN_VALUE = "[敏感信息已隐藏]";
 
@@ -70,9 +74,35 @@ function sanitizeSourceUrl(value: string): string | null {
   }
 }
 
+function sanitizeEmbeddedUrls(value: string): string {
+  const schemePattern = /https?:\/\//giu;
+  let cursor = 0;
+  let output = "";
+  let schemeMatch = schemePattern.exec(value);
+
+  while (schemeMatch !== null) {
+    const urlStart = schemeMatch.index;
+    let urlEnd = urlStart;
+    while (urlEnd < value.length) {
+      const character = value[urlEnd];
+      if (/\s/u.test(character) || URL_CONTEXT_BOUNDARIES.has(character)) break;
+      urlEnd += 1;
+    }
+
+    const candidate = value.slice(urlStart, urlEnd);
+    output += value.slice(cursor, urlStart);
+    output += sanitizeSourceUrl(candidate) ?? "[链接已隐藏]";
+    cursor = urlEnd;
+    schemePattern.lastIndex = urlEnd;
+    schemeMatch = schemePattern.exec(value);
+  }
+
+  return output + value.slice(cursor);
+}
+
 function sanitizeDisplayText(value: string, fallback: string): string {
-  const sanitized = value
-    .replace(EMBEDDED_URL, (candidate) => sanitizeSourceUrl(candidate) ?? "[链接已隐藏]")
+  const sanitized = sanitizeEmbeddedUrls(value)
+    .replace(AUTHORIZATION_BEARER_ASSIGNMENT, HIDDEN_VALUE)
     .replace(SENSITIVE_ASSIGNMENT, HIDDEN_VALUE)
     .trim();
   return sanitized || fallback;

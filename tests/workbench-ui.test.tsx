@@ -982,6 +982,59 @@ test("竞品成果包统一清理 title subject source 及所有无障碍名称�
   assert.doesNotMatch(document.body.innerHTML, /title-secret|title-pass|title-credential|subject-secret|subject-pass|subject-cookie|source-secret|status-secret/u);
 });
 
+test("竞品合法 URL 括号查询与片段不进入 DOM aria 或状态", async () => {
+  renderCompetitorBundleFixture({
+    title: "竞品 https://example.com/item?token=(query-secret)#fragment-secret",
+  });
+  const article = screen.getByRole("article", {
+    name: "竞品 https://example.com/item 成果包",
+  });
+
+  assert.ok(screen.getByRole("heading", {
+    name: "竞品 https://example.com/item",
+  }));
+  assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
+
+  await userEvent.setup({document}).click(
+    within(article).getByRole("button", {name: "展开明细"}),
+  );
+  assert.equal(
+    screen.getByRole("status", {name: "成果包界面状态"}).textContent,
+    "竞品 https://example.com/item明细已展开",
+  );
+  assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
+});
+
+test("竞品 Authorization Bearer 凭据完整隐藏且保留后续正常中文", () => {
+  renderCompetitorBundleFixture({
+    subjectName: "作者 authorization: Bearer auth-secret，后续正常中文",
+  });
+
+  assert.ok(screen.getByText("作者 [敏感信息已隐藏]，后续正常中文"));
+  assert.ok(screen.getByRole("link", {
+    name: "查看来源链接：作者 [敏感信息已隐藏]，后续正常中文",
+  }));
+  assert.doesNotMatch(document.body.innerHTML, /auth-secret/u);
+});
+
+test("竞品普通中文标题与主体原样展示", async () => {
+  renderCompetitorBundleFixture({
+    title: "普通中文标题",
+    subjectName: "普通中文作者",
+  });
+  const article = screen.getByRole("article", {name: "普通中文标题 成果包"});
+
+  assert.ok(screen.getByRole("heading", {name: "普通中文标题"}));
+  assert.ok(within(article).getByText("普通中文作者"));
+  await userEvent.setup({document}).click(
+    within(article).getByRole("button", {name: "展开明细"}),
+  );
+  assert.equal(
+    screen.getByRole("status", {name: "成果包界面状态"}).textContent,
+    "普通中文标题明细已展开",
+  );
+});
+
 test("竞品成果包三类动作使用稳定名称并同步阻止同一渲染内重复激活", async () => {
   const snapshot = competitorWorkspaceSnapshot();
   const detail = deferredValue<Response>();
