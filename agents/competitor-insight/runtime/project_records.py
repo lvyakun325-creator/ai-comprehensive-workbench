@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 from io import BytesIO
 import json
@@ -102,6 +104,7 @@ _BUNDLE_FIELDS = {
     "artifactIds", "manifestSha256", "archiveSha256", "memberIdentitySha256", "createdAt", "updatedAt",
 }
 _STORE_LOCK = threading.RLock()
+_STORE_LOCK_STATE = threading.local()
 
 
 def _now() -> str:
@@ -112,6 +115,61 @@ def _now() -> str:
 
 def _store_path() -> Path:
     return PROJECT_ROOT.resolve().joinpath(*STORE_COMPONENTS)
+
+
+def _store_lock_path() -> Path:
+    return _store_path().with_name(".project-records.lock")
+
+
+def _open_store_lock() -> int:
+    lock_path = _store_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if lock_path.parent.is_symlink() or not getattr(os, "O_NOFOLLOW", 0):
+        raise ValueError("record_lock_unavailable")
+    try:
+        descriptor = os.open(
+            lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600,
+        )
+    except OSError:
+        raise ValueError("record_lock_unavailable") from None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("record_lock_unavailable")
+        os.fchmod(descriptor, 0o600)
+        if (os.fstat(descriptor).st_mode & 0o777) != 0o600:
+            raise ValueError("record_lock_unavailable")
+        return descriptor
+    except (OSError, ValueError):
+        os.close(descriptor)
+        raise ValueError("record_lock_unavailable") from None
+
+
+@contextmanager
+def _store_transaction() -> object:
+    """Serialize one durable-store transaction in thread then process order."""
+    with _STORE_LOCK:
+        depth = getattr(_STORE_LOCK_STATE, "depth", 0)
+        if depth:
+            _STORE_LOCK_STATE.depth = depth + 1
+            try:
+                yield
+            finally:
+                _STORE_LOCK_STATE.depth -= 1
+            return
+        descriptor = _open_store_lock()
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            _STORE_LOCK_STATE.depth = 1
+            _STORE_LOCK_STATE.descriptor = descriptor
+            try:
+                yield
+            finally:
+                del _STORE_LOCK_STATE.descriptor
+                del _STORE_LOCK_STATE.depth
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _allowed_roots() -> tuple[Path, ...]:
@@ -575,7 +633,7 @@ def create_task(payload: dict[str, object]) -> dict[str, object]:
     }
     if task["inputKind"] not in _INPUT_KINDS:
         raise ValueError("invalid_task_classification")
-    with _STORE_LOCK:
+    with _store_transaction():
         store = _load_store()
         if any(item.get("id") == task_id for item in _tasks(store)):
             raise ValueError("task_already_exists")
@@ -589,7 +647,7 @@ def update_task(task_id: str, patch: dict[str, object]) -> dict[str, object]:
     allowed_fields = {"status", "progress", "currentStep", "errorSummary", "inputKind", "category"}
     if not isinstance(patch, dict) or not patch or not set(patch).issubset(allowed_fields):
         raise ValueError("invalid_request_fields")
-    with _STORE_LOCK:
+    with _store_transaction():
         store = _load_store()
         task = _find_task(store, normalized_task_id)
         current_status = cast(str, task["status"])
@@ -849,7 +907,7 @@ def register_artifacts(task_id: str, payload: dict[str, object]) -> dict[str, ob
     output_dir = _validate_existing_path(payload["outputDir"])
     if not output_dir.is_dir():
         raise ValueError("invalid_output_directory")
-    with _STORE_LOCK:
+    with _store_transaction():
         initial_store = _load_store()
         initial_task = _find_task(initial_store, normalized_task_id)
         created_at = cast(str, initial_task["createdAt"])
@@ -867,7 +925,7 @@ def register_artifacts(task_id: str, payload: dict[str, object]) -> dict[str, ob
     generated = list({cast(str, item["absolutePath"]): item for item in generated}.values())
     if len(generated) > MAX_ARTIFACTS_PER_TASK:
         raise ValueError("too_many_artifacts")
-    with _STORE_LOCK:
+    with _store_transaction():
         store = _load_store()
         task = _find_task(store, normalized_task_id)
         existing = {
@@ -952,7 +1010,7 @@ def _snapshot(store: dict[str, object], agent_id: str) -> dict[str, object]:
 def read_records(agent_id: str) -> dict[str, object]:
     if not isinstance(agent_id, str) or len(agent_id) > 128:
         raise ValueError("invalid_agent_id")
-    with _STORE_LOCK:
+    with _store_transaction():
         store = _load_store()
         if _refresh_bundle_statuses(store):
             _atomic_write(store)
@@ -968,7 +1026,7 @@ def reveal_artifact(
     runner: Runner = subprocess.run,
 ) -> dict[str, object]:
     normalized_artifact_id = _artifact_id(artifact_id)
-    with _STORE_LOCK:
+    with _store_transaction():
         store = _load_store()
         artifact = next(
             (
@@ -1290,7 +1348,7 @@ def _commit_ready_bundle(
 
 def finalize_bundle(task_id: str, payload: dict[str, object]) -> dict[str, object]:
     normalized_task_id = _task_id(task_id)
-    with _STORE_LOCK:
+    with _store_transaction():
         store = _load_store()
         task = _find_task(store, normalized_task_id)
         existing_id = task.get("bundleId")
@@ -1322,7 +1380,7 @@ def finalize_bundle(task_id: str, payload: dict[str, object]) -> dict[str, objec
 
 def read_bundle(bundle_id: str) -> dict[str, object]:
     normalized_bundle_id = _bundle_id(bundle_id)
-    with _STORE_LOCK:
+    with _store_transaction():
         store = _load_store()
         if _refresh_bundle_statuses(store):
             _atomic_write(store)
@@ -1487,7 +1545,7 @@ def _ready_archive_is_valid(store: dict[str, object], bundle: dict[str, object])
 
 def bundle_archive(bundle_id: str) -> Path:
     normalized_bundle_id = _bundle_id(bundle_id)
-    with _STORE_LOCK:
+    with _store_transaction():
         store = _load_store()
         if _refresh_bundle_statuses(store):
             _atomic_write(store)
@@ -1515,7 +1573,7 @@ def reveal_bundle(
     runner: Runner = subprocess.run,
 ) -> dict[str, object]:
     normalized_bundle_id = _bundle_id(bundle_id)
-    with _STORE_LOCK:
+    with _store_transaction():
         store = _load_store()
         if _refresh_bundle_statuses(store):
             _atomic_write(store)

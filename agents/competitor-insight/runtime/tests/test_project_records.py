@@ -1,10 +1,12 @@
 import hashlib
 from io import BytesIO
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+import time
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -14,6 +16,48 @@ RUNTIME_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RUNTIME_DIR))
 
 import project_records
+
+
+def _finalize_in_process(
+    project_root: str, task_id: str,
+    payload: dict[str, object],
+    barrier: object,
+    results: object,
+) -> None:
+    project_records.PROJECT_ROOT = Path(project_root)
+    original_atomic_write = project_records._atomic_write
+
+    def delayed_atomic_write(store: dict[str, object]) -> None:
+        time.sleep(0.2)
+        original_atomic_write(store)
+
+    project_records._atomic_write = delayed_atomic_write
+    try:
+        barrier.wait(timeout=10)  # type: ignore[union-attr]
+        snapshot = project_records.finalize_bundle(task_id, payload)
+        results.put(("ok", str(snapshot["bundles"][0]["id"])))  # type: ignore[union-attr]
+    except BaseException as error:
+        results.put(("error", f"{type(error).__name__}:{error}"))  # type: ignore[union-attr]
+
+
+def _failed_finalize_in_process(
+    project_root: str, task_id: str, payload: dict[str, object], results: object,
+) -> None:
+    project_records.PROJECT_ROOT = Path(project_root)
+    original_atomic_write = project_records._atomic_write
+
+    def failed_atomic_write(store: dict[str, object]) -> None:
+        raise OSError("forced_store_failure")
+
+    project_records._atomic_write = failed_atomic_write
+    try:
+        project_records.finalize_bundle(task_id, payload)
+    except BaseException as error:
+        results.put(("error", f"{type(error).__name__}:{error}"))  # type: ignore[union-attr]
+    else:
+        results.put(("ok", "unexpected"))  # type: ignore[union-attr]
+    finally:
+        project_records._atomic_write = original_atomic_write
 
 
 class ProjectRecordTests(unittest.TestCase):
@@ -385,13 +429,13 @@ class ProjectRecordTests(unittest.TestCase):
         self.store_path.write_text(json.dumps({"schemaVersion": 1, "tasks": [task], "artifacts": artifacts}), "utf-8")
         return [report, data, sheet]
 
-    def bundle_task_directory(self) -> Path:
+    def bundle_task_directory(self, task_id: str = "competitor-20260801-a1") -> Path:
         return (
             self.project_root
             / "outputs"
             / "competitor-insight"
             / "xiaohongshu"
-            / "competitor-20260801-a1"
+            / task_id
         )
 
     def bundle_payload(self, output: Path) -> dict[str, object]:
@@ -409,18 +453,18 @@ class ProjectRecordTests(unittest.TestCase):
             "itemCount": 1,
         }
 
-    def prepare_bundle_task(self) -> Path:
-        self.create_task()
+    def prepare_bundle_task(self, task_id: str = "competitor-20260801-a1") -> Path:
+        self.create_task(id=task_id)
         project_records.update_task(
-            "competitor-20260801-a1", {"inputKind": "content", "category": "xhs-note"}
+            task_id, {"inputKind": "content", "category": "xhs-note"}
         )
-        output = self.bundle_task_directory()
+        output = self.bundle_task_directory(task_id)
         output.mkdir(parents=True)
         (output / "竞品报告.md").write_text("# 竞品报告", "utf-8")
         (output / "结构化数据.json").write_text('{"items":[]}', "utf-8")
         (output / "竞品数据.xlsx").write_bytes(b"xlsx")
         project_records.register_artifacts(
-            "competitor-20260801-a1",
+            task_id,
             {
                 "outputDir": str(output),
                 "explicitPaths": [
@@ -796,6 +840,98 @@ class ProjectRecordTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "record_store_damaged"):
             project_records.read_records("competitor-insight")
+
+    def test_two_process_finalizers_commit_one_bundle_and_one_archive_pair(self) -> None:
+        output = self.prepare_bundle_task()
+        context = multiprocessing.get_context("fork")
+        barrier = context.Barrier(2)
+        results = context.Queue()
+        payload = self.bundle_payload(output)
+        workers = [
+            context.Process(
+                target=_finalize_in_process,
+                args=(str(self.project_root), "competitor-20260801-a1", payload, barrier, results),
+            )
+            for _ in range(2)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=15)
+            self.assertEqual(worker.exitcode, 0)
+        outcomes = [results.get(timeout=2) for _ in workers]
+
+        self.assertEqual({status for status, _ in outcomes}, {"ok"})
+        self.assertEqual(len({bundle_id for _, bundle_id in outcomes}), 1)
+        persisted = project_records.read_records("competitor-insight")
+        self.assertEqual(len(persisted["bundles"]), 1)
+        self.assertEqual(len(list(output.glob("bundle-*.manifest.json"))), 1)
+        self.assertEqual(len(list(output.glob("bundle-*.zip"))), 1)
+        self.assertEqual(list(output.glob(".bundle-*")), [])
+
+    def test_two_process_different_tasks_preserve_both_store_updates(self) -> None:
+        first = self.prepare_bundle_task()
+        second_id = "competitor-20260801-b2"
+        second = self.prepare_bundle_task(second_id)
+        context = multiprocessing.get_context("fork")
+        barrier = context.Barrier(2)
+        results = context.Queue()
+        workers = [
+            context.Process(
+                target=_finalize_in_process,
+                args=(str(self.project_root), task_id, self.bundle_payload(output), barrier, results),
+            )
+            for task_id, output in (("competitor-20260801-a1", first), (second_id, second))
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=15)
+            self.assertEqual(worker.exitcode, 0)
+
+        outcomes = [results.get(timeout=2) for _ in workers]
+        self.assertEqual({status for status, _ in outcomes}, {"ok"})
+        persisted = project_records.read_records("competitor-insight")
+        self.assertEqual(len(persisted["bundles"]), 2)
+        self.assertEqual({task["status"] for task in persisted["tasks"]}, {"completed"})
+
+    def test_process_lock_releases_after_failed_finalization(self) -> None:
+        output = self.prepare_bundle_task()
+        context = multiprocessing.get_context("fork")
+        failures = context.Queue()
+        failed = context.Process(
+            target=_failed_finalize_in_process,
+            args=(str(self.project_root), "competitor-20260801-a1", self.bundle_payload(output), failures),
+        )
+        failed.start()
+        failed.join(timeout=15)
+        self.assertEqual(failed.exitcode, 0)
+        self.assertEqual(failures.get(timeout=2)[0], "error")
+        self.assertEqual(list(output.glob("bundle-*.zip")), [])
+
+        completed = context.Queue()
+        recovered = context.Process(
+            target=_finalize_in_process,
+            args=(str(self.project_root), "competitor-20260801-a1", self.bundle_payload(output), context.Barrier(1), completed),
+        )
+        recovered.start()
+        recovered.join(timeout=15)
+        self.assertEqual(recovered.exitcode, 0)
+        self.assertEqual(completed.get(timeout=2)[0], "ok")
+        self.assertEqual(len(list(output.glob("bundle-*.zip"))), 1)
+
+    def test_store_lock_rejects_a_symlink(self) -> None:
+        self.create_task()
+        lock_path = self.store_path.with_name(".project-records.lock")
+        lock_path.unlink()
+        outside = self.project_root / "outside-lock"
+        outside.write_text("fixture", "utf-8")
+        lock_path.symlink_to(outside)
+
+        with self.assertRaisesRegex(ValueError, "record_lock_unavailable"):
+            project_records.update_task("competitor-20260801-a1", {"progress": 20})
+
+        self.assertEqual(outside.read_text("utf-8"), "fixture")
 
 
 if __name__ == "__main__":
