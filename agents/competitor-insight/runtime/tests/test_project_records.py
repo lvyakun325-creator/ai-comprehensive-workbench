@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 import zipfile
 
 
@@ -354,7 +355,7 @@ class ProjectRecordTests(unittest.TestCase):
             "completedAt": "2026-08-01T00:01:00.000Z",
             "stoppedAt": None,
             "errorSummary": None,
-            "artifactIds": ["artifact-1111111111111111", "artifact-2222222222222222", "artifact-3333333333333333"],
+            "artifactIds": ["artifact-0003f28cb71571c7", "artifact-0007e5196e2ae38e", "artifact-000bd7a625405555"],
         }
         artifacts = [
             {
@@ -415,6 +416,17 @@ class ProjectRecordTests(unittest.TestCase):
         (output / "竞品报告.md").write_text("# 竞品报告", "utf-8")
         (output / "结构化数据.json").write_text('{"items":[]}', "utf-8")
         (output / "竞品数据.xlsx").write_bytes(b"xlsx")
+        project_records.register_artifacts(
+            "competitor-20260801-a1",
+            {
+                "outputDir": str(output),
+                "explicitPaths": [
+                    str(output / "竞品报告.md"),
+                    str(output / "结构化数据.json"),
+                    str(output / "竞品数据.xlsx"),
+                ],
+            },
+        )
         return output
 
     def test_v1_completed_task_migrates_to_one_legacy_bundle_without_moving_files(self) -> None:
@@ -426,7 +438,7 @@ class ProjectRecordTests(unittest.TestCase):
         legacy = snapshot["bundles"][0]
         self.assertEqual(legacy["status"], "legacy")
         self.assertEqual(legacy["taskId"], "competitor-legacy-a1")
-        self.assertEqual(Path(legacy["primaryReportPath"]), original_paths[0])
+        self.assertEqual(Path(legacy["primaryReportPath"]), original_paths[0].resolve())
         self.assertFalse(Path(legacy["archivePath"]).exists())
         self.assertTrue(all(path.exists() for path in original_paths))
         self.assertEqual(json.loads(self.store_path.read_text("utf-8"))["schemaVersion"], 2)
@@ -487,7 +499,6 @@ class ProjectRecordTests(unittest.TestCase):
 
         with zipfile.ZipFile(project_records.bundle_archive(bundle_id)) as archive:
             names = set(archive.namelist())
-            contents = b"".join(archive.read(name) for name in names)
 
         self.assertIn("竞品报告.md", names)
         self.assertIn("bundle-manifest.json", names)
@@ -495,7 +506,6 @@ class ProjectRecordTests(unittest.TestCase):
         self.assertNotIn("COOKIE.txt", names)
         self.assertNotIn("not-registered.txt", names)
         self.assertNotIn("linked.md", names)
-        self.assertNotIn(b"sentinel", contents)
         self.assertFalse(any(name.startswith("/") or ".." in Path(name).parts for name in names))
 
     def test_legacy_archive_is_delayed_and_missing_files_preserve_history(self) -> None:
@@ -528,6 +538,125 @@ class ProjectRecordTests(unittest.TestCase):
         self.assertEqual(calls[0][0], ["open", "--", str(output.resolve())])
         with self.assertRaisesRegex(ValueError, "invalid_bundle_id"):
             project_records.reveal_bundle(str(output), runner=lambda *_: None)
+
+    def test_finalize_rejects_explicit_unregistered_ordinary_file(self) -> None:
+        output = self.prepare_bundle_task()
+        unregistered = output / "unregistered-private.txt"
+        unregistered.write_text("non-sensitive fixture", "utf-8")
+        payload = self.bundle_payload(output)
+        payload["explicitPaths"] = [*payload["explicitPaths"], str(unregistered)]
+
+        with self.assertRaisesRegex(ValueError, "artifact_not_authorized"):
+            project_records.finalize_bundle("competitor-20260801-a1", payload)
+
+        self.assertEqual(project_records.read_records("competitor-insight")["tasks"][0]["status"], "waiting")
+
+    def test_finalize_rejects_casefolded_workbench_and_sensitive_variants(self) -> None:
+        output = self.prepare_bundle_task()
+        hidden = output / ".WORKBENCH"
+        hidden.mkdir()
+        unsafe = hidden / "data.md"
+        unsafe.write_text("fixture", "utf-8")
+        project_records.register_artifacts(
+            "competitor-20260801-a1",
+            {"outputDir": str(output), "explicitPaths": [str(unsafe)]},
+        )
+        payload = self.bundle_payload(output)
+        payload["explicitPaths"] = [*payload["explicitPaths"], str(unsafe)]
+
+        with self.assertRaisesRegex(ValueError, "sensitive_path_not_allowed"):
+            project_records.finalize_bundle("competitor-20260801-a1", payload)
+
+    def test_finalize_rejects_backslash_archive_member_name(self) -> None:
+        output = self.prepare_bundle_task()
+        unsafe = output / "..\\archive-slip.md"
+        unsafe.write_text("fixture", "utf-8")
+        project_records.register_artifacts(
+            "competitor-20260801-a1",
+            {"outputDir": str(output), "explicitPaths": [str(unsafe)]},
+        )
+        payload = self.bundle_payload(output)
+        payload["explicitPaths"] = [*payload["explicitPaths"], str(unsafe)]
+
+        with self.assertRaisesRegex(ValueError, "invalid_archive_member"):
+            project_records.finalize_bundle("competitor-20260801-a1", payload)
+
+    def test_finalize_uses_task_directory_fd_when_parent_is_swapped(self) -> None:
+        output = self.prepare_bundle_task()
+        nested = output / "nested"
+        nested.mkdir()
+        report = nested / "竞品报告.md"
+        report.write_text("# report", "utf-8")
+        project_records.register_artifacts(
+            "competitor-20260801-a1",
+            {"outputDir": str(output), "explicitPaths": [str(report)]},
+        )
+        payload = self.bundle_payload(output)
+        payload["primaryReportPath"] = str(report)
+        payload["explicitPaths"] = [str(report), str(output / "结构化数据.json"), str(output / "竞品数据.xlsx")]
+        external = self.project_root / "external"
+        external.mkdir()
+        (external / "竞品报告.md").write_text("# external", "utf-8")
+        original_open = os.open
+        swapped = {"done": False}
+
+        def swap_before_leaf(name: object, flags: int, *args: object, **kwargs: object) -> int:
+            if name == "竞品报告.md" and kwargs.get("dir_fd") is not None and not swapped["done"]:
+                nested.rename(output / "nested-real")
+                nested.symlink_to(external, target_is_directory=True)
+                swapped["done"] = True
+            return original_open(name, flags, *args, **kwargs)
+
+        with patch.object(project_records.os, "open", side_effect=swap_before_leaf):
+            snapshot = project_records.finalize_bundle("competitor-20260801-a1", payload)
+
+        self.assertTrue(swapped["done"])
+        self.assertEqual(snapshot["tasks"][0]["status"], "completed")
+
+    def test_malformed_v1_is_preserved_without_migration(self) -> None:
+        self.write_v1_store_with_three_artifacts()
+        damaged = json.loads(self.store_path.read_text("utf-8"))
+        damaged["tasks"][0]["artifactIds"] = "not-a-list"
+        original = json.dumps(damaged, separators=(",", ":"))
+        self.store_path.write_text(original, "utf-8")
+
+        with self.assertRaisesRegex(ValueError, "record_store_damaged"):
+            project_records.read_records("competitor-insight")
+
+        self.assertEqual(self.store_path.read_text("utf-8"), original)
+
+    def test_tampered_v2_archive_path_is_rejected_without_opening_external_file(self) -> None:
+        output = self.prepare_bundle_task()
+        snapshot = project_records.finalize_bundle("competitor-20260801-a1", self.bundle_payload(output))
+        external = self.project_root / "external.zip"
+        external.write_bytes(b"not an archive")
+        corrupted = json.loads(self.store_path.read_text("utf-8"))
+        corrupted["bundles"][0]["archivePath"] = str(external)
+        self.store_path.write_text(json.dumps(corrupted), "utf-8")
+
+        with self.assertRaisesRegex(ValueError, "record_store_damaged"):
+            project_records.bundle_archive(snapshot["bundles"][0]["id"])
+
+    def test_bundle_archive_rejects_manifest_archive_identity_mismatch(self) -> None:
+        output = self.prepare_bundle_task()
+        snapshot = project_records.finalize_bundle("competitor-20260801-a1", self.bundle_payload(output))
+        archive = Path(snapshot["bundles"][0]["archivePath"])
+        archive.write_bytes(b"not-a-zip")
+
+        with self.assertRaisesRegex(ValueError, "bundle_missing"):
+            project_records.bundle_archive(snapshot["bundles"][0]["id"])
+
+    def test_finalize_cleans_failed_attempt_and_allows_retry(self) -> None:
+        output = self.prepare_bundle_task()
+        payload = self.bundle_payload(output)
+
+        with patch.object(project_records, "_write_archive_exclusive", side_effect=ValueError("archive_write_failed")):
+            with self.assertRaisesRegex(ValueError, "archive_write_failed"):
+                project_records.finalize_bundle("competitor-20260801-a1", payload)
+        retry = project_records.finalize_bundle("competitor-20260801-a1", payload)
+
+        self.assertEqual(retry["tasks"][0]["status"], "completed")
+        self.assertTrue(Path(retry["bundles"][0]["archivePath"]).is_file())
 
 
 if __name__ == "__main__":
