@@ -16,7 +16,57 @@ type CompetitorInsightPanelProps = {
   onStart?: () => void;
 };
 
-const WORKFLOW = ["识别平台", "调用抓取 Skill", "整理账号数据", "生成洞察报告"];
+const WORKFLOW = ["识别平台", "连接本地 Skill", "抓取平台数据", "保存抓取结果"];
+
+type DispatchPhase =
+  | "idle"
+  | "connecting"
+  | "scraping"
+  | "completed"
+  | "connection-failed"
+  | "scrape-failed";
+
+type WorkflowStepStatus = "pending" | "active" | "completed" | "failed";
+
+function getWorkflowStepStatuses(
+  phase: DispatchPhase,
+  platformReady: boolean,
+): WorkflowStepStatus[] {
+  const first: WorkflowStepStatus = platformReady ? "completed" : "pending";
+  switch (phase) {
+    case "connecting":
+      return [first, "active", "pending", "pending"];
+    case "scraping":
+      return [first, "completed", "active", "pending"];
+    case "completed":
+      return ["completed", "completed", "completed", "completed"];
+    case "connection-failed":
+      return [first, "failed", "pending", "pending"];
+    case "scrape-failed":
+      return [first, "completed", "failed", "pending"];
+    default:
+      return [first, "pending", "pending", "pending"];
+  }
+}
+
+function getDispatchProgress(phase: DispatchPhase, platformReady: boolean) {
+  switch (phase) {
+    case "connecting":
+      return { step: 2, message: "正在连接本地 Skill" };
+    case "scraping":
+      return { step: 3, message: "正在抓取平台数据，请保持页面打开" };
+    case "completed":
+      return { step: 4, message: "抓取结果已保存" };
+    case "connection-failed":
+      return { step: 2, message: "连接失败" };
+    case "scrape-failed":
+      return { step: 3, message: "抓取失败" };
+    default:
+      return platformReady
+        ? { step: 1, message: "平台已识别，等待开始" }
+        : { step: 0, message: "等待识别平台" };
+  }
+}
 
 export function CompetitorInsightPanel({
   mode,
@@ -26,19 +76,39 @@ export function CompetitorInsightPanel({
   const [source, setSource] = useState("");
   const [dispatchMessage, setDispatchMessage] = useState("");
   const [isDispatching, setIsDispatching] = useState(false);
+  const [dispatchPhase, setDispatchPhase] = useState<DispatchPhase>("idle");
   const [reportPathRequest, setReportPathRequest] =
     useState<CompetitorReportPathRequest | null>(null);
   const detection = useMemo(
     () => detectCompetitorPlatform(source),
     [source],
   );
+  const platformReady = detection.kind === "ready";
+  const workflowStepStatuses = getWorkflowStepStatuses(
+    dispatchPhase,
+    platformReady,
+  );
+  const dispatchProgress = getDispatchProgress(dispatchPhase, platformReady);
 
   const submit = async () => {
     if (detection.kind === "ready" && detection.skillId && detection.bridgeUrl) {
       const message = `已自动路由：${detection.platformLabel} → ${detection.skillId}`;
       setIsDispatching(true);
+      setDispatchPhase("connecting");
       setDispatchMessage(`${message}。正在连接本地采集桥…`);
+      let healthConfirmed = false;
       try {
+        const healthResponse = await fetch(`${detection.bridgeUrl}/health`, {
+          method: "GET",
+          credentials: "omit",
+          cache: "no-store",
+        });
+        if (!healthResponse.ok) {
+          throw new Error("bridge_health_failed");
+        }
+        healthConfirmed = true;
+        setDispatchPhase("scraping");
+        setDispatchMessage(`${message}。本地服务已连接，正在抓取平台数据…`);
         const response = await fetch(`${detection.bridgeUrl}/scrape`, {
           method: "POST",
           credentials: "omit",
@@ -53,12 +123,14 @@ export function CompetitorInsightPanel({
           excelPath?: string;
         };
         if (!response.ok || payload.ok !== true) {
+          setDispatchPhase("scrape-failed");
           setDispatchMessage(
             payload.message
             ?? `${message}。本地采集桥未完成任务，请确认本地工作台和抓取服务已启动。`,
           );
           return;
         }
+        setDispatchPhase("completed");
         if (
           detection.reportMode === "douyin-account"
           && payload.inputType === "作品链接"
@@ -88,9 +160,17 @@ export function CompetitorInsightPanel({
         setDispatchMessage(completed);
         onPreview(`${detection.platformLabel}竞品数据抓取完成`);
       } catch {
-        setDispatchMessage(
-          `${message}。无法连接本地采集桥，请在本地工作台启动 ${detection.skillId} 服务。`,
-        );
+        if (healthConfirmed) {
+          setDispatchPhase("scrape-failed");
+          setDispatchMessage(
+            `${message}。本地服务已连接，但抓取任务中断；请检查平台登录或验证状态后重试。`,
+          );
+        } else {
+          setDispatchPhase("connection-failed");
+          setDispatchMessage(
+            `${message}。浏览器未能访问本机采集服务：可能是服务未启动，或本站的本地网络访问被浏览器拦截。请刷新页面后重试；若服务已运行，请允许本站访问本地网络。`,
+          );
+        }
       } finally {
         setIsDispatching(false);
       }
@@ -137,12 +217,40 @@ export function CompetitorInsightPanel({
 
       <ol className="competitor-workflow" aria-label="竞品洞察处理流程">
         {WORKFLOW.map((step, index) => (
-          <li key={step}>
+          <li
+            aria-label={`${step}（${
+              workflowStepStatuses[index] === "completed"
+                ? "已完成"
+                : workflowStepStatuses[index] === "active"
+                  ? "进行中"
+                  : workflowStepStatuses[index] === "failed"
+                    ? "失败"
+                    : "未开始"
+            }）`}
+            className={workflowStepStatuses[index]}
+            key={step}
+          >
             <span>{index + 1}</span>
             {step}
           </li>
         ))}
       </ol>
+
+      {mode === "run" ? (
+        <div
+          aria-label="竞品抓取进度"
+          aria-live="polite"
+          className={`competitor-capture-progress ${dispatchPhase}`}
+          role="status"
+        >
+          <strong>
+            {dispatchProgress.step > 0
+              ? `第 ${dispatchProgress.step}/4 步`
+              : "等待开始"}
+          </strong>
+          <span>{dispatchProgress.message}</span>
+        </div>
+      ) : null}
 
       {mode === "run" ? (
         <>
@@ -160,6 +268,7 @@ export function CompetitorInsightPanel({
               onChange={(event) => {
                 setSource(event.target.value);
                 setDispatchMessage("");
+                setDispatchPhase("idle");
               }}
               placeholder="可直接粘贴抖音或小红书分享文字，系统会提取其中链接"
               value={source}

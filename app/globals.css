@@ -2030,7 +2030,13 @@ button {
   background: #f5f8fc;
   list-style: none;
 }
-.competitor-workflow li { color: #607089; font-size: 11px; }
+.competitor-workflow li {
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: #607089;
+  font-size: 11px;
+}
 .competitor-workflow li span {
   width: 21px;
   height: 21px;
@@ -2041,6 +2047,68 @@ button {
   background: #e5edff;
   color: #2f66f6;
   font-weight: 800;
+}
+.competitor-workflow li.active {
+  border-color: #a9c2ff;
+  background: #edf3ff;
+  color: #214fae;
+  font-weight: 800;
+}
+.competitor-workflow li.active span {
+  background: #2f66f6;
+  color: #fff;
+  animation: competitor-progress-pulse 1.2s ease-in-out infinite;
+}
+.competitor-workflow li.completed {
+  color: #25714d;
+}
+.competitor-workflow li.completed span {
+  background: #d9f2e5;
+  color: #25714d;
+}
+.competitor-workflow li.failed {
+  border-color: #edc4c4;
+  background: #fff6f6;
+  color: #9a3e3e;
+  font-weight: 800;
+}
+.competitor-workflow li.failed span {
+  background: #f8dddd;
+  color: #9a3e3e;
+}
+@keyframes competitor-progress-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(47, 102, 246, .12); }
+  50% { box-shadow: 0 0 0 5px rgba(47, 102, 246, .12); }
+}
+.competitor-capture-progress {
+  margin-top: 10px;
+  padding: 10px 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #dce5f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  color: #607089;
+  font-size: 11px;
+}
+.competitor-capture-progress strong { color: #33445f; }
+.competitor-capture-progress.connecting,
+.competitor-capture-progress.scraping {
+  border-color: #a9c2ff;
+  background: #edf3ff;
+  color: #214fae;
+}
+.competitor-capture-progress.completed {
+  border-color: #b9e4ce;
+  background: #effaf4;
+  color: #25714d;
+}
+.competitor-capture-progress.connection-failed,
+.competitor-capture-progress.scrape-failed {
+  border-color: #edc4c4;
+  background: #fff6f6;
+  color: #9a3e3e;
 }
 .competitor-overview-actions {
   margin-top: 16px;

@@ -4901,6 +4901,94 @@ test("competitor insight Agent opens its platform-aware collection console", asy
   });
 });
 
+test("竞品抓取显示真实四阶段进度并先确认本地服务健康", async () => {
+  const scrapePending = deferredValue<Response>();
+  const requestedUrls: string[] = [];
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    requestedUrls.push(url);
+    if (url === "http://127.0.0.1:8766/health") {
+      return new Response(JSON.stringify({ ok: true, status: "ready" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url === "http://127.0.0.1:8766/scrape") {
+      return scrapePending.promise;
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
+  await user.click(screen.getByRole("button", { name: "开始竞品采集" }));
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://www.xiaohongshu.com/explore/test-note",
+  );
+
+  assert.ok(screen.getByRole("listitem", { name: "识别平台（已完成）" }));
+  await user.click(screen.getByRole("button", { name: "抓取并分析" }));
+
+  await waitFor(() => {
+    assert.deepEqual(requestedUrls, [
+      "http://127.0.0.1:8766/health",
+      "http://127.0.0.1:8766/scrape",
+    ]);
+  });
+  assert.match(
+    screen.getByRole("status", { name: "竞品抓取进度" }).textContent ?? "",
+    /第 3\/4 步.*正在抓取平台数据/,
+  );
+  assert.ok(screen.getByRole("listitem", { name: "抓取平台数据（进行中）" }));
+
+  scrapePending.resolve(new Response(JSON.stringify({
+    ok: true,
+    outputDir: "/tmp/competitor-insight/xiaohongshu",
+  }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  }));
+  await waitFor(() => {
+    assert.match(
+      screen.getByRole("status", { name: "竞品抓取进度" }).textContent ?? "",
+      /第 4\/4 步.*抓取结果已保存/,
+    );
+  });
+  assert.ok(screen.getByRole("listitem", { name: "保存抓取结果（已完成）" }));
+});
+
+test("竞品抓取把浏览器无法访问本机服务与抓取失败分开提示", async () => {
+  const requestedUrls: string[] = [];
+  globalThis.fetch = (async (input) => {
+    requestedUrls.push(String(input));
+    throw new TypeError("Failed to fetch");
+  }) as typeof fetch;
+  const user = userEvent.setup({ document });
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
+  await user.click(screen.getByRole("button", { name: "开始竞品采集" }));
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://www.xiaohongshu.com/explore/test-note",
+  );
+  await user.click(screen.getByRole("button", { name: "抓取并分析" }));
+
+  await waitFor(() => {
+    assert.match(
+      screen.getByRole("alert").textContent ?? "",
+      /浏览器未能访问本机采集服务.*本地网络访问/,
+    );
+  });
+  assert.deepEqual(requestedUrls, ["http://127.0.0.1:8766/health"]);
+  assert.match(
+    screen.getByRole("status", { name: "竞品抓取进度" }).textContent ?? "",
+    /第 2\/4 步.*连接失败/,
+  );
+});
+
 type CompetitorReportRequest = {
   url: string;
   init?: RequestInit;
@@ -5121,6 +5209,9 @@ test("竞品洞察抓取并分析仅对抖音账号 Excel 自动生成证据包"
     const url = String(input);
     const body = init?.body ? JSON.parse(String(init.body)) : null;
     requests.push({ url, init, body });
+    if (url.endsWith("/health")) {
+      return Response.json({ ok: true, status: "ready" });
+    }
     if (url.endsWith("/scrape")) {
       return Response.json({
         ok: true,
@@ -5150,14 +5241,15 @@ test("竞品洞察抓取并分析仅对抖音账号 Excel 自动生成证据包"
   assert.deepEqual(
     requests.map(({ url }) => url),
     [
+      "http://127.0.0.1:8765/health",
       "http://127.0.0.1:8765/scrape",
       "http://127.0.0.1:8768/analyze-path",
     ],
   );
-  assert.deepEqual(requests[1]?.body, {
+  assert.deepEqual(requests[2]?.body, {
     path: "/controlled/douyin/account.xlsx",
   });
-  assert.equal(requests[1]?.init?.credentials, "omit");
+  assert.equal(requests[2]?.init?.credentials, "omit");
   assert.match(document.body.textContent ?? "", /证据包已生成/);
 });
 
@@ -5186,7 +5278,10 @@ test("竞品洞察抓取并分析对抖音作品只保留单作品完成提示",
   await waitFor(() =>
     assert.match(screen.getByRole("alert").textContent ?? "", /单作品抓取完成/),
   );
-  assert.deepEqual(requestedUrls, ["http://127.0.0.1:8765/scrape"]);
+  assert.deepEqual(requestedUrls, [
+    "http://127.0.0.1:8765/health",
+    "http://127.0.0.1:8765/scrape",
+  ]);
 });
 
 test("竞品洞察报告上传后按三批生成校验并只组装一次", async () => {
