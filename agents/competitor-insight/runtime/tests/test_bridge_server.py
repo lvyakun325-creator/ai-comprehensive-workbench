@@ -289,6 +289,89 @@ class BridgeServerTests(unittest.TestCase):
         )
         self.assertEqual(headers["access-control-allow-private-network"], "true")
 
+    def test_bundle_download_returns_zip_not_json(self) -> None:
+        payload = {
+            **self.task_payload(),
+            "inputKind": "account",
+        }
+        status, _headers, _body = self._json_request("POST", "/project-tasks", payload)
+        self.assertEqual(status, 200)
+        status, _headers, _body = self._json_request(
+            "PATCH", f"/project-tasks/{payload['id']}",
+            {"inputKind": "account", "category": "xhs-account"},
+        )
+        self.assertEqual(status, 200)
+        output = self.project_root / "outputs" / "competitor-insight" / "xiaohongshu" / payload["id"]
+        output.mkdir(parents=True)
+        report = output / "report.md"
+        report.write_text("# report\n", encoding="utf-8")
+        status, _headers, body = self._json_request(
+            "POST", f"/project-tasks/{payload['id']}/artifacts",
+            {"outputDir": str(output), "explicitPaths": [str(report)]},
+        )
+        self.assertEqual(status, 200)
+        status, _headers, body = self._json_request(
+            "POST", f"/project-tasks/{payload['id']}/bundle",
+            {
+                "platformId": "xiaohongshu", "inputKind": "account", "category": "xhs-account",
+                "outputDir": str(output), "primaryReportPath": str(report),
+                "explicitPaths": [str(report)], "subjectName": "测试账号", "itemCount": 1,
+            },
+        )
+        self.assertEqual(status, 200)
+        bundle_id = json.loads(body)["bundles"][0]["id"]
+
+        status, headers, body = self._request(
+            "GET", f"/project-bundles/{bundle_id}/download",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["content-type"], "application/zip")
+        self.assertTrue(body.startswith(b"PK"))
+        self.assertEqual(headers["access-control-allow-origin"], "http://localhost:3000")
+        self.assertEqual(headers["cache-control"], "no-store")
+
+        status, _headers, body = self._request(
+            "GET", f"/project-bundles/{bundle_id}/download",
+            headers={"Origin": "https://evil.example"},
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["error"], "ORIGIN_NOT_ALLOWED")
+
+        with patch.object(
+            project_records,
+            "reveal_bundle",
+            return_value={"ok": True, "bundleId": bundle_id},
+        ) as reveal:
+            status, _headers, body = self._json_request(
+                "POST", f"/project-bundles/{bundle_id}/reveal", {},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["bundleId"], bundle_id)
+        reveal.assert_called_once_with(bundle_id)
+
+        (output / f"{bundle_id}.zip").unlink()
+        status, _headers, body = self._request(
+            "GET", f"/project-bundles/{bundle_id}/download",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body)["error"], "BUNDLE_MISSING")
+
+        status, _headers, body = self._request(
+            "GET", "/project-bundles/../../private/download",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body)["error"], "NOT_FOUND")
+
+        status, _headers, body = self._request(
+            "GET", "/project-bundles/bundle-not-hex/download",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body)["error"], "NOT_FOUND")
+
     def test_rejects_oversized_request_before_parsing_json(self) -> None:
         self.handler_class.max_body_bytes = 64
         status, _headers, body = self._request(

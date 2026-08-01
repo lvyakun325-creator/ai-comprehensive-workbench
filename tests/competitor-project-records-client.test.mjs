@@ -3,8 +3,12 @@ import test from "node:test";
 import {
   CompetitorProjectRecordsClientError,
   createCompetitorTask,
+  downloadCompetitorBundle,
+  finalizeCompetitorBundle,
   loadCompetitorProjectRecords,
+  loadCompetitorBundleDetail,
   registerCompetitorArtifacts,
+  revealCompetitorBundle,
   revealCompetitorArtifact,
   updateCompetitorTask,
 } from "../app/lib/competitor-project-records-client.ts";
@@ -28,6 +32,9 @@ const TASK_FIXTURE = {
   stoppedAt: null,
   errorSummary: null,
   artifactIds: ["artifact-0000000000000001"],
+  inputKind: "account",
+  category: "xhs-account",
+  bundleId: "bundle-0000000000000001",
 };
 
 const ARTIFACT_FIXTURE = {
@@ -45,6 +52,25 @@ const ARTIFACT_FIXTURE = {
   exists: true,
   isDirectory: false,
   markdown: null,
+};
+
+const BUNDLE_FIXTURE = {
+  id: "bundle-0000000000000001",
+  agentId: "competitor-insight",
+  taskId: TASK_FIXTURE.id,
+  platformId: "xiaohongshu",
+  inputKind: "account",
+  category: "xhs-account",
+  subjectName: "测试账号",
+  itemCount: 1,
+  status: "ready",
+  rootDirectory: "/controlled/outputs/competitor-insight/xiaohongshu/run",
+  primaryReportPath: ARTIFACT_FIXTURE.absolutePath,
+  manifestPath: "/controlled/outputs/competitor-insight/xiaohongshu/run/bundle-0000000000000001.manifest.json",
+  archivePath: "/controlled/outputs/competitor-insight/xiaohongshu/run/bundle-0000000000000001.zip",
+  artifactIds: [ARTIFACT_FIXTURE.id],
+  createdAt: "2026-08-01T01:01:00.000Z",
+  updatedAt: "2026-08-01T01:02:00.000Z",
 };
 
 const jsonResponse = (body, init = {}) => new Response(JSON.stringify(body), {
@@ -78,6 +104,76 @@ test("loads a complete typed competitor snapshot", async (context) => {
   assert.equal(snapshot.tasks[0].sourceUrl, TASK_FIXTURE.sourceUrl);
   assert.equal(snapshot.results[0].kind, "excel");
   assert.equal(snapshot.results[0].absolutePath, ARTIFACT_FIXTURE.absolutePath);
+});
+
+test("parses one bundle with child artifact ids", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => jsonResponse({
+    ok: true,
+    tasks: [TASK_FIXTURE],
+    bundles: [BUNDLE_FIXTURE],
+    artifacts: [ARTIFACT_FIXTURE],
+  });
+
+  const snapshot = await loadCompetitorProjectRecords();
+
+  assert.equal(snapshot.bundles[0].category, "xhs-account");
+  assert.deepEqual(snapshot.bundles[0].artifactIds, [ARTIFACT_FIXTURE.id]);
+  assert.equal(snapshot.bundles[0].primaryArtifactId, ARTIFACT_FIXTURE.id);
+});
+
+test("finalizes loads reveals and safely downloads a bundle by id", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({url: String(url), init});
+    if (String(url).endsWith("/download")) {
+      return new Response(new Uint8Array([0x50, 0x4b, 3, 4]), {
+        status: 200,
+        headers: {
+          "content-type": "application/zip",
+          "content-length": "4",
+          "content-disposition": 'attachment; filename="bundle.zip"',
+        },
+      });
+    }
+    if (String(url).endsWith("/reveal")) return jsonResponse({ok: true, bundleId: BUNDLE_FIXTURE.id});
+    if (init?.method === "POST") return jsonResponse({ok: true, tasks: [TASK_FIXTURE], artifacts: [ARTIFACT_FIXTURE], bundles: [BUNDLE_FIXTURE]});
+    return jsonResponse({ok: true, bundle: BUNDLE_FIXTURE, task: TASK_FIXTURE, artifacts: [ARTIFACT_FIXTURE], markdown: "# preview", previewable: true});
+  };
+
+  const finalized = await finalizeCompetitorBundle(TASK_FIXTURE.id, {
+    platformId: "xiaohongshu", inputKind: "account", category: "xhs-account",
+    outputDir: BUNDLE_FIXTURE.rootDirectory, primaryReportPath: ARTIFACT_FIXTURE.absolutePath,
+    explicitPaths: [ARTIFACT_FIXTURE.absolutePath], subjectName: "测试账号", itemCount: 1,
+  });
+  const detail = await loadCompetitorBundleDetail(BUNDLE_FIXTURE.id);
+  const download = await downloadCompetitorBundle(BUNDLE_FIXTURE.id);
+  await revealCompetitorBundle(BUNDLE_FIXTURE.id);
+
+  assert.equal(finalized.bundle.id, BUNDLE_FIXTURE.id);
+  assert.equal(detail.markdown, "# preview");
+  assert.equal(download.filename, "bundle.zip");
+  assert.equal(await download.blob.text(), "PK\u0003\u0004");
+  assert.deepEqual(calls.map((call) => call.init?.method), ["POST", "GET", "GET", "POST"]);
+});
+
+test("rejects invalid bundle download media length and ZIP signature", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  for (const response of [
+    new Response("not zip", {status: 200, headers: {"content-type": "text/plain", "content-length": "7"}}),
+    new Response(new Uint8Array([0x50, 0x4b]), {status: 200, headers: {"content-type": "application/zip", "content-length": String(513 * 1024 * 1024)}}),
+    new Response(new Uint8Array([1, 2, 3, 4]), {status: 200, headers: {"content-type": "application/zip", "content-length": "4"}}),
+  ]) {
+    globalThis.fetch = async () => response.clone();
+    await assert.rejects(
+      downloadCompetitorBundle(BUNDLE_FIXTURE.id),
+      (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
+    );
+  }
 });
 
 test("creates updates and registers one task through exact bridge contracts", async (context) => {

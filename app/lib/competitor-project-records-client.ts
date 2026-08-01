@@ -1,4 +1,6 @@
 import type {
+  ProjectBundle,
+  ProjectBundleCategory,
   ProjectResult,
   ProjectResultKind,
   ProjectTask,
@@ -10,6 +12,8 @@ const RECORD_BRIDGE_ORIGIN = "http://127.0.0.1:8768";
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const TASK_ID = /^competitor-[0-9A-Za-z-]{4,120}$/u;
 const ARTIFACT_ID = /^artifact-[0-9a-f]{16}$/u;
+const BUNDLE_ID = /^bundle-[0-9a-f]{16}$/u;
+const MAX_BUNDLE_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 const TASK_STATUSES = new Set<TaskStatus>([
   "waiting",
   "running",
@@ -28,6 +32,7 @@ const ARTIFACT_KINDS = new Set<ProjectResultKind>([
 export type CompetitorProjectSnapshot = {
   tasks: readonly ProjectTask[];
   results: readonly ProjectResult[];
+  bundles: readonly ProjectBundle[];
 };
 
 export type CreateCompetitorTaskInput = {
@@ -51,6 +56,23 @@ export type RegisterCompetitorArtifactsInput = {
   explicitPaths: readonly string[];
 };
 
+export type FinalizeCompetitorBundleInput = {
+  platformId: "douyin" | "xiaohongshu";
+  inputKind: "account" | "content";
+  category: ProjectBundleCategory;
+  outputDir: string;
+  primaryReportPath: string;
+  explicitPaths: readonly string[];
+  subjectName: string;
+  itemCount: number;
+};
+
+export type CompetitorBundleDetail = {
+  bundle: ProjectBundle;
+  markdown: string | null;
+  previewable: boolean;
+};
+
 const SAFE_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
   ORIGIN_NOT_ALLOWED: "当前页面来源不能调用本地任务服务。",
   INVALID_REQUEST: "本地任务服务请求参数无效。",
@@ -58,6 +80,8 @@ const SAFE_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
   TASK_ALREADY_EXISTS: "任务已经存在，请刷新任务列表。",
   TASK_NOT_FOUND: "任务记录不存在，请刷新后重试。",
   ARTIFACT_NOT_FOUND: "成果记录不存在，请刷新后重试。",
+  BUNDLE_NOT_FOUND: "成果包记录不存在，请刷新后重试。",
+  BUNDLE_MISSING: "成果包文件已被移动或删除。",
   ARTIFACT_MISSING: "成果文件已被移动或删除。",
   PATH_NOT_ALLOWED: "成果路径不在受控目录中。",
   ARTIFACT_SCAN_FAILED: "成果目录扫描失败。",
@@ -143,6 +167,106 @@ export async function registerCompetitorArtifacts(
     }, signal),
   );
   return parseSnapshot(body);
+}
+
+export async function finalizeCompetitorBundle(
+  taskId: string,
+  input: FinalizeCompetitorBundleInput,
+  signal?: AbortSignal,
+): Promise<{snapshot: CompetitorProjectSnapshot; bundle: ProjectBundle}> {
+  assertTaskId(taskId);
+  const body = await requestBridge(
+    `/project-tasks/${taskId}/bundle`,
+    jsonRequest("POST", {
+      ...input,
+      explicitPaths: [...input.explicitPaths],
+    }, signal),
+  );
+  const snapshot = parseSnapshot(body);
+  const bundleId = snapshot.tasks.find((task) => task.id === taskId)?.bundleId;
+  const bundle = typeof bundleId === "string"
+    ? snapshot.bundles.find((item) => item.id === bundleId)
+    : undefined;
+  if (!bundle) throw invalidResponse();
+  return {snapshot, bundle};
+}
+
+export async function loadCompetitorBundleDetail(
+  bundleId: string,
+  signal?: AbortSignal,
+): Promise<CompetitorBundleDetail> {
+  assertBundleId(bundleId);
+  const body = await requestBridge(
+    `/project-bundles/${bundleId}`,
+    {method: "GET", signal},
+  );
+  const record = requireRecord(body);
+  if (
+    record.ok !== true
+    || !Array.isArray(record.artifacts)
+    || !isRecord(record.task)
+    || !isRecord(record.bundle)
+    || !(record.markdown === null || typeof record.markdown === "string")
+    || typeof record.previewable !== "boolean"
+  ) throw invalidResponse();
+  const task = parseTask(record.task);
+  const artifacts = record.artifacts.map(parseArtifact);
+  const bundle = parseBundle(record.bundle, task, artifacts);
+  if (bundle.id !== bundleId) throw invalidResponse();
+  return {bundle, markdown: record.markdown, previewable: record.previewable};
+}
+
+export async function downloadCompetitorBundle(
+  bundleId: string,
+  signal?: AbortSignal,
+): Promise<{filename: string; blob: Blob}> {
+  assertBundleId(bundleId);
+  let response: Response;
+  try {
+    response = await fetch(`${RECORD_BRIDGE_ORIGIN}/project-bundles/${bundleId}/download`, {
+      method: "GET", cache: "no-store", credentials: "omit", redirect: "error",
+      headers: {accept: "application/zip"}, signal,
+    });
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw abortError();
+    throw new CompetitorProjectRecordsClientError("BRIDGE_UNAVAILABLE", "无法连接本地任务服务，请确认 8768 服务已启动。");
+  }
+  if (!response.ok) {
+    const body = await readBoundedJson(response, signal);
+    const record = isRecord(body) ? body : {};
+    const code = typeof record.error === "string" ? record.error : "INTERNAL_ERROR";
+    throw new CompetitorProjectRecordsClientError(code, SAFE_MESSAGES[code] ?? SAFE_MESSAGES.INTERNAL_ERROR);
+  }
+  if (response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/zip") {
+    void response.body?.cancel().catch(() => undefined);
+    throw invalidResponse();
+  }
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (!Number.isSafeInteger(declaredLength) || declaredLength < 2 || declaredLength > MAX_BUNDLE_DOWNLOAD_BYTES) {
+    void response.body?.cancel().catch(() => undefined);
+    throw invalidResponse();
+  }
+  const bytes = await readBoundedBytes(response, MAX_BUNDLE_DOWNLOAD_BYTES, signal);
+  if (bytes.byteLength !== declaredLength || bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw invalidResponse();
+  return {
+    filename: safeZipFilename(response.headers.get("content-disposition"), bundleId),
+    blob: new Blob([
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+    ], {type: "application/zip"}),
+  };
+}
+
+export async function revealCompetitorBundle(
+  bundleId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  assertBundleId(bundleId);
+  const body = await requestBridge(
+    `/project-bundles/${bundleId}/reveal`,
+    jsonRequest("POST", {}, signal),
+  );
+  const record = requireRecord(body);
+  if (record.ok !== true || record.bundleId !== bundleId) throw invalidResponse();
 }
 
 export async function revealCompetitorArtifact(
@@ -261,12 +385,15 @@ async function readBoundedJson(
 
 function parseSnapshot(value: unknown): CompetitorProjectSnapshot {
   const record = requireRecord(value);
-  if (record.ok !== true || !Array.isArray(record.tasks) || !Array.isArray(record.artifacts)) {
+  if (record.ok !== true || !Array.isArray(record.tasks) || !Array.isArray(record.artifacts) || !(record.bundles === undefined || Array.isArray(record.bundles))) {
     throw invalidResponse();
   }
+  const tasks = record.tasks.map(parseTask);
+  const results = record.artifacts.map(parseArtifact);
   return {
-    tasks: record.tasks.map(parseTask),
-    results: record.artifacts.map(parseArtifact),
+    tasks,
+    results,
+    bundles: (record.bundles ?? []).map((item) => parseSnapshotBundle(item, tasks, results)),
   };
 }
 
@@ -298,6 +425,7 @@ function parseTask(value: unknown): ProjectTask {
     || !(task.errorSummary === null || typeof task.errorSummary === "string")
     || !Array.isArray(task.artifactIds)
     || !task.artifactIds.every((item) => typeof item === "string" && ARTIFACT_ID.test(item))
+    || !isTaskClassification(task)
   ) {
     throw invalidResponse();
   }
@@ -319,6 +447,67 @@ function parseTask(value: unknown): ProjectTask {
     stoppedAt: task.stoppedAt as string | null,
     errorSummary: task.errorSummary as string | null,
     artifactIds: task.artifactIds as string[],
+    ...(task.inputKind === undefined ? {} : {inputKind: task.inputKind as ProjectTask["inputKind"]}),
+    ...(task.category === undefined ? {} : {category: task.category as ProjectTask["category"]}),
+    ...(task.bundleId === undefined ? {} : {bundleId: task.bundleId as ProjectTask["bundleId"]}),
+  };
+}
+
+function parseSnapshotBundle(
+  value: unknown,
+  tasks: readonly ProjectTask[],
+  artifacts: readonly ProjectResult[],
+): ProjectBundle {
+  const raw = requireRecord(value);
+  const taskId = raw.taskId;
+  if (typeof taskId !== "string") throw invalidResponse();
+  const task = tasks.find((item) => item.id === taskId);
+  if (!task) throw invalidResponse();
+  return parseBundle(raw, task, artifacts);
+}
+
+function parseBundle(
+  value: Record<string, unknown>,
+  task: ProjectTask,
+  artifacts: readonly ProjectResult[],
+): ProjectBundle {
+  const status = value.status;
+  const inputKind = value.inputKind;
+  const category = value.category;
+  const artifactIds = value.artifactIds;
+  const primaryReportPath = value.primaryReportPath;
+  if (
+    typeof value.id !== "string" || !BUNDLE_ID.test(value.id)
+    || value.agentId !== "competitor-insight" || value.taskId !== task.id
+    || typeof value.platformId !== "string" || value.platformId !== task.platformId
+    || (inputKind !== "account" && inputKind !== "content")
+    || !isBundleCategory(value.platformId, inputKind, category)
+    || (status !== "ready" && status !== "missing" && status !== "legacy")
+    || typeof value.subjectName !== "string" || !value.subjectName
+    || !Number.isInteger(value.itemCount) || (value.itemCount as number) < 0
+    || typeof value.rootDirectory !== "string" || !value.rootDirectory.startsWith("/")
+    || !(primaryReportPath === null || typeof primaryReportPath === "string")
+    || !(value.manifestPath === null || typeof value.manifestPath === "string")
+    || !(value.archivePath === null || typeof value.archivePath === "string")
+    || !Array.isArray(artifactIds) || !artifactIds.every((item) => typeof item === "string" && ARTIFACT_ID.test(item))
+    || new Set(artifactIds).size !== artifactIds.length
+    || !isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt)
+    || task.bundleId !== value.id || task.status !== "completed"
+  ) throw invalidResponse();
+  const childArtifacts = artifacts.filter((item) => item.taskId === task.id && artifactIds.includes(item.id));
+  if (childArtifacts.length !== artifactIds.length) throw invalidResponse();
+  const primary = childArtifacts.find((item) => item.absolutePath === primaryReportPath);
+  return {
+    id: value.id, agentId: "competitor-insight", taskId: task.id,
+    platformId: task.platformId as string, platformLabel: task.platformLabel ?? "",
+    inputKind, category: category as ProjectBundleCategory, title: task.title,
+    subjectName: value.subjectName, sourceUrl: task.sourceUrl ?? "", status,
+    primaryArtifactId: primary?.id ?? null,
+    manifestPath: value.manifestPath as string | null,
+    archivePath: value.archivePath as string | null,
+    rootDirectory: value.rootDirectory, artifactIds: artifactIds as string[],
+    itemCount: value.itemCount as number, createdAt: value.createdAt,
+    completedAt: value.updatedAt,
   };
 }
 
@@ -396,8 +585,78 @@ function isSafeHttpUrl(value: unknown): value is string {
   }
 }
 
+function isTaskClassification(task: Record<string, unknown>): boolean {
+  if (task.inputKind === undefined && task.category === undefined && task.bundleId === undefined) return true;
+  if (
+    (task.inputKind !== "unknown" && task.inputKind !== "account" && task.inputKind !== "content")
+    || !(task.bundleId === null || (typeof task.bundleId === "string" && BUNDLE_ID.test(task.bundleId)))
+  ) return false;
+  if (task.inputKind === "unknown") return task.category === null;
+  return isBundleCategory(task.platformId, task.inputKind, task.category);
+}
+
+function isBundleCategory(
+  platformId: unknown,
+  inputKind: unknown,
+  category: unknown,
+): category is ProjectBundleCategory {
+  return (
+    (platformId === "douyin" && inputKind === "account" && category === "douyin-account")
+    || (platformId === "douyin" && inputKind === "content" && category === "douyin-content")
+    || (platformId === "xiaohongshu" && inputKind === "account" && category === "xhs-account")
+    || (platformId === "xiaohongshu" && inputKind === "content" && category === "xhs-note")
+  );
+}
+
 function assertTaskId(taskId: string): void {
   if (!TASK_ID.test(taskId)) throw invalidResponse();
+}
+
+function assertBundleId(bundleId: string): void {
+  if (!BUNDLE_ID.test(bundleId)) throw invalidResponse();
+}
+
+async function readBoundedBytes(
+  response: Response,
+  limit: number,
+  signal?: AbortSignal | null,
+): Promise<Uint8Array> {
+  if (!response.body) throw invalidResponse();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  const abortRead = () => { void reader.cancel().catch(() => undefined); };
+  if (signal?.aborted) throw abortError();
+  signal?.addEventListener("abort", abortRead, {once: true});
+  try {
+    while (true) {
+      if (signal?.aborted) throw abortError();
+      const {done, value} = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > limit) {
+        void reader.cancel().catch(() => undefined);
+        throw invalidResponse();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    signal?.removeEventListener("abort", abortRead);
+    try { reader.releaseLock(); } catch { /* closed streams need no cleanup */ }
+  }
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
+}
+
+function safeZipFilename(contentDisposition: string | null, bundleId: string): string {
+  const match = contentDisposition?.match(/filename="?([A-Za-z0-9._-]{1,128})"?/u);
+  const candidate = match?.[1];
+  return candidate?.toLowerCase().endsWith(".zip") ? candidate : `${bundleId}.zip`;
 }
 
 function isAbortError(error: unknown): boolean {
