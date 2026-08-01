@@ -1005,6 +1005,46 @@ test("竞品合法 URL 括号查询与片段不进入 DOM aria 或状态", async
   assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
 });
 
+test("竞品 URL 查询中的 ASCII 逗号不会将密钥后缀泄露到 DOM aria 或状态", async () => {
+  renderCompetitorBundleFixture({
+    title: "逗号 https://example.com/item?token=first,query-secret#fragment-secret",
+  });
+  const article = screen.getByRole("article", {
+    name: "逗号 https://example.com/item 成果包",
+  });
+
+  assert.ok(screen.getByRole("heading", {name: "逗号 https://example.com/item"}));
+  assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
+  await userEvent.setup({document}).click(
+    within(article).getByRole("button", {name: "展开明细"}),
+  );
+  assert.equal(
+    screen.getByRole("status", {name: "成果包界面状态"}).textContent,
+    "逗号 https://example.com/item明细已展开",
+  );
+  assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
+});
+
+test("竞品 URL 查询中的 ASCII 分号不会将密钥后缀泄露到 DOM aria 或状态", async () => {
+  renderCompetitorBundleFixture({
+    title: "分号 https://example.com/item?token=first;query-secret#fragment-secret",
+  });
+  const article = screen.getByRole("article", {
+    name: "分号 https://example.com/item 成果包",
+  });
+
+  assert.ok(screen.getByRole("heading", {name: "分号 https://example.com/item"}));
+  assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
+  await userEvent.setup({document}).click(
+    within(article).getByRole("button", {name: "展开明细"}),
+  );
+  assert.equal(
+    screen.getByRole("status", {name: "成果包界面状态"}).textContent,
+    "分号 https://example.com/item明细已展开",
+  );
+  assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
+});
+
 test("竞品 Authorization Bearer 凭据完整隐藏且保留后续正常中文", () => {
   renderCompetitorBundleFixture({
     subjectName: "作者 authorization: Bearer auth-secret，后续正常中文",

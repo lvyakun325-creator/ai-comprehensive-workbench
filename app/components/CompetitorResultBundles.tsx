@@ -53,7 +53,7 @@ const ARTIFACT_LABELS = {
 } as const;
 
 const URL_CONTEXT_BOUNDARIES = new Set([
-  "<", ">", "\"", "'", "`", ",", ";",
+  "<", ">", "\"", "'", "`",
   "，", "。", "；", "！", "？", "、",
 ]);
 const AUTHORIZATION_BEARER_ASSIGNMENT = /\bauthorization\b[ \t]*[:=][ \t]*bearer[ \t]+[^\s,，;；]+/giu;
