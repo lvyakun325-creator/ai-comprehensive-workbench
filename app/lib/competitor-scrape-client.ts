@@ -41,8 +41,26 @@ function isAbsoluteSafePath(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.startsWith("/") && !value.includes("\0");
 }
 
-function hasTaskOutputPath(value: string, outputDir: string): boolean {
-  return value === outputDir || value.startsWith(`${outputDir}/`);
+function normalizeAbsolutePath(value: unknown): string | null {
+  if (!isAbsoluteSafePath(value)) return null;
+  const segments: string[] = [];
+  for (const segment of value.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      if (!segments.length) return null;
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  return `/${segments.join("/")}`;
+}
+
+function isStrictTaskDescendant(path: string, outputDir: string): boolean {
+  const pathSegments = path.split("/").filter(Boolean);
+  const outputSegments = outputDir.split("/").filter(Boolean);
+  return pathSegments.length > outputSegments.length
+    && outputSegments.every((segment, index) => pathSegments[index] === segment);
 }
 
 function expectedCategory(platformId: CompetitorPlatformId, inputKind: CompetitorInputKind): CompetitorBundleCategory {
@@ -68,17 +86,22 @@ function parseReadyResponse(payload: unknown, route: CompetitorPlatformRoute, ta
   if (value.category !== expectedCategory(route.id, inputKind)) {
     throw new ScrapeClientError("SCRAPE_RESPONSE_INVALID", "抓取服务返回的成果分类无效，请重试。");
   }
-  const outputDir = value.outputDir;
-  if (!isAbsoluteSafePath(outputDir) || outputDir.split("/").at(-1) !== taskId) {
+  const outputDir = normalizeAbsolutePath(value.outputDir);
+  if (!outputDir || outputDir.split("/").at(-1) !== taskId) {
     throw new ScrapeClientError("SCRAPE_RESPONSE_INVALID", "抓取服务返回的任务目录无效，请重试。");
   }
-  const dataPath = value.dataPath;
-  const optionalPaths = [value.excelPath, value.markdownPath, value.imageDirectory];
-  if (!isAbsoluteSafePath(dataPath) || !hasTaskOutputPath(dataPath, outputDir)
-    || optionalPaths.some((path) => path !== null && (!isAbsoluteSafePath(path) || !hasTaskOutputPath(path, outputDir)))
-    || !Array.isArray(value.explicitPaths) || value.explicitPaths.length === 0
-    || value.explicitPaths.some((path) => !isAbsoluteSafePath(path) || !hasTaskOutputPath(path, outputDir))
-    || !value.explicitPaths.includes(dataPath)) {
+  const dataPath = normalizeAbsolutePath(value.dataPath);
+  const excelPath = value.excelPath === null ? null : normalizeAbsolutePath(value.excelPath);
+  const markdownPath = value.markdownPath === null ? null : normalizeAbsolutePath(value.markdownPath);
+  const imageDirectory = value.imageDirectory === null ? null : normalizeAbsolutePath(value.imageDirectory);
+  const explicitPaths = Array.isArray(value.explicitPaths)
+    ? value.explicitPaths.map(normalizeAbsolutePath)
+    : null;
+  if (!dataPath || !isStrictTaskDescendant(dataPath, outputDir)
+    || (value.excelPath !== null && !excelPath) || (value.markdownPath !== null && !markdownPath) || (value.imageDirectory !== null && !imageDirectory)
+    || [excelPath, markdownPath, imageDirectory].some((path) => path !== null && !isStrictTaskDescendant(path, outputDir))
+    || !explicitPaths || explicitPaths.length === 0 || explicitPaths.some((path) => !path || !isStrictTaskDescendant(path, outputDir))
+    || !explicitPaths.includes(dataPath)) {
     throw new ScrapeClientError("SCRAPE_RESPONSE_INVALID", "抓取服务返回的成果路径无效，请重试。");
   }
   const itemCount = value.itemCount;
@@ -86,7 +109,20 @@ function parseReadyResponse(payload: unknown, route: CompetitorPlatformRoute, ta
     || typeof itemCount !== "number" || !Number.isSafeInteger(itemCount) || itemCount < 0) {
     throw new ScrapeClientError("SCRAPE_RESPONSE_INVALID", "抓取服务返回的成果信息无效，请重试。");
   }
-  return value as ScrapeReadyResponse;
+  return {
+    platformId: route.id,
+    skillId: route.skillId as ScrapeReadyResponse["skillId"],
+    inputKind,
+    category: value.category as CompetitorBundleCategory,
+    outputDir,
+    dataPath,
+    excelPath,
+    markdownPath,
+    imageDirectory,
+    explicitPaths: explicitPaths as string[],
+    subjectName: value.subjectName.trim(),
+    itemCount,
+  };
 }
 
 async function fetchJson(url: string, options: RequestInit, errorCode: ScrapeClientErrorCode, message: string): Promise<unknown> {

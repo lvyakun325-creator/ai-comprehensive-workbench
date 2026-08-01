@@ -3,6 +3,55 @@ import http from "node:http";
 import test from "node:test";
 import { scrapeCompetitorLink } from "../app/lib/competitor-scrape-client.ts";
 
+function validDouyinBundle() {
+  return {
+    platformId: "douyin",
+    skillId: "douyin-scraper",
+    inputKind: "account",
+    category: "douyin-account",
+    outputDir: "/tmp/competitor-20260801-a1",
+    dataPath: "/tmp/competitor-20260801-a1/structured.json",
+    excelPath: "/tmp/competitor-20260801-a1/account.xlsx",
+    markdownPath: "/tmp/competitor-20260801-a1/account.md",
+    imageDirectory: "/tmp/competitor-20260801-a1/images",
+    explicitPaths: [
+      "/tmp/competitor-20260801-a1/structured.json",
+      "/tmp/competitor-20260801-a1/account.xlsx",
+      "/tmp/competitor-20260801-a1/account.md",
+      "/tmp/competitor-20260801-a1/images",
+    ],
+    subjectName: "测试账号",
+    itemCount: 1,
+  };
+}
+
+async function startBridge(t, payload) {
+  const server = http.createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/health") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ ok: true, status: "ready" }));
+      return;
+    }
+    if (request.method === "POST" && request.url === "/scrape") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(payload));
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  return {
+    id: "douyin",
+    label: "抖音",
+    skillId: "douyin-scraper",
+    status: "ready",
+    bridgeUrl: `http://127.0.0.1:${address.port}`,
+    hosts: ["douyin.com"],
+  };
+}
+
 test("posts taskId and rejects a mismatched platform response", async (t) => {
   let scrapeRequest;
   const server = http.createServer((request, response) => {
@@ -70,3 +119,37 @@ test("posts taskId and rejects a mismatched platform response", async (t) => {
     taskId: "competitor-20260801-a1",
   });
 });
+
+for (const [pathField, escapingPath] of [
+  ["dataPath", "/tmp/competitor-20260801-a1/../outside.json"],
+  ["excelPath", "/tmp/competitor-20260801-a1/../outside.xlsx"],
+  ["markdownPath", "/tmp/competitor-20260801-a1/../outside.md"],
+  ["imageDirectory", "/tmp/competitor-20260801-a1/../outside-images"],
+  ["explicitPaths", [
+    "/tmp/competitor-20260801-a1/structured.json",
+    "/tmp/competitor-20260801-a1/../outside.json",
+  ]],
+]) {
+  test(`rejects an escaping ${pathField} path`, async (t) => {
+    const bundle = { ...validDouyinBundle(), [pathField]: escapingPath };
+    if (pathField === "dataPath") {
+      bundle.explicitPaths = [
+        escapingPath,
+        "/tmp/competitor-20260801-a1/account.xlsx",
+        "/tmp/competitor-20260801-a1/account.md",
+        "/tmp/competitor-20260801-a1/images",
+      ];
+    }
+    const route = await startBridge(t, bundle);
+
+    await assert.rejects(
+      scrapeCompetitorLink(
+        route,
+        "https://www.douyin.com/user/a",
+        "competitor-20260801-a1",
+        AbortSignal.timeout(1_000),
+      ),
+      (error) => error.code === "SCRAPE_RESPONSE_INVALID",
+    );
+  });
+}
