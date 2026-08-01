@@ -233,7 +233,7 @@ export async function downloadCompetitorBundle(
     throw new CompetitorProjectRecordsClientError("BRIDGE_UNAVAILABLE", "无法连接本地任务服务，请确认 8768 服务已启动。");
   }
   if (!response.ok) {
-    const body = await readBoundedJson(response, signal);
+    const body = await readBoundedDownloadErrorJson(response, signal);
     const record = isRecord(body) ? body : {};
     const code = stableErrorCode(record.error);
     throw new CompetitorProjectRecordsClientError(code, SAFE_MESSAGES[code] ?? SAFE_MESSAGES.INTERNAL_ERROR);
@@ -395,9 +395,29 @@ function parseSnapshot(value: unknown): CompetitorProjectSnapshot {
     tasks,
     results,
     bundles: (record.bundles ?? []).flatMap((item) =>
-      isCompatibleLegacyBundle(item) ? [] : [parseSnapshotBundle(item, tasks, results)],
+      isCompatibleLegacyBundle(item, tasks, results) ? [] : [parseSnapshotBundle(item, tasks, results)],
     ),
   };
+}
+
+async function readBoundedDownloadErrorJson(
+  response: Response,
+  signal?: AbortSignal | null,
+): Promise<unknown> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    void response.body?.cancel().catch(() => undefined);
+    if (signal?.aborted) throw abortError();
+    throw responseTooLarge();
+  }
+  const bytes = await readBoundedBytes(response, MAX_RESPONSE_BYTES, signal);
+  if (signal?.aborted) throw abortError();
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    if (signal?.aborted) throw abortError();
+    throw invalidResponse();
+  }
 }
 
 function parseTask(value: unknown): ProjectTask {
@@ -671,11 +691,79 @@ function safeZipFilename(contentDisposition: string | null, bundleId: string): s
   return candidate?.toLowerCase().endsWith(".zip") ? candidate : `${bundleId}.zip`;
 }
 
-function isCompatibleLegacyBundle(value: unknown): boolean {
-  return isRecord(value)
-    && value.status === "legacy"
-    && value.inputKind === "unknown"
-    && value.category === null;
+function isCompatibleLegacyBundle(
+  value: unknown,
+  tasks: readonly ProjectTask[],
+  artifacts: readonly ProjectResult[],
+): boolean {
+  if (!isRecord(value) || !hasExactFields(value, LEGACY_BUNDLE_FIELDS)) return false;
+  const task = typeof value.taskId === "string"
+    ? tasks.find((item) => item.id === value.taskId)
+    : undefined;
+  if (!task || !Array.isArray(value.artifactIds) || !Array.isArray(task.artifactIds) || typeof value.rootDirectory !== "string") {
+    return false;
+  }
+  const artifactIds = value.artifactIds;
+  const taskArtifactIds = task.artifactIds;
+  const rootDirectory = value.rootDirectory;
+  if (
+    value.id === undefined || typeof value.id !== "string" || !BUNDLE_ID.test(value.id)
+    || value.agentId !== "competitor-insight" || value.taskId !== task.id
+    || value.platformId !== task.platformId || (value.platformId !== "douyin" && value.platformId !== "xiaohongshu")
+    || value.inputKind !== "unknown" || value.category !== null || value.status !== "legacy"
+    || task.agentId !== "competitor-insight" || task.status !== "completed"
+    || task.inputKind !== "unknown" || task.category !== null || task.bundleId !== value.id
+    || value.subjectName !== task.title || value.itemCount !== 0
+    || !isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt) || value.createdAt !== task.completedAt
+    || value.manifestSha256 !== null || value.archiveSha256 !== null || value.memberIdentitySha256 !== null
+    || !isLegacyBundlePaths(value, task)
+    || artifactIds.length === 0
+    || !artifactIds.every((item) => typeof item === "string" && ARTIFACT_ID.test(item))
+    || new Set(artifactIds).size !== artifactIds.length
+    || artifactIds.length !== taskArtifactIds.length
+    || !artifactIds.every((item) => taskArtifactIds.includes(item))
+  ) return false;
+  const legacyArtifacts = artifacts.filter((item) => artifactIds.includes(item.id));
+  return legacyArtifacts.length === artifactIds.length
+    && legacyArtifacts.some((item) => item.absolutePath === value.primaryReportPath)
+    && legacyArtifacts.every((item) => item.agentId === "competitor-insight"
+      && item.taskId === task.id
+      && typeof item.absolutePath === "string"
+      && isLegacyBundleMemberPath(item.absolutePath, rootDirectory));
+}
+
+const LEGACY_BUNDLE_FIELDS = new Set([
+  "id", "agentId", "taskId", "platformId", "inputKind", "category", "subjectName",
+  "itemCount", "status", "rootDirectory", "primaryReportPath", "manifestPath", "archivePath",
+  "artifactIds", "manifestSha256", "archiveSha256", "memberIdentitySha256", "createdAt", "updatedAt",
+]);
+
+function hasExactFields(value: Record<string, unknown>, fields: ReadonlySet<string>): boolean {
+  const keys = Object.keys(value);
+  return keys.length === fields.size && keys.every((key) => fields.has(key));
+}
+
+function isLegacyBundlePaths(value: Record<string, unknown>, task: ProjectTask): boolean {
+  if (typeof value.rootDirectory !== "string" || typeof value.id !== "string") return false;
+  const root = value.rootDirectory;
+  const expectedSuffix = `/outputs/competitor-insight/${task.platformId}/${task.id}`;
+  return isCleanAbsolutePath(root)
+    && root.endsWith(expectedSuffix)
+    && value.manifestPath === `${root}/${value.id}.manifest.json`
+    && value.archivePath === `${root}/${value.id}.zip`
+    && typeof value.primaryReportPath === "string"
+    && value.primaryReportPath.endsWith(".md")
+    && isLegacyBundleMemberPath(value.primaryReportPath, root);
+}
+
+function isLegacyBundleMemberPath(value: string, root: string): boolean {
+  return isCleanAbsolutePath(value) && value.startsWith(`${root}/`);
+}
+
+function isCleanAbsolutePath(value: string): boolean {
+  return value.startsWith("/")
+    && !value.includes("\0")
+    && value.split("/").slice(1).every((part) => part !== "" && part !== "." && part !== "..");
 }
 
 function stableErrorCode(value: unknown): string {

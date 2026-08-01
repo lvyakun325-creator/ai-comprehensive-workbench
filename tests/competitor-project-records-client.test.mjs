@@ -73,6 +73,35 @@ const BUNDLE_FIXTURE = {
   updatedAt: "2026-08-01T01:02:00.000Z",
 };
 
+const LEGACY_ROOT = `/controlled/outputs/competitor-insight/xiaohongshu/${TASK_FIXTURE.id}`;
+const LEGACY_ARTIFACT_FIXTURE = {
+  ...ARTIFACT_FIXTURE,
+  absolutePath: `${LEGACY_ROOT}/report.md`,
+  filename: "report.md",
+  name: "report.md",
+};
+const LEGACY_BUNDLE_FIXTURE = {
+  id: BUNDLE_FIXTURE.id,
+  agentId: "competitor-insight",
+  taskId: TASK_FIXTURE.id,
+  platformId: "xiaohongshu",
+  inputKind: "unknown",
+  category: null,
+  subjectName: TASK_FIXTURE.title,
+  itemCount: 0,
+  status: "legacy",
+  rootDirectory: LEGACY_ROOT,
+  primaryReportPath: LEGACY_ARTIFACT_FIXTURE.absolutePath,
+  manifestPath: `${LEGACY_ROOT}/${BUNDLE_FIXTURE.id}.manifest.json`,
+  archivePath: `${LEGACY_ROOT}/${BUNDLE_FIXTURE.id}.zip`,
+  artifactIds: [LEGACY_ARTIFACT_FIXTURE.id],
+  manifestSha256: null,
+  archiveSha256: null,
+  memberIdentitySha256: null,
+  createdAt: TASK_FIXTURE.completedAt,
+  updatedAt: TASK_FIXTURE.updatedAt,
+};
+
 const jsonResponse = (body, init = {}) => new Response(JSON.stringify(body), {
   status: init.status ?? 200,
   headers: {
@@ -129,8 +158,8 @@ test("keeps v1 legacy bundles from rejecting compatible task and artifact snapsh
   globalThis.fetch = async () => jsonResponse({
     ok: true,
     tasks: [{...TASK_FIXTURE, inputKind: "unknown", category: null}],
-    artifacts: [ARTIFACT_FIXTURE],
-    bundles: [{...BUNDLE_FIXTURE, inputKind: "unknown", category: null, status: "legacy"}],
+    artifacts: [LEGACY_ARTIFACT_FIXTURE],
+    bundles: [LEGACY_BUNDLE_FIXTURE],
   });
 
   const snapshot = await loadCompetitorProjectRecords();
@@ -138,6 +167,72 @@ test("keeps v1 legacy bundles from rejecting compatible task and artifact snapsh
   assert.equal(snapshot.tasks[0].id, TASK_FIXTURE.id);
   assert.equal(snapshot.results[0].id, ARTIFACT_FIXTURE.id);
   assert.deepEqual(snapshot.bundles, []);
+});
+
+test("rejects every missing or unexpected field in a legacy bundle", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const base = {
+    ok: true,
+    tasks: [{...TASK_FIXTURE, inputKind: "unknown", category: null}],
+    artifacts: [LEGACY_ARTIFACT_FIXTURE],
+  };
+
+  for (const field of Object.keys(LEGACY_BUNDLE_FIXTURE)) {
+    const malformed = {...LEGACY_BUNDLE_FIXTURE};
+    delete malformed[field];
+    globalThis.fetch = async () => jsonResponse({...base, bundles: [malformed]});
+    await assert.rejects(
+      loadCompetitorProjectRecords(),
+      (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
+      `missing legacy field ${field}`,
+    );
+  }
+  globalThis.fetch = async () => jsonResponse({
+    ...base,
+    bundles: [{...LEGACY_BUNDLE_FIXTURE, unexpected: "not-a-task5-field"}],
+  });
+  await assert.rejects(
+    loadCompetitorProjectRecords(),
+    (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
+  );
+});
+
+test("rejects legacy bundles with broken task artifact or controlled-path relations", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const task = {...TASK_FIXTURE, inputKind: "unknown", category: null};
+  const cases = [
+    {name: "bundle id", bundle: {...LEGACY_BUNDLE_FIXTURE, id: "bundle-invalid"}},
+    {name: "agent", bundle: {...LEGACY_BUNDLE_FIXTURE, agentId: "other-agent"}},
+    {name: "task", bundle: {...LEGACY_BUNDLE_FIXTURE, taskId: "competitor-20260801-client-z9"}},
+    {name: "platform", bundle: {...LEGACY_BUNDLE_FIXTURE, platformId: "douyin"}},
+    {name: "root", bundle: {...LEGACY_BUNDLE_FIXTURE, rootDirectory: "/tmp/uncontrolled"}},
+    {name: "primary report", bundle: {...LEGACY_BUNDLE_FIXTURE, primaryReportPath: `${LEGACY_ROOT}/outside.txt`}},
+    {name: "primary report artifact membership", bundle: {...LEGACY_BUNDLE_FIXTURE, primaryReportPath: `${LEGACY_ROOT}/not-an-artifact.md`}},
+    {name: "manifest", bundle: {...LEGACY_BUNDLE_FIXTURE, manifestPath: `${LEGACY_ROOT}/not-the-bundle.json`}},
+    {name: "archive", bundle: {...LEGACY_BUNDLE_FIXTURE, archivePath: `${LEGACY_ROOT}/not-the-bundle.zip`}},
+    {name: "artifact ids", bundle: {...LEGACY_BUNDLE_FIXTURE, artifactIds: ["artifact-0000000000000002"]}},
+  ];
+  for (const {name, bundle} of cases) {
+    globalThis.fetch = async () => jsonResponse({ok: true, tasks: [task], artifacts: [LEGACY_ARTIFACT_FIXTURE], bundles: [bundle]});
+    await assert.rejects(
+      loadCompetitorProjectRecords(),
+      (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
+      `broken legacy ${name}`,
+    );
+  }
+  globalThis.fetch = async () => jsonResponse({
+    ok: true,
+    tasks: [{...task, bundleId: "bundle-0000000000000002"}],
+    artifacts: [LEGACY_ARTIFACT_FIXTURE],
+    bundles: [LEGACY_BUNDLE_FIXTURE],
+  });
+  await assert.rejects(
+    loadCompetitorProjectRecords(),
+    (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
+    "broken legacy task bundle reverse relation",
+  );
 });
 
 test("finalizes loads reveals and safely downloads a bundle by id", async (context) => {
@@ -217,6 +312,47 @@ test("normalizes unknown download errors and stalled ZIP aborts", async (context
   controller.abort();
   await assert.rejects(pending, (error) => error instanceof DOMException && error.name === "AbortError");
   assert.equal(canceled, true);
+});
+
+test("normalizes non-2xx error-body aborts during done, read rejection, and cancel rejection", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const partialError = new TextEncoder().encode('{"error":"');
+  const scenarios = [
+    {
+      name: "done after cancel",
+      makeBody: () => new ReadableStream({start(controller) { controller.enqueue(partialError); }}),
+    },
+    {
+      name: "read rejection after cancel",
+      makeBody: () => new ReadableStream({
+        start(controller) { controller.enqueue(partialError); },
+        cancel() { throw new Error("reader rejected while aborting"); },
+      }),
+    },
+    {
+      name: "cancel rejection",
+      makeBody: () => new ReadableStream({
+        start(controller) { controller.enqueue(partialError); },
+        cancel() { return Promise.reject(new Error("cancel rejected")); },
+      }),
+    },
+  ];
+  for (const {name, makeBody} of scenarios) {
+    globalThis.fetch = async () => new Response(makeBody(), {
+      status: 500,
+      headers: {"content-type": "application/json"},
+    });
+    const controller = new AbortController();
+    const pending = downloadCompetitorBundle(BUNDLE_FIXTURE.id, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort();
+    await assert.rejects(
+      pending,
+      (error) => error instanceof DOMException && error.name === "AbortError",
+      `non-2xx ${name}`,
+    );
+  }
 });
 
 test("cancels a genuinely oversized streamed ZIP body without allocating 512 MiB", async (context) => {
