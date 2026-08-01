@@ -9,6 +9,7 @@ import {
 import {
   CompetitorReportRunner,
   type CompetitorAnalysisRequest,
+  type PreEvidenceTerminationReason,
   type ReportWorkflowStage,
 } from "./CompetitorReportRunner";
 import {
@@ -17,6 +18,7 @@ import {
   finalizeCompetitorBundle,
   registerCompetitorArtifacts,
   updateCompetitorTask,
+  type CompetitorTaskPatch,
 } from "../lib/competitor-project-records-client";
 import {
   scrapeCompetitorLink,
@@ -36,6 +38,12 @@ type CompetitorInsightPanelProps = {
 type PendingAnalysis = {
   taskId: string;
   scrape: ScrapeReadyResponse;
+  epoch: number;
+};
+
+type AnalysisTaskPatch = CompetitorTaskPatch & {
+  inputKind?: "account" | "content";
+  category?: CompetitorBundleCategory;
 };
 
 const WORKFLOW = [
@@ -115,8 +123,10 @@ export function CompetitorInsightPanel({
   const [lastActivePhase, setLastActivePhase] = useState<AnalysisPhase>("idle");
   const [analysisRequest, setAnalysisRequest] =
     useState<CompetitorAnalysisRequest | null>(null);
+  const [isTaskStateSettling, setIsTaskStateSettling] = useState(false);
   const pendingAnalysisRef = useRef<PendingAnalysis | null>(null);
-  const reportFailedRef = useRef(false);
+  const runEpochRef = useRef(0);
+  const taskWriteTailsRef = useRef(new Map<string, Promise<void>>());
   const detection = useMemo(() => detectCompetitorPlatform(source), [source]);
   const platformReady = detection.kind === "ready";
   const workflowStepStatuses = getWorkflowStepStatuses(
@@ -137,57 +147,129 @@ export function CompetitorInsightPanel({
     setAnalysisMessage(message);
   };
 
-  const failPersistedTask = async (taskId: string | null, errorSummary: string) => {
-    if (!taskId) return;
+  const isCurrentPending = (pending: PendingAnalysis) =>
+    runEpochRef.current === pending.epoch
+    && pendingAnalysisRef.current?.epoch === pending.epoch
+    && pendingAnalysisRef.current.taskId === pending.taskId;
+
+  const writeTaskState = async (taskId: string, patch: AnalysisTaskPatch) => {
+    const previous = taskWriteTailsRef.current.get(taskId) ?? Promise.resolve();
+    const write = previous.catch(() => undefined).then(async () => {
+      await updateCompetitorTask(taskId, patch);
+    });
+    const tail = write.then(() => undefined, () => undefined);
+    taskWriteTailsRef.current.set(taskId, tail);
     try {
-      await updateCompetitorTask(taskId, {status: "failed", errorSummary});
-      onRecordsChanged?.();
-    } catch {
-      // Preserve the original safe error as the primary user-facing failure.
+      await write;
+    } finally {
+      if (taskWriteTailsRef.current.get(taskId) === tail) {
+        taskWriteTailsRef.current.delete(taskId);
+      }
     }
   };
 
-  const failAnalysis = async (taskId: string | null, message: string) => {
-    reportFailedRef.current = true;
-    setIsDispatching(false);
-    moveToPhase("failed", message);
-    await failPersistedTask(taskId, message);
+  const failPersistedTask = async (taskId: string | null, errorSummary: string) => {
+    if (!taskId) return;
+    await writeTaskState(taskId, {status: "failed", errorSummary});
+    onRecordsChanged?.();
+  };
+
+  const failAnalysis = async (
+    taskId: string | null,
+    message: string,
+    epoch = runEpochRef.current,
+    clearPending = false,
+  ) => {
+    if (epoch !== runEpochRef.current) return;
+    if (!taskId) {
+      setIsDispatching(false);
+      moveToPhase("failed", message);
+      return;
+    }
+    setIsTaskStateSettling(true);
+    setIsDispatching(true);
+    moveToPhase("failed", `${message} 正在同步失败状态…`);
+    try {
+      await failPersistedTask(taskId, message);
+      if (epoch !== runEpochRef.current) return;
+      if (clearPending && pendingAnalysisRef.current?.epoch === epoch) {
+        pendingAnalysisRef.current = null;
+      }
+      setIsTaskStateSettling(false);
+      setIsDispatching(false);
+      moveToPhase("failed", message);
+    } catch {
+      if (epoch !== runEpochRef.current) return;
+      setIsTaskStateSettling(true);
+      setIsDispatching(false);
+      moveToPhase("failed", `${message} 任务终态同步失败，请检查本地任务服务。`);
+    }
   };
 
   const handleReportStageChange = (stage: ReportWorkflowStage, message: string) => {
-    const pending = pendingAnalysisRef.current;
     const nextPhase: AnalysisPhase = stage === "normalizing" ? "normalizing" : "generating";
     setIsDispatching(true);
     moveToPhase(nextPhase, message);
-    if (reportFailedRef.current && pending) {
-      reportFailedRef.current = false;
-      void updateCompetitorTask(pending.taskId, {
+  };
+
+  const preparePendingRetry = async (): Promise<boolean> => {
+    const pending = pendingAnalysisRef.current;
+    if (!pending || !isCurrentPending(pending) || isTaskStateSettling) return false;
+    setIsTaskStateSettling(true);
+    setIsDispatching(true);
+    moveToPhase("generating", "正在恢复任务状态，完成后继续生成报告…");
+    try {
+      await writeTaskState(pending.taskId, {
         status: "running",
-        progress: stage === "normalizing" ? 50 : 70,
-        currentStep: message,
+        progress: 70,
+        currentStep: "任务状态已恢复，继续生成洞察报告",
         errorSummary: null,
-      }).then(() => onRecordsChanged?.()).catch(() => undefined);
+      });
+      if (!isCurrentPending(pending)) return false;
+      setIsTaskStateSettling(false);
+      onRecordsChanged?.();
+      return true;
+    } catch {
+      if (!isCurrentPending(pending)) return false;
+      setIsTaskStateSettling(true);
+      setIsDispatching(false);
+      moveToPhase("failed", "任务状态恢复失败，请检查本地任务服务后重试。");
+      return false;
     }
+  };
+
+  const terminatePreEvidence = async (
+    reason: PreEvidenceTerminationReason,
+    message: string,
+  ) => {
+    const pending = pendingAnalysisRef.current;
+    if (!pending || !isCurrentPending(pending)) return;
+    const safeMessage = reason === "stopped"
+      ? "竞品分析已停止，未生成证据包。"
+      : message;
+    await failAnalysis(pending.taskId, safeMessage, pending.epoch, true);
   };
 
   const pausePendingReport = async () => {
     const pending = pendingAnalysisRef.current;
-    if (!pending) return;
+    if (!pending || !isCurrentPending(pending)) return;
     try {
-      await updateCompetitorTask(pending.taskId, {
+      await writeTaskState(pending.taskId, {
         status: "running",
         progress: 70,
         currentStep: "证据包已生成，等待配置模型",
       });
+      if (!isCurrentPending(pending)) return;
       onRecordsChanged?.();
     } catch {
+      if (!isCurrentPending(pending)) return;
       setAnalysisMessage("证据包已生成，但任务状态同步失败，请检查本地任务服务。");
     }
   };
 
   const completePendingReport = async (report: ReportReadyResponse) => {
     const pending = pendingAnalysisRef.current;
-    if (!pending) return;
+    if (!pending || !isCurrentPending(pending)) return;
     const {taskId, scrape} = pending;
     const explicitPaths = Array.from(new Set([...scrape.explicitPaths, report.reportPath]));
     moveToPhase("bundling", "报告已生成，正在登记内部产物并封装成果包…");
@@ -196,6 +278,7 @@ export function CompetitorInsightPanel({
         outputDir: scrape.outputDir,
         explicitPaths,
       });
+      if (!isCurrentPending(pending)) return;
       onRecordsChanged?.();
       const finalized = await finalizeCompetitorBundle(taskId, {
         platformId: scrape.platformId,
@@ -207,18 +290,23 @@ export function CompetitorInsightPanel({
         subjectName: scrape.subjectName,
         itemCount: scrape.itemCount,
       });
+      if (!isCurrentPending(pending)) return;
       if (finalized.bundle.status !== "ready") {
         throw new Error("bundle_not_ready");
       }
       pendingAnalysisRef.current = null;
-      reportFailedRef.current = false;
+      setIsTaskStateSettling(false);
       setIsDispatching(false);
       moveToPhase("completed", "成果包已就绪，可在成果页查看。");
       onRecordsChanged?.();
       onPreview("竞品洞察成果包已就绪");
       onTaskCompleted?.(taskId, finalized.bundle.id);
     } catch {
-      await failAnalysis(taskId, "报告已生成，但成果登记或封装失败，请检查本地任务服务。");
+      await failAnalysis(
+        taskId,
+        "报告已生成，但成果登记或封装失败，请检查本地任务服务。",
+        pending.epoch,
+      );
     }
   };
 
@@ -239,9 +327,12 @@ export function CompetitorInsightPanel({
     }
 
     const routeMessage = `已自动路由：${detection.platformLabel} → ${detection.skillId}`;
+    const epoch = runEpochRef.current + 1;
+    runEpochRef.current = epoch;
     let taskId: string | null = null;
     setIsDispatching(true);
-    reportFailedRef.current = false;
+    setIsTaskStateSettling(false);
+    pendingAnalysisRef.current = null;
     moveToPhase("connecting", `${routeMessage}。正在创建可追踪任务…`);
     try {
       const createdTask = await createCompetitorTask({
@@ -268,9 +359,10 @@ export function CompetitorInsightPanel({
         inputKind: scrape.inputKind,
         category: scrape.category as CompetitorBundleCategory,
       };
-      await updateCompetitorTask(taskId, authoritativePatch);
+      await writeTaskState(taskId, authoritativePatch);
+      if (epoch !== runEpochRef.current) return;
       onRecordsChanged?.();
-      pendingAnalysisRef.current = {taskId, scrape};
+      pendingAnalysisRef.current = {taskId, scrape, epoch};
       setAnalysisRequest((current) => ({
         requestId: (current?.requestId ?? 0) + 1,
         taskId: createdTask.id,
@@ -282,7 +374,7 @@ export function CompetitorInsightPanel({
       }));
       moveToPhase("normalizing", "抓取完成，正在整理账号或作品数据…");
     } catch (error) {
-      await failAnalysis(taskId, safeAnalysisError(error));
+      await failAnalysis(taskId, safeAnalysisError(error), epoch, true);
     }
   };
 
@@ -380,10 +472,22 @@ export function CompetitorInsightPanel({
           </form>
           <CompetitorReportRunner
             analysisRequest={analysisRequest}
+            onBeforeRetry={preparePendingRetry}
             onCompleted={(report) => void completePendingReport(report)}
             onEvidencePaused={() => void pausePendingReport()}
-            onFailed={(message) => void failAnalysis(pendingAnalysisRef.current?.taskId ?? null, message)}
+            onFailed={(message) => {
+              const pending = pendingAnalysisRef.current;
+              void failAnalysis(
+                pending?.taskId ?? null,
+                message,
+                pending?.epoch ?? runEpochRef.current,
+              );
+            }}
+            onPreEvidenceTerminated={(reason, message) => {
+              void terminatePreEvidence(reason, message);
+            }}
             onStageChange={handleReportStageChange}
+            retryBlocked={isTaskStateSettling}
           />
         </>
       ) : (

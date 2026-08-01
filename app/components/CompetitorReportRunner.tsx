@@ -46,6 +46,7 @@ export type ReportStage =
   | "stopped";
 
 export type ReportWorkflowStage = "normalizing" | "generating";
+export type PreEvidenceTerminationReason = "stopped" | "model-config-changed";
 
 type RunContext = {
   token: number;
@@ -80,13 +81,22 @@ export function CompetitorReportRunner({
   onCompleted,
   onEvidencePaused,
   onFailed,
+  onPreEvidenceTerminated,
+  onBeforeRetry,
   onStageChange,
+  retryBlocked = false,
 }: {
   analysisRequest: CompetitorAnalysisRequest | null;
   onCompleted?: (report: ReportReadyResponse) => void;
   onEvidencePaused?: (evidence: EvidenceReadyResponse) => void;
   onFailed?: (message: string) => void;
+  onPreEvidenceTerminated?: (
+    reason: PreEvidenceTerminationReason,
+    message: string,
+  ) => void;
+  onBeforeRetry?: () => Promise<boolean>;
   onStageChange?: (stage: ReportWorkflowStage, message: string) => void;
+  retryBlocked?: boolean;
 }) {
   const {
     connectedModels,
@@ -106,6 +116,7 @@ export function CompetitorReportRunner({
     useState<CompetitorBatchId | "assemble" | null>(null);
   const [evidence, setEvidence] = useState<EvidenceReadyResponse | null>(null);
   const [validatedBatches, setValidatedBatches] = useState<Record<string, unknown>[]>([]);
+  const [retryPreparing, setRetryPreparing] = useState(false);
 
   const tokenRef = useRef(0);
   const controllerRef = useRef<AbortController | null>(null);
@@ -322,6 +333,7 @@ export function CompetitorReportRunner({
     run.completedBatchIds = [];
     setEvidence(null);
     setValidatedBatches([]);
+    setRetryPreparing(false);
     setErrorMessage("");
     setFailedBatchId(null);
     publishStage("normalizing", "正在整理抓取数据和证据索引…");
@@ -346,15 +358,36 @@ export function CompetitorReportRunner({
     }
   }, [createRun, failRun, isCurrent, publishStage, runReportBatches]);
 
-  const retryReport = useCallback(() => {
+  const retryReport = useCallback(async () => {
     const readyEvidence = evidenceRef.current;
-    if (!readyEvidence || ACTIVE_STAGES.has(stage) || stage === "completed") return;
-    const run = createRun();
-    setErrorMessage("");
-    setFailedBatchId(null);
-    publishStage("evidence-ready", "证据包已保留，正在从未完成批次继续…");
-    void runReportBatches(run, readyEvidence, batchesRef.current);
-  }, [createRun, publishStage, runReportBatches, stage]);
+    if (
+      !readyEvidence
+      || ACTIVE_STAGES.has(stage)
+      || stage === "completed"
+      || retryBlocked
+      || retryPreparing
+    ) return;
+    setRetryPreparing(true);
+    try {
+      if (onBeforeRetry && !(await onBeforeRetry())) return;
+      if (evidenceRef.current !== readyEvidence) return;
+      const run = createRun();
+      setErrorMessage("");
+      setFailedBatchId(null);
+      publishStage("evidence-ready", "证据包已保留，正在从未完成批次继续…");
+      await runReportBatches(run, readyEvidence, batchesRef.current);
+    } finally {
+      setRetryPreparing(false);
+    }
+  }, [
+    createRun,
+    onBeforeRetry,
+    publishStage,
+    retryBlocked,
+    retryPreparing,
+    runReportBatches,
+    stage,
+  ]);
 
   const stopReport = useCallback(() => {
     if (!ACTIVE_STAGES.has(stage)) return;
@@ -368,8 +401,12 @@ export function CompetitorReportRunner({
       ? "已停止；证据包已保留，可从未完成批次继续。"
       : "已停止本次抓取成果分析。";
     setStatusMessage(message);
-    onStageChange?.(evidenceRef.current ? "generating" : "normalizing", message);
-  }, [onStageChange, stage]);
+    if (evidenceRef.current) {
+      onStageChange?.("generating", message);
+    } else {
+      onPreEvidenceTerminated?.("stopped", message);
+    }
+  }, [onPreEvidenceTerminated, onStageChange, stage]);
 
   useEffect(() => {
     if (!analysisRequest || analysisRequest.requestId === lastAnalysisRequestRef.current) return;
@@ -398,10 +435,17 @@ export function CompetitorReportRunner({
         "模型或凭据已变化；证据包已保留，请使用新配置重新生成报告。",
       );
     } else {
+      const message = "模型或凭据已变化，本次整理请求已停止。";
       setStage("stopped");
-      setStatusMessage("模型配置已变化，本次迟到响应已丢弃。");
+      setStatusMessage(message);
+      onPreEvidenceTerminated?.("model-config-changed", message);
     }
-  }, [credentialRevision, modelId, publishStage]);
+  }, [
+    credentialRevision,
+    modelId,
+    onPreEvidenceTerminated,
+    publishStage,
+  ]);
 
   useEffect(
     () => () => {
@@ -430,7 +474,11 @@ export function CompetitorReportRunner({
         <div className="competitor-report-actions">
           {active ? <button onClick={stopReport} type="button">停止生成</button> : null}
           {canRetry ? (
-            <button onClick={retryReport} type="button">
+            <button
+              disabled={retryBlocked || retryPreparing}
+              onClick={() => void retryReport()}
+              type="button"
+            >
               {stage === "evidence-ready" ? "继续生成报告" : "重试失败批次"}
             </button>
           ) : null}
