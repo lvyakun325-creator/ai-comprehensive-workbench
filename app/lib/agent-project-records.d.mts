@@ -19,7 +19,19 @@ export type ProjectTask = {
   completedAt: string | null;
   stoppedAt: string | null;
   errorSummary: string | null;
+  platformId?: string;
+  platformLabel?: string;
+  skillId?: string;
+  sourceUrl?: string;
+  artifactIds?: readonly string[];
 };
+
+export type ProjectResultKind =
+  | "excel"
+  | "markdown"
+  | "json"
+  | "image-directory"
+  | "output-directory";
 
 export type ProjectResult = {
   id: string;
@@ -29,6 +41,11 @@ export type ProjectResult = {
   completedAt: string;
   sizeBytes: number;
   markdown: string | null;
+  kind?: ProjectResultKind;
+  absolutePath?: string;
+  exists?: boolean;
+  isDirectory?: boolean;
+  previewable?: boolean;
 };
 
 export const TASK_STATUSES: readonly TaskStatus[];
@@ -37,11 +54,30 @@ export const PROJECT_RESULTS: readonly ProjectResult[];
 export function getAgentTasks(
   agentId: string,
   status?: TaskStatusFilter,
+  tasks?: readonly ProjectTask[],
 ): readonly ProjectTask[];
-export function getTaskById(taskId: string): ProjectTask | undefined;
-export function isValidProjectResult(result: ProjectResult): boolean;
+export function getTaskById(
+  taskId: string,
+  tasks?: readonly ProjectTask[],
+): ProjectTask | undefined;
+export function isValidProjectResult(
+  result: ProjectResult,
+  tasks?: readonly ProjectTask[],
+): boolean;
 export function getAgentResults(
   agentId: string,
   results?: readonly ProjectResult[],
 ): readonly ProjectResult[];
-export function getTaskResults(taskId: string): readonly ProjectResult[];
+export function getTaskResults(
+  taskId: string,
+  results?: readonly ProjectResult[],
+  tasks?: readonly ProjectTask[],
+): readonly ProjectResult[];
+export function mergeProjectTasks(
+  staticTasks: readonly ProjectTask[],
+  dynamicTasks: readonly ProjectTask[],
+): readonly ProjectTask[];
+export function mergeProjectResults(
+  staticResults: readonly ProjectResult[],
+  dynamicResults: readonly ProjectResult[],
+): readonly ProjectResult[];

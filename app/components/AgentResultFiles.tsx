@@ -18,6 +18,7 @@ type AgentResultFilesProps = {
   getAgentResults?: AgentResultQuery;
   getTaskById?: typeof queryTaskById;
   onPreview: (message: string) => void;
+  onRevealArtifact?: (artifactId: string) => Promise<void>;
 };
 
 const completedAtFormatter = new Intl.DateTimeFormat("zh-CN", {
@@ -34,6 +35,14 @@ const formatFileSize = (sizeBytes: number) =>
     ? `${sizeBytes} B`
     : `${(sizeBytes / 1024).toFixed(1)} KB`;
 
+const ARTIFACT_LABELS = {
+  excel: "Excel",
+  markdown: "MD",
+  json: "JSON",
+  "image-directory": "图片",
+  "output-directory": "目录",
+} as const;
+
 function resolveResultAccess(
   result: ProjectResult,
   agentId: string,
@@ -41,8 +50,14 @@ function resolveResultAccess(
 ) {
   const sourceTask = getTaskById(result.taskId);
   const isMarkdown = result.filename.toLowerCase().endsWith(".md");
+  const isRegisteredArtifact = Boolean(
+    result.kind
+    && result.absolutePath
+    && ["excel", "markdown", "json", "image-directory", "output-directory"]
+      .includes(result.kind),
+  );
   const isAccessible =
-    isMarkdown &&
+    (isMarkdown || isRegisteredArtifact) &&
     sourceTask?.id === result.taskId &&
     sourceTask.status === "completed" &&
     sourceTask.agentId === result.agentId &&
@@ -52,6 +67,7 @@ function resolveResultAccess(
     result,
     sourceTask,
     isMarkdown,
+    isRegisteredArtifact,
     isAccessible,
   };
 }
@@ -62,6 +78,7 @@ export function AgentResultFiles({
   getAgentResults = queryAgentResults,
   getTaskById = queryTaskById,
   onPreview,
+  onRevealArtifact,
 }: AgentResultFilesProps) {
   const resultAccesses = getAgentResults(agentId).map((result) =>
     resolveResultAccess(result, agentId, getTaskById),
@@ -69,9 +86,21 @@ export function AgentResultFiles({
   const markdownResultAccesses = resultAccesses.filter(
     (access) => access.isMarkdown,
   );
+  const [dismissedFocusedTaskId, setDismissedFocusedTaskId] = useState<
+    string | null
+  >(null);
+  const focusedTaskId = initialTaskId !== dismissedFocusedTaskId
+    ? initialTaskId
+    : null;
+  const competitorResultAccesses = resultAccesses.filter(
+    (access) =>
+      access.isRegisteredArtifact
+      && (focusedTaskId === null || access.result.taskId === focusedTaskId),
+  );
   const [selectedResultId, setSelectedResultId] = useState<string | null>(
-    () =>
-      resultAccesses.find(
+    () => agentId === "competitor-insight"
+      ? null
+      : resultAccesses.find(
         (access) =>
           access.isAccessible && access.result.taskId === initialTaskId,
       )?.result.id ?? null,
@@ -228,26 +257,144 @@ export function AgentResultFiles({
     }
   };
 
+  const copyArtifactPath = async (result: ProjectResult) => {
+    if (!result.absolutePath) return;
+    try {
+      await navigator.clipboard.writeText(result.absolutePath);
+      showActionStatus("成果路径已复制");
+    } catch {
+      showActionStatus("复制失败，请手动选择成果路径");
+    }
+  };
+
+  const revealArtifact = async (result: ProjectResult) => {
+    if (!onRevealArtifact || result.exists === false) return;
+    try {
+      await onRevealArtifact(result.id);
+      showActionStatus("已在访达中显示成果");
+    } catch {
+      showActionStatus("无法在访达中显示该成果");
+    }
+  };
+
   return (
     <section
       aria-labelledby="agent-result-files-heading"
       className="agent-results-view"
     >
-      <div className="agent-results-heading">
-        <div>
-          <span className="eyebrow">RESULT FILES</span>
-          <h2 id="agent-result-files-heading">Markdown 成果</h2>
-        </div>
-        <span>{markdownResultAccesses.length} 个文件</span>
-      </div>
-
-      {markdownResultAccesses.length === 0 ? (
-        <p className="agent-results-empty">
-          任务完成后，Markdown 成果会出现在这里
-        </p>
+      {agentId === "competitor-insight" ? (
+        <>
+          <div className="agent-results-heading">
+            <div>
+              <span className="eyebrow">RESULT FILES</span>
+              <h2 id="agent-result-files-heading">成果文件</h2>
+            </div>
+            <span>{competitorResultAccesses.length} 个成果</span>
+          </div>
+          {focusedTaskId ? (
+            <div className="result-task-focus" role="status">
+              <span>正在查看本次任务成果</span>
+              <button
+                onClick={() => setDismissedFocusedTaskId(focusedTaskId)}
+                type="button"
+              >
+                查看全部成果
+              </button>
+            </div>
+          ) : null}
+          {competitorResultAccesses.length === 0 ? (
+            <p className="agent-results-empty">
+              抓取任务完成后，成果文件会出现在这里
+            </p>
+          ) : (
+            <div aria-label="竞品成果文件" className="agent-result-list">
+              {competitorResultAccesses.map((access) => {
+                const {result, sourceTask, isAccessible} = access;
+                const missing = result.exists === false;
+                const kind = result.kind ?? "markdown";
+                return (
+                  <article
+                    className={`result-file-card artifact-card ${
+                      isAccessible ? "" : "result-source-abnormal"
+                    } ${missing ? "artifact-missing" : ""}`}
+                    key={result.id}
+                  >
+                    <div>
+                      <span aria-hidden="true" className="result-file-icon">
+                        {ARTIFACT_LABELS[kind]}
+                      </span>
+                      <div>
+                        <h3>{result.filename}</h3>
+                        <p className={isAccessible ? "result-source-task" : "result-source-error"}>
+                          来源任务：{isAccessible ? sourceTask?.title : "关联任务异常"}
+                        </p>
+                        <p>{result.isDirectory ? "文件夹" : formatFileSize(result.sizeBytes)}</p>
+                        {result.absolutePath ? <code className="artifact-path">{result.absolutePath}</code> : null}
+                        {missing ? <p className="artifact-missing-label">文件已不存在</p> : null}
+                      </div>
+                    </div>
+                    <div className="artifact-actions">
+                      <button
+                        disabled={!result.absolutePath}
+                        onClick={() => void copyArtifactPath(result)}
+                        type="button"
+                      >
+                        复制路径
+                      </button>
+                      <button
+                        aria-label={missing
+                          ? `${result.filename} 文件已不存在`
+                          : `在访达中显示${result.filename}`}
+                        disabled={!isAccessible || missing || !onRevealArtifact}
+                        onClick={() => void revealArtifact(result)}
+                        type="button"
+                      >
+                        {missing ? "文件已不存在" : "在访达中显示"}
+                      </button>
+                      {access.isMarkdown ? (
+                        <button
+                          disabled={!isAccessible}
+                          onClick={(event) => {
+                            resultTriggerRef.current = event.currentTarget;
+                            setSelectedResultId(result.id);
+                          }}
+                          ref={(element) => {
+                            if (element) resultTriggersRef.current.set(result.id, element);
+                            else resultTriggersRef.current.delete(result.id);
+                          }}
+                          type="button"
+                        >
+                          查看成果
+                        </button>
+                      ) : null}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+          {actionStatus ? (
+            <p aria-live="polite" className="result-action-status" role="status">
+              {actionStatus}
+            </p>
+          ) : null}
+        </>
       ) : (
-        <div aria-label="Markdown 成果文件" className="agent-result-list">
-          {markdownResultAccesses.map((access) => {
+        <>
+          <div className="agent-results-heading">
+            <div>
+              <span className="eyebrow">RESULT FILES</span>
+              <h2 id="agent-result-files-heading">Markdown 成果</h2>
+            </div>
+            <span>{markdownResultAccesses.length} 个文件</span>
+          </div>
+          {markdownResultAccesses.length === 0 ? (
+            <p className="agent-results-empty">
+              任务完成后，Markdown 成果会出现在这里
+            </p>
+          ) : (
+            <div aria-label="Markdown 成果文件" className="agent-result-list">
+              {markdownResultAccesses.map((access) => {
             const { result, sourceTask, isAccessible } = access;
 
             return (
@@ -305,8 +452,10 @@ export function AgentResultFiles({
                 </button>
               </article>
             );
-          })}
-        </div>
+              })}
+            </div>
+          )}
+        </>
       )}
 
       {selectedResult && typeof document !== "undefined"

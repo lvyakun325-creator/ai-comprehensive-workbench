@@ -6,8 +6,11 @@ import base64
 import binascii
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import re
 from typing import cast
+from urllib.parse import parse_qs, urlsplit
 
+import project_records
 import service
 
 
@@ -26,6 +29,13 @@ WRITE_ENDPOINTS = {
     "/validate-section",
     "/assemble-report",
 }
+TASK_PATH = re.compile(r"^/project-tasks/(?P<task_id>competitor-[0-9A-Za-z-]{4,120})$")
+ARTIFACTS_PATH = re.compile(
+    r"^/project-tasks/(?P<task_id>competitor-[0-9A-Za-z-]{4,120})/artifacts$"
+)
+REVEAL_PATH = re.compile(
+    r"^/project-artifacts/(?P<artifact_id>artifact-[0-9a-f]{16})/reveal$"
+)
 
 _ERRORS = {
     "unsafe_output_path": (503, "INTERNAL_SECURITY_BOUNDARY", "报告输出目录未通过安全校验。"),
@@ -52,6 +62,25 @@ _ERRORS = {
     "invalid_evidence_id": (400, "INVALID_EVIDENCE_ID", "证据会话 ID 无效。"),
     "evidence_not_found": (404, "EVIDENCE_NOT_FOUND", "证据会话不存在。"),
     "invalid_evidence_bundle": (400, "INVALID_EVIDENCE", "证据包无效。"),
+    "invalid_request_fields": (400, "INVALID_REQUEST", "请求参数无效。"),
+    "invalid_task_id": (400, "INVALID_REQUEST", "任务 ID 无效。"),
+    "invalid_artifact_id": (400, "INVALID_REQUEST", "成果 ID 无效。"),
+    "invalid_agent_id": (400, "INVALID_REQUEST", "Agent ID 无效。"),
+    "invalid_source_url": (400, "INVALID_REQUEST", "抓取链接无效。"),
+    "invalid_status": (400, "INVALID_REQUEST", "任务状态无效。"),
+    "invalid_status_transition": (409, "INVALID_TASK_STATE", "任务状态不能这样更新。"),
+    "invalid_progress": (400, "INVALID_REQUEST", "任务进度无效。"),
+    "invalid_explicit_paths": (400, "INVALID_REQUEST", "成果路径清单无效。"),
+    "invalid_output_directory": (400, "INVALID_REQUEST", "成果输出目录无效。"),
+    "task_already_exists": (409, "TASK_ALREADY_EXISTS", "任务已经存在。"),
+    "task_not_found": (404, "TASK_NOT_FOUND", "任务不存在。"),
+    "artifact_not_found": (404, "ARTIFACT_NOT_FOUND", "成果不存在。"),
+    "artifact_missing": (404, "ARTIFACT_MISSING", "成果文件已不存在。"),
+    "path_not_allowed": (400, "PATH_NOT_ALLOWED", "成果路径不在受控目录中。"),
+    "artifact_scan_failed": (500, "ARTIFACT_SCAN_FAILED", "成果目录扫描失败。"),
+    "too_many_artifacts": (413, "TOO_MANY_ARTIFACTS", "本次成果文件数量超过上限。"),
+    "record_store_damaged": (503, "RECORD_STORE_DAMAGED", "本地任务记录需要修复。"),
+    "reveal_failed": (500, "REVEAL_FAILED", "无法在访达中显示该成果。"),
 }
 
 
@@ -116,8 +145,21 @@ class BridgeHandler(BaseHTTPRequestHandler):
         )
         return False
 
+    def _request_path(self) -> str:
+        return urlsplit(self.path).path
+
+    def _is_write_endpoint(self) -> bool:
+        path = self._request_path()
+        return bool(
+            path in WRITE_ENDPOINTS
+            or path == "/project-tasks"
+            or TASK_PATH.fullmatch(path)
+            or ARTIFACTS_PATH.fullmatch(path)
+            or REVEAL_PATH.fullmatch(path)
+        )
+
     def do_OPTIONS(self) -> None:
-        if self.path not in WRITE_ENDPOINTS:
+        if not self._is_write_endpoint():
             self._send_json(
                 404,
                 {"ok": False, "error": "NOT_FOUND", "message": "接口不存在。"},
@@ -130,7 +172,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Vary", "Origin")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         if self.headers.get("Access-Control-Request-Private-Network") == "true":
             self.send_header("Access-Control-Allow-Private-Network", "true")
@@ -138,31 +180,55 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        if self.path != "/health":
+        parsed = urlsplit(self.path)
+        if parsed.path == "/health" and not parsed.query:
+            origin = self._origin()
+            if origin is not None and origin not in ALLOWED_ORIGINS:
+                self._send_json(
+                    403,
+                    {
+                        "ok": False,
+                        "error": "ORIGIN_NOT_ALLOWED",
+                        "message": "请求来源不在允许列表中。",
+                    },
+                )
+                return
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "stage": "healthy",
+                    "service": "competitor-insight-report",
+                },
+                origin=origin,
+            )
+            return
+        if parsed.path != "/project-records":
             self._send_json(
                 404,
                 {"ok": False, "error": "NOT_FOUND", "message": "接口不存在。"},
             )
             return
-        origin = self._origin()
-        if origin is not None and origin not in ALLOWED_ORIGINS:
+        if not self._origin_allowed():
+            return
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if set(query) != {"agentId"} or len(query["agentId"]) != 1:
             self._send_json(
-                403,
-                {
-                    "ok": False,
-                    "error": "ORIGIN_NOT_ALLOWED",
-                    "message": "请求来源不在允许列表中。",
-                },
+                400,
+                {"ok": False, "error": "INVALID_REQUEST", "message": "请求参数无效。"},
+                origin=self._origin(),
             )
+            return
+        try:
+            snapshot = project_records.read_records(query["agentId"][0])
+        except ValueError as error:
+            status, response = _value_error_response(error)
+            self._send_json(status, response, origin=self._origin())
             return
         self._send_json(
             200,
-            {
-                "ok": True,
-                "stage": "healthy",
-                "service": "competitor-insight-report",
-            },
-            origin=origin,
+            {"ok": True, **snapshot},
+            origin=self._origin(),
         )
 
     def _read_json(self) -> dict[str, object] | None:
@@ -228,10 +294,24 @@ class BridgeHandler(BaseHTTPRequestHandler):
         return value
 
     def _dispatch(self, payload: dict[str, object]) -> dict[str, object]:
-        if self.path == "/analyze-path":
+        path = self._request_path()
+        if path == "/project-tasks":
+            return {"ok": True, "task": project_records.create_task(payload)}
+        artifacts_match = ARTIFACTS_PATH.fullmatch(path)
+        if artifacts_match:
+            snapshot = project_records.register_artifacts(
+                artifacts_match.group("task_id"),
+                payload,
+            )
+            return {"ok": True, **snapshot}
+        reveal_match = REVEAL_PATH.fullmatch(path)
+        if reveal_match:
+            self._exact_fields(payload, set())
+            return project_records.reveal_artifact(reveal_match.group("artifact_id"))
+        if path == "/analyze-path":
             self._exact_fields(payload, {"path"})
             return service.analyze_path(self._text(payload, "path"))
-        if self.path == "/analyze-upload":
+        if path == "/analyze-upload":
             self._exact_fields(payload, {"filename", "contentBase64"})
             filename = self._text(payload, "filename")
             encoded = self._text(payload, "contentBase64")
@@ -240,13 +320,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
             except (UnicodeError, ValueError, binascii.Error):
                 raise ValueError("invalid_base64") from None
             return service.analyze_upload(filename, content)
-        if self.path == "/validate-section":
+        if path == "/validate-section":
             self._exact_fields(payload, {"evidenceId", "batch"})
             return service.validate_batch(
                 self._text(payload, "evidenceId"),
                 payload["batch"],
             )
-        if self.path == "/assemble-report":
+        if path == "/assemble-report":
             self._exact_fields(payload, {"evidenceId", "batches"})
             batches = payload["batches"]
             if not isinstance(batches, list):
@@ -261,7 +341,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         raise ValueError("unknown_endpoint")
 
     def do_POST(self) -> None:
-        if self.path not in WRITE_ENDPOINTS:
+        if not self._is_write_endpoint() or TASK_PATH.fullmatch(self._request_path()):
             self._send_json(
                 404,
                 {"ok": False, "error": "NOT_FOUND", "message": "接口不存在。"},
@@ -314,6 +394,42 @@ class BridgeHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_json(200, result, origin=self._origin())
+
+    def do_PATCH(self) -> None:
+        task_match = TASK_PATH.fullmatch(self._request_path())
+        if task_match is None:
+            self._send_json(
+                404,
+                {"ok": False, "error": "NOT_FOUND", "message": "接口不存在。"},
+            )
+            return
+        if not self._origin_allowed():
+            return
+        payload = self._read_json()
+        if payload is None:
+            return
+        try:
+            task = project_records.update_task(task_match.group("task_id"), payload)
+        except ValueError as error:
+            status, response = _value_error_response(error)
+            self._send_json(status, response, origin=self._origin())
+            return
+        except Exception:
+            self._send_json(
+                500,
+                {
+                    "ok": False,
+                    "error": "INTERNAL_ERROR",
+                    "message": "本地任务服务处理失败。",
+                },
+                origin=self._origin(),
+            )
+            return
+        self._send_json(
+            200,
+            {"ok": True, "task": task},
+            origin=self._origin(),
+        )
 
 
 def main() -> None:

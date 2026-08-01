@@ -8,6 +8,8 @@ import {
   getAgentResults,
   getAgentTasks,
   getTaskResults,
+  mergeProjectResults,
+  mergeProjectTasks,
 } from "../app/lib/agent-project-records.mjs";
 
 test("defines every supported task status exactly once", () => {
@@ -121,4 +123,54 @@ test("returns result history for a task without changing exported fixtures", () 
   assert.equal(results.length, 1);
   assert.equal(results[0].taskId, "matrix-completed");
   assert.deepEqual(PROJECT_RESULTS.map((result) => result.id), before);
+});
+
+test("merges dynamic task and artifact records without duplicating fixture ids", () => {
+  const newerTask = {
+    ...PROJECT_TASKS[2],
+    title: "真实持久任务",
+    updatedAt: "2026-08-01T10:00:00.000Z",
+  };
+  const dynamicArtifact = {
+    id: "artifact-0000000000000001",
+    agentId: "competitor-insight",
+    taskId: "competitor-completed",
+    filename: "result.xlsx",
+    completedAt: "2026-08-01T10:00:00.000Z",
+    sizeBytes: 128,
+    markdown: null,
+    kind: "excel",
+    absolutePath: "/controlled/result.xlsx",
+    exists: true,
+    isDirectory: false,
+  };
+
+  const tasks = mergeProjectTasks(PROJECT_TASKS, [newerTask]);
+  const results = mergeProjectResults(PROJECT_RESULTS, [dynamicArtifact]);
+
+  assert.equal(tasks.filter((task) => task.id === newerTask.id).length, 1);
+  assert.equal(tasks.find((task) => task.id === newerTask.id).title, "真实持久任务");
+  assert.equal(results[0].id, dynamicArtifact.id);
+  assert.equal(PROJECT_TASKS[2].title, "OTC 竞品内容机会盘点");
+});
+
+test("queries registered non-Markdown artifacts for a completed competitor task", () => {
+  const artifact = {
+    ...PROJECT_RESULTS[1],
+    id: "artifact-0000000000000002",
+    filename: "result.json",
+    kind: "json",
+    absolutePath: "/controlled/result.json",
+    markdown: null,
+  };
+
+  const results = getAgentResults("competitor-insight", [artifact]);
+  const taskResults = getTaskResults(
+    "competitor-completed",
+    [artifact],
+    PROJECT_TASKS,
+  );
+
+  assert.deepEqual(results.map((result) => result.id), [artifact.id]);
+  assert.deepEqual(taskResults.map((result) => result.id), [artifact.id]);
 });

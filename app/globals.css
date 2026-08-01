@@ -479,6 +479,46 @@ button {
   font-size: 12px;
 }
 
+.agent-task-source {
+  margin-top: 15px;
+  padding: 11px 12px;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 10px;
+  border: 1px solid #dce6f7;
+  border-radius: 11px;
+  background: #f7f9fd;
+  color: #536074;
+  font-size: 11px;
+}
+
+.agent-task-source > span,
+.agent-task-source > code {
+  padding: 4px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.agent-task-source > span {
+  background: #e9f7f0;
+  color: #208657;
+  font-weight: 700;
+}
+
+.agent-task-source > code {
+  background: #eef3ff;
+  color: var(--blue-dark);
+}
+
+.agent-task-source > a {
+  min-width: 0;
+  overflow: hidden;
+  color: #55657d;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-task-footer {
   margin-top: 17px;
   padding-top: 14px;
@@ -3111,6 +3151,33 @@ button {
   gap: 10px;
 }
 
+.result-task-focus {
+  margin-top: 16px;
+  padding: 11px 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid #bfe5d2;
+  border-radius: 12px;
+  background: #f0faf5;
+  color: #267d56;
+  font-size: 12px;
+}
+
+.result-task-focus button,
+.artifact-actions button {
+  padding: 8px 10px;
+  border: 1px solid #cfdbf7;
+  border-radius: 9px;
+  background: #fff;
+  color: var(--blue-dark);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .result-file-card {
   justify-content: space-between;
   gap: 16px;
@@ -3172,6 +3239,50 @@ button {
 .result-file-card.result-source-abnormal {
   border-color: #efb8b8;
   background: #fffafa;
+}
+
+.artifact-card > div:first-child {
+  align-items: flex-start;
+  flex: 1 1 auto;
+}
+
+.artifact-card > div:first-child > div {
+  min-width: 0;
+}
+
+.artifact-path {
+  max-width: min(760px, 60vw);
+  margin-top: 8px;
+  padding: 7px 9px;
+  display: block;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: #f0f3f8;
+  color: #536074;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.artifact-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 7px !important;
+}
+
+.artifact-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.artifact-missing {
+  border-color: #e1c9a3;
+  background: #fffaf2;
+}
+
+.result-file-card .artifact-missing-label {
+  color: #9a641d;
+  font-weight: 700;
 }
 
 .result-file-card > button,
@@ -3559,9 +3670,32 @@ button {
     width: 100%;
   }
 
+  .agent-task-source {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-task-source > a {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
   .result-file-card {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .result-task-focus,
+  .artifact-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .artifact-path {
+    max-width: calc(100vw - 100px);
+  }
+
+  .artifact-actions button {
+    width: 100%;
   }
 
   .result-file-card > button {

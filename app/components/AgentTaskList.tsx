@@ -115,6 +115,21 @@ export function AgentTaskList({
                   <span className="agent-task-model">{task.model}</span>
                 </div>
 
+                {task.sourceUrl ? (
+                  <div className="agent-task-source">
+                    <span>{task.platformLabel ?? "竞品平台"}</span>
+                    {task.skillId ? <code>{task.skillId}</code> : null}
+                    <a
+                      aria-label="查看抓取链接"
+                      href={task.sourceUrl}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {task.sourceUrl}
+                    </a>
+                  </div>
+                ) : null}
+
                 {task.status === "waiting" ? (
                   <p className="agent-task-step">等待开始</p>
                 ) : null}
