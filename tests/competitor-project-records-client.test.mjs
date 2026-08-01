@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import {execFileSync} from "node:child_process";
+import path from "node:path";
 import test from "node:test";
 import {
   CompetitorProjectRecordsClientError,
@@ -110,6 +112,36 @@ const jsonResponse = (body, init = {}) => new Response(JSON.stringify(body), {
   },
 });
 
+function task5LegacyStateSnapshots() {
+  const runtimeDir = path.join(process.cwd(), "agents", "competitor-insight", "runtime");
+  const testDir = path.join(runtimeDir, "tests");
+  const script = String.raw`
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, ${JSON.stringify(runtimeDir)})
+sys.path.insert(0, ${JSON.stringify(testDir)})
+import project_records
+from test_project_records import ProjectRecordTests
+
+case = ProjectRecordTests("test_v1_completed_task_migrates_to_one_legacy_bundle_without_moving_files")
+case.setUp()
+try:
+    case.write_v1_store_with_three_artifacts()
+    initial = project_records.read_records("competitor-insight")
+    bundle_id = initial["bundles"][0]["id"]
+    project_records.bundle_archive(bundle_id)
+    materialized = project_records.read_records("competitor-insight")
+    Path(materialized["bundles"][0]["primaryReportPath"]).unlink()
+    missing = project_records.read_records("competitor-insight")
+    print(json.dumps({"materialized": materialized, "missing": missing}))
+finally:
+    case.tearDown()
+`;
+  return JSON.parse(execFileSync("python3", ["-c", script], {encoding: "utf8"}));
+}
+
 test("loads a complete typed competitor snapshot", async (context) => {
   const originalFetch = globalThis.fetch;
   context.after(() => {
@@ -167,6 +199,48 @@ test("keeps v1 legacy bundles from rejecting compatible task and artifact snapsh
   assert.equal(snapshot.tasks[0].id, TASK_FIXTURE.id);
   assert.equal(snapshot.results[0].id, ARTIFACT_FIXTURE.id);
   assert.deepEqual(snapshot.bundles, []);
+});
+
+test("filters Task5 materialized and refreshed-missing legacy snapshots without losing history", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const snapshots = task5LegacyStateSnapshots();
+  const materialized = snapshots.materialized;
+  const missing = snapshots.missing;
+  assert.equal(materialized.bundles[0].status, "legacy");
+  assert.ok(["manifestSha256", "archiveSha256", "memberIdentitySha256"].every(
+    (field) => /^[0-9a-f]{64}$/u.test(materialized.bundles[0][field]),
+  ));
+  assert.equal(missing.bundles[0].status, "missing");
+
+  for (const body of [materialized, missing]) {
+    globalThis.fetch = async () => jsonResponse({ok: true, ...body});
+    const snapshot = await loadCompetitorProjectRecords();
+    assert.equal(snapshot.tasks.length, 1);
+    assert.equal(snapshot.results.length, 3);
+    assert.deepEqual(snapshot.bundles, []);
+  }
+});
+
+test("rejects mixed invalid or v2-marked legacy commitments", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const task = {...TASK_FIXTURE, inputKind: "unknown", category: null};
+  const hash = "a".repeat(64);
+  const malformed = [
+    {...LEGACY_BUNDLE_FIXTURE, manifestSha256: hash},
+    {...LEGACY_BUNDLE_FIXTURE, manifestSha256: hash, archiveSha256: hash, memberIdentitySha256: "A".repeat(64)},
+    {...LEGACY_BUNDLE_FIXTURE, status: "ready"},
+  ];
+  for (const bundle of malformed) {
+    globalThis.fetch = async () => jsonResponse({
+      ok: true, tasks: [task], artifacts: [LEGACY_ARTIFACT_FIXTURE], bundles: [bundle],
+    });
+    await assert.rejects(
+      loadCompetitorProjectRecords(),
+      (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
+    );
+  }
 });
 
 test("rejects every missing or unexpected field in a legacy bundle", async (context) => {

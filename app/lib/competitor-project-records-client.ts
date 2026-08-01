@@ -710,12 +710,13 @@ function isCompatibleLegacyBundle(
     value.id === undefined || typeof value.id !== "string" || !BUNDLE_ID.test(value.id)
     || value.agentId !== "competitor-insight" || value.taskId !== task.id
     || value.platformId !== task.platformId || (value.platformId !== "douyin" && value.platformId !== "xiaohongshu")
-    || value.inputKind !== "unknown" || value.category !== null || value.status !== "legacy"
+    || value.inputKind !== "unknown" || value.category !== null
+    || (value.status !== "legacy" && value.status !== "missing")
     || task.agentId !== "competitor-insight" || task.status !== "completed"
     || task.inputKind !== "unknown" || task.category !== null || task.bundleId !== value.id
     || value.subjectName !== task.title || value.itemCount !== 0
     || !isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt) || value.createdAt !== task.completedAt
-    || value.manifestSha256 !== null || value.archiveSha256 !== null || value.memberIdentitySha256 !== null
+    || !hasCompatibleLegacyCommitments(value)
     || !isLegacyBundlePaths(value, task)
     || artifactIds.length === 0
     || !artifactIds.every((item) => typeof item === "string" && ARTIFACT_ID.test(item))
@@ -725,11 +726,19 @@ function isCompatibleLegacyBundle(
   ) return false;
   const legacyArtifacts = artifacts.filter((item) => artifactIds.includes(item.id));
   return legacyArtifacts.length === artifactIds.length
-    && legacyArtifacts.some((item) => item.absolutePath === value.primaryReportPath)
+    && legacyArtifacts.some((item) => typeof item.absolutePath === "string"
+      && typeof value.primaryReportPath === "string"
+      && sameLegacyPath(item.absolutePath, value.primaryReportPath))
     && legacyArtifacts.every((item) => item.agentId === "competitor-insight"
       && item.taskId === task.id
       && typeof item.absolutePath === "string"
       && isLegacyBundleMemberPath(item.absolutePath, rootDirectory));
+}
+
+function hasCompatibleLegacyCommitments(value: Record<string, unknown>): boolean {
+  const commitments = [value.manifestSha256, value.archiveSha256, value.memberIdentitySha256];
+  return commitments.every((item) => item === null)
+    || commitments.every((item) => typeof item === "string" && /^[0-9a-f]{64}$/u.test(item));
 }
 
 const LEGACY_BUNDLE_FIELDS = new Set([
@@ -757,7 +766,19 @@ function isLegacyBundlePaths(value: Record<string, unknown>, task: ProjectTask):
 }
 
 function isLegacyBundleMemberPath(value: string, root: string): boolean {
-  return isCleanAbsolutePath(value) && value.startsWith(`${root}/`);
+  return isCleanAbsolutePath(value)
+    && isCleanAbsolutePath(root)
+    && normalizedLegacyPath(value).startsWith(`${normalizedLegacyPath(root)}/`);
+}
+
+function sameLegacyPath(left: string, right: string): boolean {
+  return isCleanAbsolutePath(left)
+    && isCleanAbsolutePath(right)
+    && normalizedLegacyPath(left) === normalizedLegacyPath(right);
+}
+
+function normalizedLegacyPath(value: string): string {
+  return value.startsWith("/private/var/") ? value.slice("/private".length) : value;
 }
 
 function isCleanAbsolutePath(value: string): boolean {
