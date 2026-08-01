@@ -7,6 +7,8 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
+from openpyxl import Workbook
+
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RUNTIME_DIR))
@@ -78,9 +80,10 @@ class SourceReaderTests(unittest.TestCase):
                         },
                         "author": {"nickname": "公开作者", "sec_uid": "sec-1", "follower_count": "3w"},
                         "transcription": {
-                            "polished_transcript": "已抓到的润色转写",
-                            "cleaned_transcript": "不应优先的清洗转写",
-                            "transcript": "不应优先的原始转写",
+                            "polished_transcript": "不可作为证据的改写文本",
+                            "raw_transcript": "更原始的抓取文本",
+                            "cleaned_transcript": "清洗后的抓取文本",
+                            "transcript": "已抓到的最终转写",
                         },
                     },
                 },
@@ -90,12 +93,102 @@ class SourceReaderTests(unittest.TestCase):
 
         self.assertEqual(len(bundle["items"]), 1)
         self.assertEqual(bundle["rankings"], {})
-        self.assertEqual(bundle["content"]["transcript"], "已抓到的润色转写")
+        self.assertEqual(bundle["content"]["transcript"], "已抓到的最终转写")
         self.assertEqual(bundle["subject"]["nickname"], "公开作者")
         self.assertEqual(bundle["subject"]["accountId"], "sec-1")
         self.assertNotEqual(bundle["subject"].get("accountId"), "dy-1")
         self.assertIn("collects", bundle["completeness"]["missingFields"])
         self.assertNotIn("ocr", bundle["content"])
+
+    def test_douyin_content_ignores_polished_transcript_without_captured_transcript(self) -> None:
+        """Would fail if agent-polished text were admitted as captured evidence."""
+        with TemporaryDirectory() as directory:
+            source = self._write_json(
+                directory,
+                "video.json",
+                {
+                    "data": {
+                        "video": {"id": "video", "title": "标题"},
+                        "author": {"nickname": "作者", "sec_uid": "sec"},
+                        "transcription": {"polished_transcript": "Agent 改写，不是抓取证据"},
+                    }
+                },
+            )
+            parsed = read_scrape_source("douyin", "content", source, None)
+
+        self.assertNotIn("transcript", parsed["content"])
+        self.assertIn("missing_content:transcript", parsed["warnings"])
+
+    def test_douyin_content_records_cleaned_transcript_fallback_source(self) -> None:
+        """Would fail if the allowed non-generative cleaned fallback lost its provenance."""
+        with TemporaryDirectory() as directory:
+            source = self._write_json(
+                directory,
+                "video.json",
+                {
+                    "data": {
+                        "video": {"id": "video", "title": "标题"},
+                        "author": {"nickname": "作者", "sec_uid": "sec"},
+                        "transcription": {"cleaned_transcript": "清洗后的抓取文本"},
+                    }
+                },
+            )
+            parsed = read_scrape_source("douyin", "content", source, None)
+
+        self.assertEqual(parsed["content"]["transcript"], "清洗后的抓取文本")
+        self.assertEqual(parsed["content"]["transcriptSource"], "transcription.cleaned_transcript")
+
+    def test_rejects_ancestor_swap_before_json_leaf_open(self) -> None:
+        """Would fail if a checked ancestor could be swapped to a symlink before JSON open."""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            safe, outside, moved = root / "safe", root / "outside", root / "moved"
+            safe.mkdir()
+            outside.mkdir()
+            source = self._write_json(str(safe), "source.json", {"data": {"profile": {"nickname": "safe"}, "videos": [{"title": "作品"}]}})
+            self._write_json(str(outside), "source.json", {"data": {"profile": {"nickname": "outside"}, "videos": [{"title": "作品"}]}})
+            real_open = source_reader.os.open
+            swapped = False
+
+            def swap_before_open(name: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+                nonlocal swapped
+                if not swapped and (name == source.absolute() or name == "safe"):
+                    swapped = True
+                    os.rename(safe, moved)
+                    os.symlink(outside, safe)
+                return real_open(name, flags, mode, dir_fd=dir_fd)
+
+            with patch.object(source_reader.os, "open", side_effect=swap_before_open):
+                with self.assertRaisesRegex(ValueError, r"^invalid_source_path$"):
+                    read_scrape_source("douyin", "account", source, None)
+
+    def test_rejects_ancestor_swap_before_xlsx_leaf_open(self) -> None:
+        """Would fail if an XLSX companion followed an ancestor symlink during open."""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            safe, outside, moved = root / "safe-xlsx", root / "outside-xlsx", root / "moved-xlsx"
+            safe.mkdir()
+            outside.mkdir()
+            source = self._write_json(directory, "source.json", {"data": {"profile": {"nickname": "账号"}, "videos": [{"title": "作品"}]}})
+            for parent in (safe, outside):
+                workbook = Workbook()
+                workbook.save(parent / "source.xlsx")
+                workbook.close()
+            workbook_path = safe / "source.xlsx"
+            real_open = source_reader.os.open
+            swapped = False
+
+            def swap_before_open(name: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+                nonlocal swapped
+                if not swapped and (name == workbook_path.absolute() or name == "safe-xlsx"):
+                    swapped = True
+                    os.rename(safe, moved)
+                    os.symlink(outside, safe)
+                return real_open(name, flags, mode, dir_fd=dir_fd)
+
+            with patch.object(source_reader.os, "open", side_effect=swap_before_open):
+                with self.assertRaisesRegex(ValueError, r"^invalid_source_path$"):
+                    read_scrape_source("douyin", "account", source, workbook_path)
 
     def test_douyin_account_and_xhs_note_normalize_platform_specific_metrics(self) -> None:
         """Would fail if either platform adapter uses the wrong interaction field mapping."""

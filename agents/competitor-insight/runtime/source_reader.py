@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from io import BytesIO
 from pathlib import Path
 import stat
 from typing import BinaryIO, Callable
@@ -19,25 +20,39 @@ _METRICS = ("likes", "comments", "collects", "shares")
 
 def _open_source(path: Path, suffix: str, maximum: int) -> BinaryIO:
     absolute = path.absolute()
-    current = Path(absolute.anchor)
+    parts = absolute.parts
+    if parts[:2] == ("/", "var"):
+        parts = ("/", "private", "var", *parts[2:])
+    if (
+        len(parts) < 2
+        or any(part in {"", ".", ".."} for part in parts[1:])
+        or os.open not in os.supports_dir_fd
+    ):
+        raise ValueError("invalid_source_path")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if nofollow == 0 or directory == 0:
+        raise ValueError("invalid_source_path")
+    directory_fd: int | None = None
+    descriptor: int | None = None
     try:
-        for part in absolute.parts[1:]:
-            current /= part
-            if stat.S_ISLNK(os.lstat(current).st_mode):
-                if current == Path("/var") and current.resolve() == Path("/private/var"):
-                    continue
-                raise ValueError("invalid_source_path")
-        nofollow = getattr(os, "O_NOFOLLOW", 0)
-        if nofollow == 0:
-            raise ValueError("invalid_source_path")
-        descriptor = os.open(absolute, os.O_RDONLY | nofollow)
+        directory_fd = os.open("/", os.O_RDONLY | directory | nofollow)
+        for component in parts[1:-1]:
+            next_fd = os.open(component, os.O_RDONLY | directory | nofollow, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        descriptor = os.open(parts[-1], os.O_RDONLY | nofollow, dir_fd=directory_fd)
         metadata = os.fstat(descriptor)
-    except ValueError:
-        raise
     except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
         raise ValueError("invalid_source_path") from error
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
     if not stat.S_ISREG(metadata.st_mode) or absolute.suffix.casefold() != suffix or metadata.st_size > maximum:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
         raise ValueError("invalid_source_path")
     return os.fdopen(descriptor, "rb")
 
@@ -45,7 +60,10 @@ def _open_source(path: Path, suffix: str, maximum: int) -> BinaryIO:
 def _load_json(path: Path) -> dict[str, object]:
     try:
         with _open_source(path, ".json", MAX_JSON_BYTES) as source:
-            value = json.loads(source.read().decode("utf-8"))
+            payload = source.read(MAX_JSON_BYTES + 1)
+            if len(payload) > MAX_JSON_BYTES:
+                raise ValueError("invalid_source_path")
+            value = json.loads(payload.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("invalid_source_json") from error
     if not isinstance(value, dict):
@@ -56,7 +74,10 @@ def _load_json(path: Path) -> dict[str, object]:
 def _validate_excel(path: Path | None) -> None:
     if path is not None:
         with _open_source(path, ".xlsx", MAX_XLSX_BYTES) as source:
-            validate_workbook_source(source)
+            payload = source.read(MAX_XLSX_BYTES + 1)
+            if len(payload) > MAX_XLSX_BYTES:
+                raise ValueError("invalid_source_path")
+            validate_workbook_source(BytesIO(payload))
 
 
 def _object(value: object) -> dict[str, object]:
@@ -182,11 +203,17 @@ def _content(raw: dict[str, object], subject: dict[str, object], warnings: list[
         else:
             warnings.append(f"missing_content:{target}")
     transcription = _object(envelope.get("transcription"))
-    found, value = _first(transcription, "polished_transcript", "cleaned_transcript", "transcript")
-    if not found:
+    found, value = _first(transcription, "transcript")
+    transcript_source = "transcription.transcript" if found and _text(value) else ""
+    if not found or not _text(value):
+        found, value = _first(transcription, "cleaned_transcript")
+        transcript_source = "transcription.cleaned_transcript" if found and _text(value) else ""
+    if not found or not _text(value):
         found, value = _first(raw, "transcript", "video_transcript")
+        transcript_source = "item.transcript" if found and _text(value) else ""
     if found and _text(value):
         result["transcript"] = _text(value)
+        result["transcriptSource"] = transcript_source
     else:
         warnings.append("missing_content:transcript")
     public_author = {key: value for key, value in subject.items() if key in {"nickname", "accountId", "followers", "signature"} and value not in ("", None)}
