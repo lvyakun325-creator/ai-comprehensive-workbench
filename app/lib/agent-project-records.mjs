@@ -91,25 +91,42 @@ const newestFirst = (left, right) =>
   new Date(right.updatedAt ?? right.completedAt).getTime() -
   new Date(left.updatedAt ?? left.completedAt).getTime();
 
-export function getAgentTasks(agentId, status = "all") {
-  return PROJECT_TASKS.filter(
+export function mergeProjectTasks(staticTasks, dynamicTasks) {
+  const merged = new Map(staticTasks.map((task) => [task.id, task]));
+  for (const task of dynamicTasks) merged.set(task.id, task);
+  return Array.from(merged.values()).toSorted(newestFirst);
+}
+
+export function mergeProjectResults(staticResults, dynamicResults) {
+  const merged = new Map(staticResults.map((result) => [result.id, result]));
+  for (const result of dynamicResults) merged.set(result.id, result);
+  return Array.from(merged.values()).toSorted(newestFirst);
+}
+
+export function getAgentTasks(agentId, status = "all", tasks = PROJECT_TASKS) {
+  return tasks.filter(
     (task) =>
       task.agentId === agentId && (status === "all" || task.status === status),
   ).toSorted(newestFirst);
 }
 
-export function getTaskById(taskId) {
-  return PROJECT_TASKS.find((task) => task.id === taskId);
+export function getTaskById(taskId, tasks = PROJECT_TASKS) {
+  return tasks.find((task) => task.id === taskId);
 }
 
-export function isValidProjectResult(result) {
-  const sourceTask = getTaskById(result.taskId);
+const isSupportedProjectResult = (result) =>
+  result.filename.toLowerCase().endsWith(".md") ||
+  ["excel", "markdown", "json", "image-directory", "output-directory"]
+    .includes(result.kind);
+
+export function isValidProjectResult(result, tasks = PROJECT_TASKS) {
+  const sourceTask = getTaskById(result.taskId, tasks);
 
   return Boolean(
     sourceTask &&
       sourceTask.status === "completed" &&
       sourceTask.agentId === result.agentId &&
-      result.filename.toLowerCase().endsWith(".md"),
+      isSupportedProjectResult(result),
   );
 }
 
@@ -117,13 +134,17 @@ export function getAgentResults(agentId, results = PROJECT_RESULTS) {
   return results.filter(
     (result) =>
       result.agentId === agentId &&
-      result.filename.toLowerCase().endsWith(".md"),
+      isSupportedProjectResult(result),
   ).toSorted(newestFirst);
 }
 
-export function getTaskResults(taskId) {
-  return PROJECT_RESULTS.filter(
+export function getTaskResults(
+  taskId,
+  results = PROJECT_RESULTS,
+  tasks = PROJECT_TASKS,
+) {
+  return results.filter(
     (result) =>
-      result.taskId === taskId && isValidProjectResult(result),
+      result.taskId === taskId && isValidProjectResult(result, tasks),
   ).toSorted(newestFirst);
 }

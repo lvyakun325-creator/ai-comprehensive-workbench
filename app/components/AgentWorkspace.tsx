@@ -1,6 +1,18 @@
 import type { AgentProject } from "../lib/agent-catalog.mjs";
-import type { TaskStatusFilter } from "../lib/agent-project-records.mjs";
-import { useEffect, useRef, useState } from "react";
+import {
+  PROJECT_RESULTS,
+  PROJECT_TASKS,
+  getAgentResults,
+  getAgentTasks,
+  getTaskById,
+  getTaskResults,
+  mergeProjectResults,
+  mergeProjectTasks,
+  type ProjectResult,
+  type ProjectTask,
+  type TaskStatusFilter,
+} from "../lib/agent-project-records.mjs";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentResultFiles } from "./AgentResultFiles";
 import { AgentTaskList } from "./AgentTaskList";
 import {
@@ -23,6 +35,10 @@ import {
   usesContentMatrixServerProxy,
 } from "../lib/content-matrix-runtime";
 import { ModelConfigPanel } from "./ModelConfigPanel";
+import {
+  loadCompetitorProjectRecords,
+  revealCompetitorArtifact,
+} from "../lib/competitor-project-records-client";
 
 const PROJECT_TABS = [
   "项目总览",
@@ -122,6 +138,10 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   const [activeTab, setActiveTab] = useState(PROJECT_TABS[0]);
   const [resultTaskId, setResultTaskId] = useState<string | null>(null);
   const [taskFilter, setTaskFilter] = useState<TaskStatusFilter>("all");
+  const [competitorRecords, setCompetitorRecords] = useState<{
+    tasks: readonly ProjectTask[];
+    results: readonly ProjectResult[];
+  }>({tasks: [], results: []});
   const [matrixDiagnosis, setMatrixDiagnosis] = useState<MatrixDiagnosisValues>({});
   const [matrixSubmitAttempted, setMatrixSubmitAttempted] = useState(false);
   const [matrixReady, setMatrixReady] = useState(false);
@@ -150,6 +170,37 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   const matrixRunAbortController = useRef<AbortController | null>(null);
   const isContentMatrix = agent.id === "content-matrix";
   const isCompetitorInsight = agent.id === "competitor-insight";
+  const mergedProjectTasks = useMemo(
+    () => mergeProjectTasks(PROJECT_TASKS, competitorRecords.tasks),
+    [competitorRecords.tasks],
+  );
+  const mergedProjectResults = useMemo(
+    () => mergeProjectResults(PROJECT_RESULTS, competitorRecords.results),
+    [competitorRecords.results],
+  );
+  const refreshCompetitorRecords = useCallback(async () => {
+    const snapshot = await loadCompetitorProjectRecords();
+    setCompetitorRecords(snapshot);
+    return snapshot;
+  }, []);
+  const showRecordLoadError = useCallback(() => {
+    onPreview("无法读取本地竞品任务记录，请确认 8768 服务已启动");
+  }, [onPreview]);
+  const openCompletedCompetitorTask = useCallback(async (taskId: string) => {
+    try {
+      const snapshot = await refreshCompetitorRecords();
+      const task = snapshot.tasks.find((item) => item.id === taskId);
+      const hasArtifacts = snapshot.results.some((item) => item.taskId === taskId);
+      if (!task || task.status !== "completed" || !hasArtifacts) {
+        onPreview("抓取已完成，但成果记录尚未就绪，请稍后刷新");
+        return;
+      }
+      setResultTaskId(taskId);
+      setActiveTab("成果文件");
+    } catch {
+      showRecordLoadError();
+    }
+  }, [onPreview, refreshCompetitorRecords, showRecordLoadError]);
   const requiresPrivateAssets = matrixDiagnosis.platform === "video-account";
   const requiredMatrixFields = requiresPrivateAssets
     ? [...MATRIX_DIAGNOSIS_FIELDS, ["privateAssets", "私域资产"] as const]
@@ -516,6 +567,12 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
                 setResultTaskId(null);
               }
               setActiveTab(tab);
+              if (
+                isCompetitorInsight
+                && (tab === "任务列表" || tab === "成果文件")
+              ) {
+                void refreshCompetitorRecords().catch(showRecordLoadError);
+              }
               if (tab === "Agent 对话" && !isContentMatrix && !isCompetitorInsight) {
                 onPreview(`${tab}将在真实 Agent 接入后启用`);
               }
@@ -530,6 +587,10 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         <AgentTaskList
           agentId={agent.id}
           filter={taskFilter}
+          getAgentTasks={(agentId, filter) =>
+            getAgentTasks(agentId, filter, mergedProjectTasks)}
+          getTaskResults={(taskId) =>
+            getTaskResults(taskId, mergedProjectResults, mergedProjectTasks)}
           onFilterChange={setTaskFilter}
           onOpenResult={(taskId) => {
             setResultTaskId(taskId);
@@ -539,8 +600,14 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
       ) : activeTab === "成果文件" ? (
         <AgentResultFiles
           agentId={agent.id}
+          getAgentResults={(agentId) =>
+            getAgentResults(agentId, mergedProjectResults)}
+          getTaskById={(taskId) => getTaskById(taskId, mergedProjectTasks)}
           initialTaskId={resultTaskId}
           onPreview={onPreview}
+          onRevealArtifact={isCompetitorInsight
+            ? revealCompetitorArtifact
+            : undefined}
         />
       ) : activeTab === "Agent 配置" && isContentMatrix ? (
         <ContentMatrixConfigPanel
@@ -563,7 +630,13 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
           onPreview={onPreview}
         />
       ) : isCompetitorInsight && activeTab === "Agent 对话" ? (
-        <CompetitorInsightPanel mode="run" onPreview={onPreview} />
+        <CompetitorInsightPanel
+          mode="run"
+          onPreview={onPreview}
+          onTaskCompleted={(taskId) => {
+            void openCompletedCompetitorTask(taskId);
+          }}
+        />
       ) : isContentMatrix && activeTab === "Agent 对话" ? (
         <section className="matrix-diagnosis" aria-labelledby="matrix-diagnosis-title">
           <div className="matrix-diagnosis-heading">

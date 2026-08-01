@@ -16,6 +16,7 @@ sys.path.insert(0, str(RUNTIME_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bridge_server
+import project_records
 import service
 from test_service import (
     malformed_account_workbook_bytes,
@@ -31,6 +32,12 @@ class BridgeServerTests(unittest.TestCase):
         self.project_root = Path(self.temporary_directory.name)
         self.project_patch = patch.object(service, "PROJECT_ROOT", self.project_root)
         self.project_patch.start()
+        self.records_project_patch = patch.object(
+            project_records,
+            "PROJECT_ROOT",
+            self.project_root,
+        )
+        self.records_project_patch.start()
 
         class TestBridgeHandler(bridge_server.BridgeHandler):
             max_body_bytes = bridge_server.MAX_REQUEST_BYTES
@@ -45,6 +52,7 @@ class BridgeServerTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
+        self.records_project_patch.stop()
         self.project_patch.stop()
         self.temporary_directory.cleanup()
 
@@ -64,8 +72,16 @@ class BridgeServerTests(unittest.TestCase):
         return response.status, response_headers, response_body
 
     def _post_json(self, path: str, payload: object) -> tuple[int, dict[str, str], bytes]:
+        return self._json_request("POST", path, payload)
+
+    def _json_request(
+        self,
+        method: str,
+        path: str,
+        payload: object,
+    ) -> tuple[int, dict[str, str], bytes]:
         return self._request(
-            "POST",
+            method,
             path,
             json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             {
@@ -73,6 +89,21 @@ class BridgeServerTests(unittest.TestCase):
                 "Origin": "http://localhost:3000",
             },
         )
+
+    def task_payload(self) -> dict[str, object]:
+        return {
+            "id": "competitor-20260801-http-a1",
+            "agentId": "competitor-insight",
+            "title": "小红书作品抓取",
+            "platformId": "xiaohongshu",
+            "platformLabel": "小红书",
+            "skillId": "xiaohongshu-scraper",
+            "sourceUrl": (
+                "https://www.xiaohongshu.com/explore/abc"
+                "?xsec_token=must-not-persist&source=feed"
+            ),
+            "model": "xiaohongshu-scraper",
+        }
 
     def test_health_allows_a_request_without_origin(self) -> None:
         status, headers, body = self._request("GET", "/health")
@@ -136,6 +167,129 @@ class BridgeServerTests(unittest.TestCase):
         self.assertEqual(status, 204)
         self.assertEqual(body, b"")
         self.assertEqual(headers["access-control-allow-origin"], production_origin)
+        self.assertEqual(headers["access-control-allow-private-network"], "true")
+
+    def test_project_task_lifecycle_is_persisted_and_queryable(self) -> None:
+        status, _headers, body = self._json_request(
+            "POST",
+            "/project-tasks",
+            self.task_payload(),
+        )
+        self.assertEqual(status, 200)
+        created = json.loads(body)["task"]
+        self.assertEqual(created["sourceUrl"], "https://www.xiaohongshu.com/explore/abc")
+        self.assertNotIn("must-not-persist", body.decode("utf-8"))
+
+        status, _headers, body = self._json_request(
+            "PATCH",
+            "/project-tasks/competitor-20260801-http-a1",
+            {
+                "status": "running",
+                "progress": 60,
+                "currentStep": "正在抓取平台数据",
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["task"]["progress"], 60)
+
+        status, headers, body = self._request(
+            "GET",
+            "/project-records?agentId=competitor-insight",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["access-control-allow-origin"], "http://localhost:3000")
+        snapshot = json.loads(body)
+        self.assertTrue(snapshot["ok"])
+        self.assertEqual(snapshot["tasks"][0]["id"], "competitor-20260801-http-a1")
+
+    def test_project_record_reads_and_writes_reject_unapproved_origins(self) -> None:
+        for method, path, payload in (
+            ("GET", "/project-records?agentId=competitor-insight", None),
+            ("POST", "/project-tasks", self.task_payload()),
+            (
+                "PATCH",
+                "/project-tasks/competitor-20260801-http-a1",
+                {"status": "running"},
+            ),
+        ):
+            with self.subTest(method=method, path=path):
+                body = None if payload is None else json.dumps(payload).encode("utf-8")
+                headers = {} if payload is None else {"Content-Type": "application/json"}
+                status, _response_headers, response_body = self._request(
+                    method,
+                    path,
+                    body,
+                    headers,
+                )
+                self.assertEqual(status, 403)
+                self.assertEqual(json.loads(response_body)["error"], "ORIGIN_NOT_ALLOWED")
+
+    def test_registers_artifacts_and_reveals_only_by_persisted_id(self) -> None:
+        self._json_request("POST", "/project-tasks", self.task_payload())
+        output = (
+            self.project_root
+            / "outputs"
+            / "competitor-insight"
+            / "xiaohongshu"
+            / "run-http"
+        )
+        output.mkdir(parents=True)
+        workbook = output / "result.xlsx"
+        workbook.write_bytes(b"xlsx")
+
+        status, _headers, body = self._json_request(
+            "POST",
+            "/project-tasks/competitor-20260801-http-a1/artifacts",
+            {"outputDir": str(output), "explicitPaths": [str(workbook)]},
+        )
+        self.assertEqual(status, 200)
+        snapshot = json.loads(body)
+        workbook_artifact = next(
+            item for item in snapshot["artifacts"] if item["kind"] == "excel"
+        )
+
+        with patch.object(
+            project_records,
+            "reveal_artifact",
+            return_value={"ok": True, "artifactId": workbook_artifact["id"]},
+        ) as reveal:
+            status, _headers, body = self._json_request(
+                "POST",
+                f"/project-artifacts/{workbook_artifact['id']}/reveal",
+                {},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["artifactId"], workbook_artifact["id"])
+        reveal.assert_called_once_with(workbook_artifact["id"])
+
+        status, _headers, body = self._json_request(
+            "POST",
+            f"/project-artifacts/{workbook_artifact['id']}/reveal",
+            {"path": "/tmp/escape"},
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error"], "INVALID_REQUEST")
+
+    def test_project_task_preflight_advertises_patch_without_wildcard_origin(self) -> None:
+        status, headers, body = self._request(
+            "OPTIONS",
+            "/project-tasks/competitor-20260801-http-a1",
+            headers={
+                "Origin": "https://zhongfan-ai-workbench.lvyakun325.chatgpt.site",
+                "Access-Control-Request-Method": "PATCH",
+                "Access-Control-Request-Headers": "content-type",
+                "Access-Control-Request-Private-Network": "true",
+            },
+        )
+
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+        self.assertEqual(headers["access-control-allow-methods"], "GET, POST, PATCH, OPTIONS")
+        self.assertEqual(
+            headers["access-control-allow-origin"],
+            "https://zhongfan-ai-workbench.lvyakun325.chatgpt.site",
+        )
         self.assertEqual(headers["access-control-allow-private-network"], "true")
 
     def test_rejects_oversized_request_before_parsing_json(self) -> None:

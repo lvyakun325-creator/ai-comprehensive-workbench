@@ -79,8 +79,14 @@ const ACTIVE_STAGES = new Set<ReportStage>([
 const MAX_EXCEL_BYTES = 50 * 1024 * 1024;
 
 export function CompetitorReportRunner({
+  onCompleted,
+  onEvidencePaused,
+  onFailed,
   pathRequest,
 }: {
+  onCompleted?: (report: ReportReadyResponse) => void;
+  onEvidencePaused?: (evidence: EvidenceReadyResponse) => void;
+  onFailed?: (message: string) => void;
   pathRequest: CompetitorReportPathRequest | null;
 }) {
   const {
@@ -174,7 +180,8 @@ export function CompetitorReportRunner({
     setFailedBatchId(failed);
     setErrorMessage(message);
     setStatusMessage("本次报告未完成，已保留证据包和通过校验的批次。");
-  }, [isCurrent, setReportStage]);
+    onFailed?.(message);
+  }, [isCurrent, onFailed, setReportStage]);
 
   const runReportBatches = useCallback(async (
     run: RunContext,
@@ -201,6 +208,7 @@ export function CompetitorReportRunner({
       setStatusMessage(
         "证据包已生成；请先在 Agent 配置中选择已连接且已保存凭据的模型。",
       );
+      onEvidencePaused?.(readyEvidence);
       return;
     }
 
@@ -300,6 +308,7 @@ export function CompetitorReportRunner({
       setFailedBatchId(null);
       setErrorMessage("");
       setStatusMessage("报告已完成；预览和下载来自同一次组装响应。");
+      onCompleted?.(readyReport);
     } catch (error) {
       if (!isCurrent(run)) return;
       failRun(
@@ -315,6 +324,8 @@ export function CompetitorReportRunner({
     isCurrent,
     model,
     modelId,
+    onCompleted,
+    onEvidencePaused,
     setReportStage,
   ]);
 
