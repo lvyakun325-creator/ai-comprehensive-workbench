@@ -150,6 +150,68 @@ class ServiceTests(unittest.TestCase):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def _artifact_request(self, *, task_id: str = "competitor-20260801-a1") -> dict[str, object]:
+        task_dir = self.project_root / "outputs" / "competitor-insight" / "douyin" / task_id
+        task_dir.mkdir(parents=True, exist_ok=True)
+        data_path = task_dir / "结构化数据.json"
+        data_path.write_text(json.dumps({
+            "status": "success",
+            "data": {
+                "profile": {"nickname": "抓取账号", "sec_uid": "public-id"},
+                "videos": [{
+                    "desc": "公开作品",
+                    "statistics": {"digg_count": 20, "comment_count": 2, "collect_count": 3, "share_count": 1},
+                    "create_time": "2026-07-01 10:00:00",
+                    "share_url": "https://example.com/1",
+                }],
+            },
+        }, ensure_ascii=False), encoding="utf-8")
+        return {
+            "taskId": task_id,
+            "platformId": "douyin",
+            "inputKind": "account",
+            "outputDir": str(task_dir.resolve()),
+            "dataPath": str(data_path.resolve()),
+            "excelPath": None,
+        }
+
+    def test_analyze_artifacts_uses_only_the_exact_task_directory_and_persists_context(self) -> None:
+        request = self._artifact_request()
+
+        result = service.analyze_artifacts(request)
+
+        task_dir = Path(str(request["outputDir"]))
+        self.assertEqual(result["outputDir"], str(task_dir))
+        self.assertEqual(result["platformId"], "douyin")
+        self.assertEqual(result["inputKind"], "account")
+        self.assertEqual(set(result["batchInputs"]), {"strategy", "performance", "execution"})
+        for batch_id, batch_input in result["batchInputs"].items():
+            self.assertEqual(batch_input["batchId"], batch_id)
+            self.assertEqual(batch_input["allowedEvidenceIds"], ["DY-E0001"])
+        self.assertTrue((task_dir / "抓取账号_证据包.json").is_file())
+        self.assertTrue((task_dir / f"{result['evidenceId']}.evidence-session.json").is_file())
+
+    def test_analyze_artifacts_rejects_cross_task_paths(self) -> None:
+        request = self._artifact_request()
+        other = self._artifact_request(task_id="competitor-20260801-b2")
+        request["dataPath"] = other["dataPath"]
+
+        with self.assertRaisesRegex(ValueError, "path_not_allowed"):
+            service.analyze_artifacts(request)
+
+    def test_analyze_artifacts_rejects_extra_fields_and_wrong_platform_root(self) -> None:
+        request = self._artifact_request()
+        request["unexpected"] = "must fail"
+        with self.assertRaisesRegex(ValueError, "invalid_request_fields"):
+            service.analyze_artifacts(request)
+
+        request = self._artifact_request()
+        request["outputDir"] = str(
+            self.project_root / "outputs" / "competitor-insight" / "xiaohongshu" / request["taskId"]
+        )
+        with self.assertRaisesRegex(ValueError, "path_not_allowed"):
+            service.analyze_artifacts(request)
+
     def test_rejects_paths_outside_the_controlled_douyin_directory(self) -> None:
         outside = self.project_root / "private.xlsx"
         outside.write_bytes(workbook_bytes())

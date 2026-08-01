@@ -1,4 +1,3 @@
-import base64
 import http.client
 import json
 from pathlib import Path
@@ -19,10 +18,8 @@ import bridge_server
 import project_records
 import service
 from test_service import (
-    malformed_account_workbook_bytes,
     valid_batches,
     workbook_bytes,
-    xlsx_with_compression_bomb,
 )
 
 
@@ -117,7 +114,7 @@ class BridgeServerTests(unittest.TestCase):
         })
 
     def test_write_endpoints_reject_missing_or_malicious_origins(self) -> None:
-        payload = json.dumps({"filename": "sample.xlsx", "contentBase64": ""}).encode()
+        payload = json.dumps({}).encode()
         for origin in (None, "https://evil.example"):
             with self.subTest(origin=origin):
                 headers = {"Content-Type": "application/json"}
@@ -125,7 +122,7 @@ class BridgeServerTests(unittest.TestCase):
                     headers["Origin"] = origin
                 status, _response_headers, body = self._request(
                     "POST",
-                    "/analyze-upload",
+                    "/analyze-artifacts",
                     payload,
                     headers,
                 )
@@ -134,7 +131,7 @@ class BridgeServerTests(unittest.TestCase):
 
         status, _headers, body = self._request(
             "OPTIONS",
-            "/analyze-upload",
+            "/analyze-artifacts",
             headers={"Origin": "https://evil.example"},
         )
         self.assertEqual(status, 403)
@@ -155,7 +152,7 @@ class BridgeServerTests(unittest.TestCase):
         production_origin = "https://zhongfan-ai-workbench.lvyakun325.chatgpt.site"
         status, headers, body = self._request(
             "OPTIONS",
-            "/analyze-upload",
+            "/analyze-artifacts",
             headers={
                 "Origin": production_origin,
                 "Access-Control-Request-Method": "POST",
@@ -296,7 +293,7 @@ class BridgeServerTests(unittest.TestCase):
         self.handler_class.max_body_bytes = 64
         status, _headers, body = self._request(
             "POST",
-            "/analyze-upload",
+            "/analyze-artifacts",
             b"x" * 65,
             {
                 "Content-Type": "application/json",
@@ -307,69 +304,36 @@ class BridgeServerTests(unittest.TestCase):
         self.assertEqual(status, 413)
         self.assertEqual(json.loads(body)["error"], "REQUEST_TOO_LARGE")
 
-    def test_transport_limit_accommodates_base64_and_decoded_excel_limit_still_applies(self) -> None:
-        valid = workbook_bytes()
-        encoded_limit = ((service.MAX_EXCEL_BYTES + 2) // 3) * 4
-        self.assertGreaterEqual(
-            bridge_server.MAX_REQUEST_BYTES,
-            encoded_limit + 1024 * 1024,
-        )
-        self.handler_class.max_body_bytes = len(valid) * 2 + 1024
+    def test_analyze_upload_is_not_a_route_for_any_origin(self) -> None:
+        for origin in (None, "https://evil.example", "http://localhost:3000"):
+            with self.subTest(origin=origin):
+                headers = {"Content-Type": "application/json"}
+                if origin is not None:
+                    headers["Origin"] = origin
+                status, _headers, body = self._request("POST", "/analyze-upload", b"{}", headers)
+                self.assertEqual(status, 404)
+                self.assertEqual(json.loads(body)["error"], "NOT_FOUND")
 
-        with patch.object(service, "MAX_EXCEL_BYTES", len(valid)):
-            status, _headers, body = self._post_json(
-                "/analyze-upload",
-                {
-                    "filename": "at-limit.xlsx",
-                    "contentBase64": base64.b64encode(valid).decode("ascii"),
-                },
-            )
-            self.assertEqual(status, 200)
+    def test_analyze_artifacts_accepts_only_a_task_scoped_result_bundle(self) -> None:
+        task_dir = self.project_root / "outputs" / "competitor-insight" / "douyin" / "competitor-20260801-http-a1"
+        task_dir.mkdir(parents=True)
+        data_path = task_dir / "结构化数据.json"
+        data_path.write_text(json.dumps({"status": "success", "data": {"profile": {"nickname": "桥接账号", "sec_uid": "id"}, "videos": [{"desc": "作品", "statistics": {"digg_count": 1, "comment_count": 1, "collect_count": 1, "share_count": 1}, "create_time": "2026-07-01", "share_url": "https://example.com/1"}]}}), encoding="utf-8")
+        payload = {
+            "taskId": "competitor-20260801-http-a1",
+            "platformId": "douyin",
+            "inputKind": "account",
+            "outputDir": str(task_dir.resolve()),
+            "dataPath": str(data_path.resolve()),
+            "excelPath": None,
+        }
 
-            status, _headers, body = self._post_json(
-                "/analyze-upload",
-                {
-                    "filename": "over-limit.xlsx",
-                    "contentBase64": base64.b64encode(valid + b"x").decode("ascii"),
-                },
-            )
-            self.assertEqual(status, 413)
-            self.assertEqual(json.loads(body)["error"], "EXCEL_TOO_LARGE")
+        status, _headers, body = self._post_json("/analyze-artifacts", payload)
 
-    def test_rejects_non_json_and_invalid_base64_with_stable_errors(self) -> None:
-        status, _headers, body = self._request(
-            "POST",
-            "/analyze-upload",
-            b"plain text",
-            {
-                "Content-Type": "text/plain",
-                "Origin": "http://localhost:3000",
-            },
-        )
-        self.assertEqual(status, 400)
-        self.assertEqual(json.loads(body)["error"], "INVALID_JSON")
-
-        status, _headers, body = self._post_json(
-            "/analyze-upload",
-            {"filename": "sample.xlsx", "contentBase64": "%%%"},
-        )
-        self.assertEqual(status, 400)
-        self.assertEqual(json.loads(body)["error"], "INVALID_BASE64")
-
-    def test_analyze_upload_uses_the_fixed_json_boundary(self) -> None:
-        status, headers, body = self._post_json(
-            "/analyze-upload",
-            {
-                "filename": "sample.xlsx",
-                "contentBase64": base64.b64encode(workbook_bytes()).decode("ascii"),
-            },
-        )
-
-        payload = json.loads(body)
+        response = json.loads(body)
         self.assertEqual(status, 200)
-        self.assertEqual(payload["stage"], "evidence_ready")
-        self.assertRegex(payload["evidenceId"], r"^[0-9a-f]{16}$")
-        self.assertEqual(headers["access-control-allow-origin"], "http://localhost:3000")
+        self.assertEqual(response["outputDir"], str(task_dir.resolve()))
+        self.assertEqual(response["batchInputs"]["strategy"]["allowedEvidenceIds"], ["DY-E0001"])
 
     def test_errors_do_not_echo_stack_input_path_or_excel_body(self) -> None:
         secret_path = "/Users/example/private-secret.xlsx"
@@ -418,34 +382,6 @@ class BridgeServerTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertEqual(json.loads(body)["error"], "INTERNAL_SECURITY_BOUNDARY")
         self.assertNotIn(str(workbook_path), decoded)
-
-    def test_archive_bomb_and_internal_workbook_value_error_have_safe_http_codes(self) -> None:
-        cases = (
-            (
-                xlsx_with_compression_bomb(),
-                "XLSX_ARCHIVE_TOO_LARGE",
-                "compression-bomb",
-            ),
-            (
-                malformed_account_workbook_bytes(),
-                "INVALID_WORKBOOK",
-                "not enough values to unpack",
-            ),
-        )
-        for content, error_code, forbidden in cases:
-            with self.subTest(error_code=error_code):
-                status, _headers, body = self._post_json(
-                    "/analyze-upload",
-                    {
-                        "filename": "sample.xlsx",
-                        "contentBase64": base64.b64encode(content).decode("ascii"),
-                    },
-                )
-                decoded = body.decode("utf-8")
-                expected_status = 413 if error_code == "XLSX_ARCHIVE_TOO_LARGE" else 400
-                self.assertEqual(status, expected_status)
-                self.assertEqual(json.loads(body)["error"], error_code)
-                self.assertNotIn(forbidden, decoded)
 
     def test_oversized_report_is_retained_but_not_returned_for_preview(self) -> None:
         evidence = service.analyze_upload("sample.xlsx", workbook_bytes())

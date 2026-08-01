@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import re
@@ -16,7 +14,7 @@ import service
 
 HOST = "127.0.0.1"
 PORT = 8768
-MAX_REQUEST_BYTES = ((service.MAX_EXCEL_BYTES + 2) // 3) * 4 + 1024 * 1024
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 ALLOWED_ORIGINS = {
     "http://localhost:3000",
@@ -25,7 +23,7 @@ ALLOWED_ORIGINS = {
 }
 WRITE_ENDPOINTS = {
     "/analyze-path",
-    "/analyze-upload",
+    "/analyze-artifacts",
     "/validate-section",
     "/assemble-report",
 }
@@ -311,23 +309,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if path == "/analyze-path":
             self._exact_fields(payload, {"path"})
             return service.analyze_path(self._text(payload, "path"))
-        if path == "/analyze-upload":
-            self._exact_fields(payload, {"filename", "contentBase64"})
-            filename = self._text(payload, "filename")
-            encoded = self._text(payload, "contentBase64")
-            try:
-                content = base64.b64decode(encoded.encode("ascii"), validate=True)
-            except (UnicodeError, ValueError, binascii.Error):
-                raise ValueError("invalid_base64") from None
-            return service.analyze_upload(filename, content)
+        if path == "/analyze-artifacts":
+            return service.analyze_artifacts(payload)
         if path == "/validate-section":
-            self._exact_fields(payload, {"evidenceId", "batch"})
+            if set(payload) not in ({"evidenceId", "outputDir", "batch"}, {"evidenceId", "batch"}):
+                raise ValueError("invalid_request_fields")
             return service.validate_batch(
                 self._text(payload, "evidenceId"),
                 payload["batch"],
+                self._text(payload, "outputDir") if "outputDir" in payload else None,
             )
         if path == "/assemble-report":
-            self._exact_fields(payload, {"evidenceId", "batches"})
+            if set(payload) not in ({"evidenceId", "outputDir", "batches"}, {"evidenceId", "batches"}):
+                raise ValueError("invalid_request_fields")
             batches = payload["batches"]
             if not isinstance(batches, list):
                 raise ValueError("invalid_batches")
@@ -336,6 +330,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 service.assemble(
                     self._text(payload, "evidenceId"),
                     cast(list[object], batches),
+                    self._text(payload, "outputDir") if "outputDir" in payload else None,
                 ),
             )
         raise ValueError("unknown_endpoint")
@@ -355,17 +350,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             result = self._dispatch(payload)
         except ValueError as error:
-            if str(error).split(":", 1)[0] == "invalid_base64":
-                self._send_json(
-                    400,
-                    {
-                        "ok": False,
-                        "error": "INVALID_BASE64",
-                        "message": "contentBase64 不是有效的 Base64。",
-                    },
-                    origin=self._origin(),
-                )
-                return
             status, response = _value_error_response(error)
             self._send_json(status, response, origin=self._origin())
             return

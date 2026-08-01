@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { afterEach, test } from "node:test";
 
 import {
-  analyzeReportPath,
+  analyzeScrapeArtifacts,
   CompetitorReportClientError,
 } from "../app/lib/competitor-report-client.ts";
 
@@ -15,7 +15,14 @@ afterEach(() => {
 });
 
 function analyze(signal = new AbortController().signal) {
-  return analyzeReportPath("/controlled/douyin/account.xlsx", signal);
+  return analyzeScrapeArtifacts({
+    taskId: "competitor-20260801-a1",
+    platformId: "douyin",
+    inputKind: "account",
+    outputDir: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-a1",
+    dataPath: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-a1/结构化数据.json",
+    excelPath: null,
+  }, signal);
 }
 
 function evidenceReadyFixture() {
@@ -34,6 +41,12 @@ function evidenceReadyFixture() {
     ok: true,
     stage: "evidence_ready",
     evidenceId: "0123456789abcdef",
+    platformId: "douyin",
+    inputKind: "account",
+    reportType: "douyin-account",
+    outputDir: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-a1",
+    subjectName: "测试账号",
+    itemCount: 1,
     account: {
       nickname: "测试账号",
       followers: 100,
@@ -42,6 +55,8 @@ function evidenceReadyFixture() {
     completeness: { missingFields: [], warnings: [] },
     batchInputs: {
       strategy: {
+        batchId: "strategy",
+        allowedEvidenceIds: ["DY-E0001"],
         account: {
           nickname: "测试账号",
           followers: 100,
@@ -52,6 +67,8 @@ function evidenceReadyFixture() {
         evidence,
       },
       performance: {
+        batchId: "performance",
+        allowedEvidenceIds: ["DY-E0001"],
         availability: { comments: true, collects: true, shares: true },
         metrics: {
           workCount: 1,
@@ -75,6 +92,8 @@ function evidenceReadyFixture() {
         evidence,
       },
       execution: {
+        batchId: "execution",
+        allowedEvidenceIds: ["DY-E0001"],
         availability: { comments: true, collects: true, shares: true },
         rankings: {
           overall: ranking,
@@ -272,14 +291,14 @@ test("account context is exact bounded and strategy-only before model use", asyn
   }
 });
 
-test("report bridge endpoint is 8768 and matches the Python fixed port", async () => {
+test("scraper artifact bridge endpoint is 8768 and matches the Python fixed port", async () => {
   let requestedUrl = "";
   globalThis.fetch = async (input) => {
     requestedUrl = String(input);
     return Response.json(evidenceReadyFixture());
   };
   await analyze();
-  assert.equal(requestedUrl, "http://127.0.0.1:8768/analyze-path");
+  assert.equal(requestedUrl, "http://127.0.0.1:8768/analyze-artifacts");
 
   const pythonSource = await readFile(
     new URL("../agents/competitor-insight/runtime/bridge_server.py", import.meta.url),
