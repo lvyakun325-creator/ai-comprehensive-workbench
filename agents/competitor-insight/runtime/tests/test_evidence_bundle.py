@@ -38,6 +38,9 @@ class EvidenceBundleTests(unittest.TestCase):
         )
         self.assertEqual(bundle_a["items"][0]["evidenceId"], "DY-E0001")
         self.assertEqual(bundle_a["items"][0]["sourceRow"], 2)
+        self.assertEqual(bundle_a["evidenceVersion"], "2.0")
+        self.assertEqual(bundle_a["reportType"], "douyin-account")
+        self.assertEqual(bundle_a["subject"]["nickname"], "测试账号")
         self.assertEqual(bundle_a["metrics"]["top10InteractionShare"], 1.0)
         self.assertEqual(bundle_a["items"][0]["ranks"]["overall"], 1)
 

@@ -16,13 +16,19 @@ class EvidenceItem(TypedDict):
 
 
 class EvidenceBundle(TypedDict):
-    evidenceVersion: Literal["1.0"]
+    evidenceVersion: Literal["2.0"]
     evidenceId: str
-    account: dict[str, object]
+    platformId: Literal["douyin", "xiaohongshu"]
+    inputKind: Literal["account", "content"]
+    reportType: Literal["douyin-account", "douyin-content", "xhs-account", "xhs-note"]
+    subject: dict[str, object]
     completeness: dict[str, object]
     metrics: dict[str, int | float | None]
     rankings: dict[str, dict[str, object]]
     items: list[EvidenceItem]
+    content: NotRequired[dict[str, object]]
+    source: NotRequired[dict[str, object]]
+    account: NotRequired[dict[str, object]]
 
 
 class SectionClaim(TypedDict):

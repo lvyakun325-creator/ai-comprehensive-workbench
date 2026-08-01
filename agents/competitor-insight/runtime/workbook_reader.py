@@ -2,8 +2,10 @@
 
 from pathlib import Path
 from typing import Any, BinaryIO
+from zipfile import BadZipFile
 
 from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
 from metrics import parse_metric, parse_publish_time
 
@@ -50,6 +52,21 @@ _OTHER_PLATFORM_ACCOUNT_KEYS = {
     "xhs_id",
     "xhsid",
 }
+
+
+def validate_workbook_source(path: Path) -> None:
+    """Reject malformed or unreasonably shaped XLSX companion files before use."""
+    try:
+        workbook = load_workbook(filename=path, read_only=True, data_only=True)
+    except (BadZipFile, InvalidFileException, OSError, ValueError, KeyError) as error:
+        raise ValueError("invalid_source_workbook") from error
+    try:
+        if not workbook.worksheets or len(workbook.worksheets) > 20:
+            raise ValueError("invalid_source_workbook")
+        if any(sheet.max_row > 20_000 or sheet.max_column > 100 for sheet in workbook.worksheets):
+            raise ValueError("invalid_source_workbook")
+    finally:
+        workbook.close()
 
 
 def _normalized_text(value: object) -> str:
