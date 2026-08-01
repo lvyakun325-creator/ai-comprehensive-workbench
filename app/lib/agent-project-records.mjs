@@ -109,7 +109,10 @@ export function isValidProjectBundle(bundle, tasks = PROJECT_TASKS) {
     sourceTask
       && sourceTask.status === "completed"
       && sourceTask.agentId === bundle.agentId
-      && sourceTask.bundleId === bundle.id,
+      && sourceTask.bundleId === bundle.id
+      && sourceTask.platformId === bundle.platformId
+      && sourceTask.inputKind === bundle.inputKind
+      && sourceTask.category === bundle.category,
   );
 }
 
@@ -184,6 +187,9 @@ export function getBundleArtifacts(bundleId, bundles = [], artifacts = []) {
   if (!bundle) return [];
   const allowed = new Set(bundle.artifactIds);
   return artifacts.filter(
-    (artifact) => artifact.taskId === bundle.taskId && allowed.has(artifact.id),
+    (artifact) =>
+      artifact.agentId === bundle.agentId
+      && artifact.taskId === bundle.taskId
+      && allowed.has(artifact.id),
   ).toSorted(newestFirst);
 }

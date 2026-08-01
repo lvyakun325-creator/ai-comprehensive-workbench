@@ -183,6 +183,8 @@ test("queries completed bundles only when their task relationships are consisten
   const task = {
     ...PROJECT_TASKS[2],
     id: "competitor-20260801-bundle-a1",
+    platformId: "xiaohongshu",
+    platformLabel: "小红书",
     inputKind: "account",
     category: "xhs-account",
     bundleId: "bundle-0000000000000001",
@@ -230,4 +232,7 @@ test("queries completed bundles only when their task relationships are consisten
   assert.equal(getAgentBundles("competitor-insight", bundles, [task])[0].id, bundle.id);
   assert.equal(getTaskBundle(task.id, bundles, [task])?.id, bundle.id);
   assert.deepEqual(getBundleArtifacts(bundle.id, bundles, artifacts).map((item) => item.id), artifacts.map((item) => item.id));
+
+  assert.equal(projectRecords.isValidProjectBundle({...bundle, platformId: "douyin", inputKind: "content", category: "douyin-content"}, [task]), false);
+  assert.deepEqual(getBundleArtifacts(bundle.id, bundles, [{...artifacts[0], agentId: "other-agent"}]), []);
 });

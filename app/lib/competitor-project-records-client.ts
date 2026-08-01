@@ -208,6 +208,7 @@ export async function loadCompetitorBundleDetail(
     || !isRecord(record.bundle)
     || !(record.markdown === null || typeof record.markdown === "string")
     || typeof record.previewable !== "boolean"
+    || record.previewable !== (typeof record.markdown === "string")
   ) throw invalidResponse();
   const task = parseTask(record.task);
   const artifacts = record.artifacts.map(parseArtifact);
@@ -234,7 +235,7 @@ export async function downloadCompetitorBundle(
   if (!response.ok) {
     const body = await readBoundedJson(response, signal);
     const record = isRecord(body) ? body : {};
-    const code = typeof record.error === "string" ? record.error : "INTERNAL_ERROR";
+    const code = stableErrorCode(record.error);
     throw new CompetitorProjectRecordsClientError(code, SAFE_MESSAGES[code] ?? SAFE_MESSAGES.INTERNAL_ERROR);
   }
   if (response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/zip") {
@@ -393,7 +394,9 @@ function parseSnapshot(value: unknown): CompetitorProjectSnapshot {
   return {
     tasks,
     results,
-    bundles: (record.bundles ?? []).map((item) => parseSnapshotBundle(item, tasks, results)),
+    bundles: (record.bundles ?? []).flatMap((item) =>
+      isCompatibleLegacyBundle(item) ? [] : [parseSnapshotBundle(item, tasks, results)],
+    ),
   };
 }
 
@@ -631,8 +634,17 @@ async function readBoundedBytes(
   try {
     while (true) {
       if (signal?.aborted) throw abortError();
-      const {done, value} = await reader.read();
+      let done: boolean;
+      let value: Uint8Array | undefined;
+      try {
+        ({done, value} = await reader.read());
+      } catch (error) {
+        if (signal?.aborted || isAbortError(error)) throw abortError();
+        throw error;
+      }
+      if (signal?.aborted) throw abortError();
       if (done) break;
+      if (!value) throw invalidResponse();
       received += value.byteLength;
       if (received > limit) {
         void reader.cancel().catch(() => undefined);
@@ -657,6 +669,19 @@ function safeZipFilename(contentDisposition: string | null, bundleId: string): s
   const match = contentDisposition?.match(/filename="?([A-Za-z0-9._-]{1,128})"?/u);
   const candidate = match?.[1];
   return candidate?.toLowerCase().endsWith(".zip") ? candidate : `${bundleId}.zip`;
+}
+
+function isCompatibleLegacyBundle(value: unknown): boolean {
+  return isRecord(value)
+    && value.status === "legacy"
+    && value.inputKind === "unknown"
+    && value.category === null;
+}
+
+function stableErrorCode(value: unknown): string {
+  return typeof value === "string" && Object.hasOwn(SAFE_MESSAGES, value)
+    ? value
+    : "INTERNAL_ERROR";
 }
 
 function isAbortError(error: unknown): boolean {

@@ -330,6 +330,17 @@ class BridgeServerTests(unittest.TestCase):
         self.assertTrue(body.startswith(b"PK"))
         self.assertEqual(headers["access-control-allow-origin"], "http://localhost:3000")
         self.assertEqual(headers["cache-control"], "no-store")
+        self.assertEqual(headers["content-length"], str(len(body)))
+        self.assertEqual(headers["content-disposition"], f'attachment; filename="{bundle_id}.zip"')
+
+        status, _headers, body = self._request(
+            "GET", f"/project-bundles/{bundle_id}",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(status, 200)
+        detail = json.loads(body)
+        self.assertEqual(detail["markdown"], "# report\n")
+        self.assertTrue(detail["previewable"])
 
         status, _headers, body = self._request(
             "GET", f"/project-bundles/{bundle_id}/download",
@@ -364,6 +375,92 @@ class BridgeServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 404)
         self.assertEqual(json.loads(body)["error"], "NOT_FOUND")
+
+    def test_bundle_routes_reject_query_method_and_origin_without_disconnect(self) -> None:
+        bundle_id = "bundle-0000000000000001"
+        routes = [
+            ("GET", f"/project-bundles/{bundle_id}?unexpected=1", None),
+            ("GET", f"/project-bundles/{bundle_id}/download?unexpected=1", None),
+            ("POST", f"/project-tasks/competitor-20260801-http-a1/bundle?unexpected=1", {}),
+            ("POST", f"/project-bundles/{bundle_id}/reveal?unexpected=1", {}),
+        ]
+        for method, path, payload in routes:
+            with self.subTest(method=method, path=path):
+                headers = {"Origin": "http://localhost:3000"}
+                body = None
+                if payload is not None:
+                    headers["Content-Type"] = "application/json"
+                    body = json.dumps(payload).encode("utf-8")
+                status, _headers, response_body = self._request(method, path, body, headers)
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(response_body)["error"], "INVALID_REQUEST")
+        for method, path, payload in (
+            ("GET", f"/project-bundles/{bundle_id}", None),
+            ("GET", f"/project-bundles/{bundle_id}/download", None),
+            ("POST", "/project-tasks/competitor-20260801-http-a1/bundle", {}),
+            ("POST", f"/project-bundles/{bundle_id}/reveal", {}),
+        ):
+            with self.subTest(method=method, path=path):
+                headers = {"Origin": "https://evil.example"}
+                body = None
+                if payload is not None:
+                    headers["Content-Type"] = "application/json"
+                    body = json.dumps(payload).encode("utf-8")
+                status, _headers, response_body = self._request(method, path, body, headers)
+                self.assertEqual(status, 403)
+                self.assertEqual(json.loads(response_body)["error"], "ORIGIN_NOT_ALLOWED")
+        for method, path in (
+            ("POST", f"/project-bundles/{bundle_id}"),
+            ("POST", f"/project-bundles/{bundle_id}/download"),
+            ("GET", "/project-tasks/competitor-20260801-http-a1/bundle"),
+            ("GET", f"/project-bundles/{bundle_id}/reveal"),
+            ("GET", "/project-bundles/bundle-not-hex"),
+            ("POST", "/project-tasks/not-a-task/bundle"),
+            ("POST", "/project-bundles/bundle-not-hex/reveal"),
+        ):
+            with self.subTest(method=method, path=path):
+                headers = {"Origin": "http://localhost:3000"}
+                body = None
+                if method == "POST":
+                    headers["Content-Type"] = "application/json"
+                    body = b"{}"
+                status, _headers, response_body = self._request(method, path, body, headers)
+                self.assertEqual(status, 404)
+                self.assertEqual(json.loads(response_body)["error"], "NOT_FOUND")
+
+    def test_bundle_detail_hides_markdown_above_two_mebibytes(self) -> None:
+        payload = {**self.task_payload(), "id": "competitor-20260801-http-b2", "inputKind": "account"}
+        self.assertEqual(self._json_request("POST", "/project-tasks", payload)[0], 200)
+        self.assertEqual(self._json_request("PATCH", f"/project-tasks/{payload['id']}", {"inputKind": "account", "category": "xhs-account"})[0], 200)
+        output = self.project_root / "outputs" / "competitor-insight" / "xiaohongshu" / payload["id"]
+        output.mkdir(parents=True)
+        report = output / "large.md"
+        report.write_text("x" * (2 * 1024 * 1024 + 1), encoding="utf-8")
+        self.assertEqual(self._json_request("POST", f"/project-tasks/{payload['id']}/artifacts", {"outputDir": str(output), "explicitPaths": [str(report)]})[0], 200)
+        status, _headers, body = self._json_request("POST", f"/project-tasks/{payload['id']}/bundle", {"platformId": "xiaohongshu", "inputKind": "account", "category": "xhs-account", "outputDir": str(output), "primaryReportPath": str(report), "explicitPaths": [str(report)], "subjectName": "测试账号", "itemCount": 1})
+        self.assertEqual(status, 200)
+        bundle_id = json.loads(body)["bundles"][0]["id"]
+        status, _headers, body = self._request("GET", f"/project-bundles/{bundle_id}", headers={"Origin": "http://localhost:3000"})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["markdown"], None)
+        self.assertFalse(json.loads(body)["previewable"])
+
+    def test_bundle_detail_previews_exactly_two_mebibytes(self) -> None:
+        payload = {**self.task_payload(), "id": "competitor-20260801-http-c3", "inputKind": "account"}
+        self.assertEqual(self._json_request("POST", "/project-tasks", payload)[0], 200)
+        self.assertEqual(self._json_request("PATCH", f"/project-tasks/{payload['id']}", {"inputKind": "account", "category": "xhs-account"})[0], 200)
+        output = self.project_root / "outputs" / "competitor-insight" / "xiaohongshu" / payload["id"]
+        output.mkdir(parents=True)
+        report = output / "limit.md"
+        report.write_text("y" * (2 * 1024 * 1024), encoding="utf-8")
+        self.assertEqual(self._json_request("POST", f"/project-tasks/{payload['id']}/artifacts", {"outputDir": str(output), "explicitPaths": [str(report)]})[0], 200)
+        status, _headers, body = self._json_request("POST", f"/project-tasks/{payload['id']}/bundle", {"platformId": "xiaohongshu", "inputKind": "account", "category": "xhs-account", "outputDir": str(output), "primaryReportPath": str(report), "explicitPaths": [str(report)], "subjectName": "测试账号", "itemCount": 1})
+        self.assertEqual(status, 200)
+        bundle_id = json.loads(body)["bundles"][0]["id"]
+        status, _headers, body = self._request("GET", f"/project-bundles/{bundle_id}", headers={"Origin": "http://localhost:3000"})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(json.loads(body)["markdown"]), 2 * 1024 * 1024)
+        self.assertTrue(json.loads(body)["previewable"])
 
         status, _headers, body = self._request(
             "GET", "/project-bundles/bundle-not-hex/download",

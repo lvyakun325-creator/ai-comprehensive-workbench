@@ -255,7 +255,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
         bundle_match = BUNDLE_PATH.fullmatch(parsed.path)
         download_match = BUNDLE_DOWNLOAD_PATH.fullmatch(parsed.path)
         if bundle_match or download_match:
-            if parsed.query or not self._origin_allowed():
+            if not self._origin_allowed():
+                return
+            if parsed.query:
+                self._send_json(
+                    400,
+                    {"ok": False, "error": "INVALID_REQUEST", "message": "请求参数无效。"},
+                    origin=self._origin(),
+                )
                 return
             bundle_id = (bundle_match or download_match).group("bundle_id")
             try:
@@ -438,6 +445,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
         raise ValueError("unknown_endpoint")
 
     def do_POST(self) -> None:
+        parsed = urlsplit(self.path)
+        if (
+            (BUNDLE_TASK_PATH.fullmatch(parsed.path) or BUNDLE_REVEAL_PATH.fullmatch(parsed.path))
+            and parsed.query
+        ):
+            if not self._origin_allowed():
+                return
+            self._send_json(
+                400,
+                {"ok": False, "error": "INVALID_REQUEST", "message": "请求参数无效。"},
+                origin=self._origin(),
+            )
+            return
         if not self._is_write_endpoint() or TASK_PATH.fullmatch(self._request_path()):
             self._send_json(
                 404,

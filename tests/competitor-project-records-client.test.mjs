@@ -123,6 +123,23 @@ test("parses one bundle with child artifact ids", async (context) => {
   assert.equal(snapshot.bundles[0].primaryArtifactId, ARTIFACT_FIXTURE.id);
 });
 
+test("keeps v1 legacy bundles from rejecting compatible task and artifact snapshots", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => jsonResponse({
+    ok: true,
+    tasks: [{...TASK_FIXTURE, inputKind: "unknown", category: null}],
+    artifacts: [ARTIFACT_FIXTURE],
+    bundles: [{...BUNDLE_FIXTURE, inputKind: "unknown", category: null, status: "legacy"}],
+  });
+
+  const snapshot = await loadCompetitorProjectRecords();
+
+  assert.equal(snapshot.tasks[0].id, TASK_FIXTURE.id);
+  assert.equal(snapshot.results[0].id, ARTIFACT_FIXTURE.id);
+  assert.deepEqual(snapshot.bundles, []);
+});
+
 test("finalizes loads reveals and safely downloads a bundle by id", async (context) => {
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
@@ -174,6 +191,72 @@ test("rejects invalid bundle download media length and ZIP signature", async (co
       (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
     );
   }
+});
+
+test("normalizes unknown download errors and stalled ZIP aborts", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => jsonResponse({error: "SECRET_FROM_BODY", message: "sensitive"}, {status: 500});
+  await assert.rejects(
+    downloadCompetitorBundle(BUNDLE_FIXTURE.id),
+    (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INTERNAL_ERROR" && !/SECRET_FROM_BODY|sensitive/u.test(error.message),
+  );
+
+  let canceled = false;
+  const stalled = new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array([0x50, 0x4b])); },
+    cancel() { canceled = true; },
+  });
+  globalThis.fetch = async () => new Response(stalled, {
+    status: 200,
+    headers: {"content-type": "application/zip", "content-length": "4"},
+  });
+  const controller = new AbortController();
+  const pending = downloadCompetitorBundle(BUNDLE_FIXTURE.id, controller.signal);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  controller.abort();
+  await assert.rejects(pending, (error) => error instanceof DOMException && error.name === "AbortError");
+  assert.equal(canceled, true);
+});
+
+test("cancels a genuinely oversized streamed ZIP body without allocating 512 MiB", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const chunk = new Uint8Array(1024 * 1024);
+  chunk.set([0x50, 0x4b]);
+  let sent = 0;
+  let canceled = false;
+  const body = new ReadableStream({
+    pull(controller) {
+      controller.enqueue(chunk);
+      sent += 1;
+    },
+    cancel() { canceled = true; },
+  });
+  globalThis.fetch = async () => new Response(body, {
+    status: 200,
+    headers: {"content-type": "application/zip", "content-length": String(512 * 1024 * 1024)},
+  });
+
+  await assert.rejects(
+    downloadCompetitorBundle(BUNDLE_FIXTURE.id),
+    (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
+  );
+  assert.equal(canceled, true);
+  assert.ok(sent >= 513);
+});
+
+test("rejects inconsistent bundle detail preview tuples", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => jsonResponse({
+    ok: true, bundle: BUNDLE_FIXTURE, task: TASK_FIXTURE, artifacts: [ARTIFACT_FIXTURE],
+    markdown: null, previewable: true,
+  });
+  await assert.rejects(
+    loadCompetitorBundleDetail(BUNDLE_FIXTURE.id),
+    (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
+  );
 });
 
 test("creates updates and registers one task through exact bridge contracts", async (context) => {
