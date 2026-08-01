@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, test } from "node:test";
 import { JSDOM } from "jsdom";
 import type {
+  ProjectBundle,
   ProjectResult,
   ProjectTask,
   TaskStatusFilter,
@@ -44,12 +45,15 @@ Object.assign(navigator, {
   clipboard: { writeText: async (value: string) => value },
 });
 
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 const { within } = await import("@testing-library/dom");
 const { StrictMode, useState } = await import("react");
 const { AGENT_PROJECTS } = await import("../app/lib/agent-catalog.mjs");
 const { AgentResultFiles } = await import("../app/components/AgentResultFiles");
+const { CompetitorResultBundles } = await import(
+  "../app/components/CompetitorResultBundles"
+);
 const { AgentTaskList } = await import("../app/components/AgentTaskList");
 const { CompetitorInsightPanel } = await import(
   "../app/components/CompetitorInsightPanel"
@@ -748,6 +752,67 @@ test("竞品任务卡展示平台、Skill 与清理后的项目链接", () => {
   assert.doesNotMatch(link.getAttribute("href") ?? "", /token|source/iu);
 });
 
+function competitorBundleUiFixture(
+  overrides: Partial<ProjectBundle> = {},
+) {
+  const taskId = "competitor-20260801-ui-a1";
+  const bundleId = "bundle-00000000000000a1";
+  const artifact: ProjectResult = {
+    id: "artifact-00000000000000a1",
+    agentId: "competitor-insight",
+    taskId,
+    filename: "current-report.md",
+    completedAt: "2026-08-01T02:02:00.000Z",
+    sizeBytes: 512,
+    markdown: null,
+    kind: "markdown",
+    absolutePath: `/controlled/${taskId}/current-report.md`,
+    exists: true,
+    isDirectory: false,
+    previewable: true,
+  };
+  const bundle: ProjectBundle = {
+    id: bundleId,
+    agentId: "competitor-insight",
+    taskId,
+    platformId: "xiaohongshu",
+    platformLabel: "小红书",
+    inputKind: "content",
+    category: "xhs-note",
+    title: "小红书笔记分析成果包",
+    subjectName: "测试作者",
+    sourceUrl: "https://www.xiaohongshu.com/explore/test-note?token=hidden",
+    status: "ready",
+    primaryArtifactId: artifact.id,
+    manifestPath: `/controlled/${taskId}/${bundleId}.manifest.json`,
+    archivePath: `/controlled/${taskId}/${bundleId}.zip`,
+    rootDirectory: `/controlled/${taskId}`,
+    artifactIds: [artifact.id],
+    itemCount: 1,
+    createdAt: "2026-08-01T02:01:00.000Z",
+    completedAt: "2026-08-01T02:02:00.000Z",
+    ...overrides,
+  };
+  return {artifact, bundle};
+}
+
+function renderCompetitorBundleFixture(
+  overrides: Partial<ProjectBundle> = {},
+  onPreview: (message: string) => void = () => undefined,
+) {
+  const fixture = competitorBundleUiFixture(overrides);
+  return {
+    ...fixture,
+    view: render(
+      <CompetitorResultBundles
+        artifacts={[fixture.artifact]}
+        bundles={[fixture.bundle]}
+        onPreview={onPreview}
+      />,
+    ),
+  };
+}
+
 test("竞品成果每任务一张成果包卡片并支持分类与默认折叠", async () => {
   const snapshot = competitorWorkspaceSnapshot();
   globalThis.fetch = (async (input, init) => {
@@ -871,6 +936,242 @@ test("竞品成果包只在点击后预览下载和按 bundleId 定位", async (
     );
   });
   assert.match(screen.getByRole("status", {name: "成果包操作状态"}).textContent ?? "", /已在访达中显示/u);
+});
+
+test("竞品成果包统一清理 title subject source 及所有无障碍名称中的敏感片段", async () => {
+  const snapshot = competitorWorkspaceSnapshot();
+  snapshot.tasks[0].title = "竞品 https://title-user:title-pass@example.com/item?token=title-secret#title-fragment credential=title-credential";
+  snapshot.tasks[0].sourceUrl = "https://www.xiaohongshu.com/explore/test-note?token=source-secret#source-fragment";
+  snapshot.bundles[0].subjectName = "作者 https://subject-user:subject-pass@example.com/profile?cookie=subject-secret#subject-fragment cookie=subject-cookie";
+  const currentBundle = snapshot.bundles[0];
+  const currentTask = snapshot.tasks[0];
+  const currentArtifacts = snapshot.artifacts.filter((artifact) => artifact.taskId === currentTask.id);
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.includes("/project-records")) return Response.json(snapshot);
+    if (url.endsWith(`/project-bundles/${currentBundle.id}`)) {
+      return Response.json({
+        ok: true,
+        bundle: currentBundle,
+        task: currentTask,
+        artifacts: currentArtifacts,
+        markdown: "# 安全报告",
+        previewable: true,
+      });
+    }
+    if (url.endsWith(`/project-bundles/${currentBundle.id}/reveal`) && init?.method === "POST") {
+      return Response.json({ok: false, error: "INTERNAL_ERROR", debug: "status-secret"}, {status: 500});
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const user = userEvent.setup({document});
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+  await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+  await user.click(screen.getByRole("button", {name: "成果文件"}));
+  const article = await screen.findByRole("article", {name: /竞品 https:\/\/example\.com\/item.*成果包/u});
+  const sourceLink = within(article).getByRole("link", {name: /查看来源链接/u});
+  assert.equal(sourceLink.getAttribute("href"), "https://www.xiaohongshu.com/explore/test-note");
+  assert.doesNotMatch(document.body.innerHTML, /title-secret|title-pass|title-credential|subject-secret|subject-pass|subject-cookie|source-secret|status-secret/u);
+
+  await user.click(within(article).getByRole("button", {name: "查看分析报告"}));
+  assert.ok(await screen.findByRole("region", {name: /竞品 https:\/\/example\.com\/item.*报告预览/u}));
+  await user.click(within(article).getByRole("button", {name: "在访达中显示"}));
+  await waitFor(() => assert.match(screen.getByRole("status", {name: "成果包操作状态"}).textContent ?? "", /无法/u));
+  assert.doesNotMatch(document.body.innerHTML, /title-secret|title-pass|title-credential|subject-secret|subject-pass|subject-cookie|source-secret|status-secret/u);
+});
+
+test("竞品成果包三类动作使用稳定名称并同步阻止同一渲染内重复激活", async () => {
+  const snapshot = competitorWorkspaceSnapshot();
+  const detail = deferredValue<Response>();
+  const download = deferredValue<Response>();
+  const reveal = deferredValue<Response>();
+  const requests: string[] = [];
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.endsWith("/download")) return download.promise;
+    if (url.endsWith("/reveal")) return reveal.promise;
+    return detail.promise;
+  }) as typeof fetch;
+  const {bundle} = renderCompetitorBundleFixture();
+  const article = screen.getByRole("article", {name: `${bundle.title} 成果包`});
+  const reportButton = within(article).getByRole("button", {name: "查看分析报告"});
+
+  act(() => {
+    reportButton.dispatchEvent(new dom.window.MouseEvent("click", {bubbles: true}));
+    reportButton.dispatchEvent(new dom.window.MouseEvent("click", {bubbles: true}));
+  });
+  assert.equal(requests.filter((url) => url.endsWith(`/${bundle.id}`)).length, 1);
+  assert.equal(within(article).getByRole("button", {name: "查看分析报告"}).getAttribute("aria-busy"), "true");
+  detail.resolve(Response.json({
+    ok: true,
+    bundle: snapshot.bundles[0],
+    task: snapshot.tasks[0],
+    artifacts: snapshot.artifacts.filter((artifact) => artifact.taskId === snapshot.tasks[0].id),
+    markdown: "# 报告",
+    previewable: true,
+  }));
+  await screen.findByRole("region", {name: `${bundle.title}报告预览`});
+
+  const downloadButton = within(article).getByRole("button", {name: "下载成果包"});
+  act(() => {
+    downloadButton.dispatchEvent(new dom.window.MouseEvent("click", {bubbles: true}));
+    downloadButton.dispatchEvent(new dom.window.MouseEvent("click", {bubbles: true}));
+  });
+  assert.equal(requests.filter((url) => url.endsWith("/download")).length, 1);
+  const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+  download.resolve(new Response(bytes, {headers: {
+    "content-disposition": 'attachment; filename="bundle.zip"',
+    "content-length": String(bytes.byteLength),
+    "content-type": "application/zip",
+  }}));
+  await waitFor(() => assert.equal(clickedDownloadAnchors.length, 1));
+
+  const revealButton = within(article).getByRole("button", {name: "在访达中显示"});
+  act(() => {
+    revealButton.dispatchEvent(new dom.window.MouseEvent("click", {bubbles: true}));
+    revealButton.dispatchEvent(new dom.window.MouseEvent("click", {bubbles: true}));
+  });
+  assert.equal(requests.filter((url) => url.endsWith("/reveal")).length, 1);
+  reveal.resolve(Response.json({ok: true, bundleId: bundle.id}));
+  await waitFor(() => assert.match(screen.getByRole("status", {name: "成果包操作状态"}).textContent ?? "", /已在访达/u));
+
+  const detailButton = within(article).getByRole("button", {name: "展开明细"});
+  await userEvent.setup({document}).click(detailButton);
+  assert.equal(within(article).getByRole("button", {name: "展开明细"}).getAttribute("aria-expanded"), "true");
+  assert.match(screen.getByRole("status", {name: "成果包界面状态"}).textContent ?? "", /明细已展开/u);
+});
+
+test("竞品成果包安全收敛超过 2 MiB 的不可预览响应和三类动作错误", async () => {
+  const snapshot = competitorWorkspaceSnapshot();
+  const messages: string[] = [];
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (url.endsWith("/download") || url.endsWith("/reveal")) {
+      return Response.json({ok: false, error: "INTERNAL_ERROR", debug: "bridge-secret"}, {status: 500});
+    }
+    return Response.json({
+      ok: true,
+      bundle: snapshot.bundles[0],
+      task: snapshot.tasks[0],
+      artifacts: snapshot.artifacts.filter((artifact) => artifact.taskId === snapshot.tasks[0].id),
+      markdown: null,
+      previewable: false,
+    });
+  }) as typeof fetch;
+  const {bundle} = renderCompetitorBundleFixture({}, (message) => messages.push(message));
+  const article = screen.getByRole("article", {name: `${bundle.title} 成果包`});
+
+  await userEvent.setup({document}).click(within(article).getByRole("button", {name: "查看分析报告"}));
+  assert.ok(await screen.findByRole("region", {name: `${bundle.title}报告预览`}));
+  assert.match(screen.getByRole("status", {name: "成果包操作状态"}).textContent ?? "", /暂时无法预览/u);
+  await userEvent.setup({document}).click(within(article).getByRole("button", {name: "下载成果包"}));
+  await waitFor(() => assert.match(messages.at(-1) ?? "", /下载失败/u));
+  await userEvent.setup({document}).click(within(article).getByRole("button", {name: "在访达中显示"}));
+  await waitFor(() => assert.match(messages.at(-1) ?? "", /无法在访达/u));
+  assert.doesNotMatch(`${document.body.innerHTML}${messages.join(" ")}`, /bridge-secret/u);
+});
+
+test("竞品成果包卸载时取消三类动作并忽略所有迟到副作用", async () => {
+  const snapshot = competitorWorkspaceSnapshot();
+  const pending = new Map<string, ReturnType<typeof deferredValue<Response>>>();
+  const signals = new Map<string, AbortSignal | null>();
+  const messages: string[] = [];
+  globalThis.fetch = ((input, init) => {
+    const url = String(input);
+    const kind = url.endsWith("/download") ? "download" : url.endsWith("/reveal") ? "reveal" : "detail";
+    const deferred = deferredValue<Response>();
+    pending.set(kind, deferred);
+    signals.set(kind, init?.signal ?? null);
+    return deferred.promise;
+  }) as typeof fetch;
+  const {bundle, view} = renderCompetitorBundleFixture({}, (message) => messages.push(message));
+  const article = screen.getByRole("article", {name: `${bundle.title} 成果包`});
+  act(() => {
+    for (const name of ["查看分析报告", "下载成果包", "在访达中显示"]) {
+      within(article).getByRole("button", {name}).dispatchEvent(
+        new dom.window.MouseEvent("click", {bubbles: true}),
+      );
+    }
+  });
+  assert.deepEqual([...pending.keys()].sort(), ["detail", "download", "reveal"]);
+  view.unmount();
+  for (const signal of signals.values()) assertSignalAborted(signal);
+
+  const raw = snapshot.bundles[0];
+  const rawTask = snapshot.tasks[0];
+  const rawArtifacts = snapshot.artifacts.filter((artifact) => artifact.taskId === rawTask.id);
+  const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+  await act(async () => {
+    pending.get("detail")?.resolve(Response.json({ok: true, bundle: raw, task: rawTask, artifacts: rawArtifacts, markdown: "# 迟到", previewable: true}));
+    pending.get("download")?.resolve(new Response(bytes, {headers: {"content-length": "4", "content-type": "application/zip"}}));
+    pending.get("reveal")?.resolve(Response.json({ok: true, bundleId: bundle.id}));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+  assert.deepEqual(messages, []);
+  assert.equal(clickedDownloadAnchors.length, 0);
+  assert.equal(createdMarkdownBlobs.length, 0);
+});
+
+test("竞品成果包下载在 URL 或 anchor 异常时仍释放资源并解锁", async () => {
+  const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+  globalThis.fetch = (async () => new Response(bytes, {headers: {
+    "content-length": String(bytes.byteLength),
+    "content-type": "application/zip",
+  }})) as typeof fetch;
+  const {bundle} = renderCompetitorBundleFixture();
+  const article = screen.getByRole("article", {name: `${bundle.title} 成果包`});
+  const originalCreateObjectUrl = URL.createObjectURL;
+  try {
+    Object.defineProperty(URL, "createObjectURL", {configurable: true, value: () => { throw new Error("create failed"); }});
+    await userEvent.setup({document}).click(within(article).getByRole("button", {name: "下载成果包"}));
+    await waitFor(() => assert.equal((within(article).getByRole("button", {name: "下载成果包"}) as HTMLButtonElement).disabled, false));
+  } finally {
+    Object.defineProperty(URL, "createObjectURL", {configurable: true, value: originalCreateObjectUrl});
+  }
+
+  const originalClick = dom.window.HTMLAnchorElement.prototype.click;
+  try {
+    dom.window.HTMLAnchorElement.prototype.click = function clickWithFailure() {
+      clickedDownloadAnchors.push(this);
+      throw new Error("click failed");
+    };
+    await userEvent.setup({document}).click(within(article).getByRole("button", {name: "下载成果包"}));
+    await waitFor(() => assert.equal(revokedMarkdownUrls.length, 1));
+    assert.equal(clickedDownloadAnchors.at(-1)?.isConnected, false);
+    assert.equal((within(article).getByRole("button", {name: "下载成果包"}) as HTMLButtonElement).disabled, false);
+  } finally {
+    dom.window.HTMLAnchorElement.prototype.click = originalClick;
+  }
+});
+
+test("竞品成果包区分总空、分类空和聚焦不可用", async () => {
+  const user = userEvent.setup({document});
+  const empty = render(
+    <CompetitorResultBundles artifacts={[]} bundles={[]} onPreview={() => undefined} />,
+  );
+  assert.ok(screen.getByText("暂无竞品成果包"));
+  empty.unmount();
+
+  const fixture = competitorBundleUiFixture();
+  const filtered = render(
+    <CompetitorResultBundles artifacts={[fixture.artifact]} bundles={[fixture.bundle]} onPreview={() => undefined} />,
+  );
+  await user.click(screen.getByRole("button", {name: "抖音作品"}));
+  assert.ok(screen.getByText("当前分类暂无成果包"));
+  filtered.unmount();
+
+  render(
+    <CompetitorResultBundles
+      artifacts={[fixture.artifact]}
+      bundles={[fixture.bundle]}
+      initialTaskId="competitor-20260801-missing-focus"
+      onPreview={() => undefined}
+    />,
+  );
+  assert.ok(screen.getByText("本次成果暂不可用，请查看全部成果或稍后刷新"));
 });
 
 test("five project tabs connect task history to its Markdown result and preserve the filter", async () => {
@@ -5999,6 +6300,113 @@ test("竞品完成回调 bundleId 与刷新快照不匹配时不会误切成果�
     "page",
   );
   assert.equal(screen.queryByRole("heading", {name: "成果包"}), null);
+});
+
+test("竞品完成回调对未完成、缺包、missing、legacy 和无主报告都不切成果页", async () => {
+  const cases = ["未完成", "缺包", "missing", "legacy", "无主报告"] as const;
+  for (const scenario of cases) {
+    cleanup();
+    document.body.innerHTML = "";
+    window.localStorage.clear();
+    installCompetitorReportModel();
+    const finalized = competitorWorkspaceSnapshot();
+    const refreshed = competitorWorkspaceSnapshot();
+    if (scenario === "未完成") {
+      Object.assign(refreshed.tasks[0], {
+        status: "running",
+        progress: 90,
+        completedAt: null,
+        bundleId: null,
+        artifactIds: [],
+      });
+      refreshed.artifacts.splice(0);
+      refreshed.bundles.splice(0);
+    } else if (scenario === "缺包") {
+      refreshed.bundles.splice(0);
+    } else if (scenario === "missing" || scenario === "legacy") {
+      refreshed.bundles[0].status = scenario;
+    } else {
+      (refreshed.bundles[0] as unknown as {
+        primaryReportPath: string | null;
+      }).primaryReportPath = null;
+    }
+    const flow = installCompletedWorkspaceFlow(finalized, refreshed);
+    const user = userEvent.setup({document});
+    render(<Home />);
+    await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+    await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+    await user.click(screen.getByRole("button", {name: "开始竞品分析"}));
+    await user.type(
+      screen.getByLabelText("竞品主页或作品链接"),
+      "https://www.xiaohongshu.com/explore/test-note",
+    );
+    await user.click(screen.getByRole("button", {name: "抓取并分析"}));
+    await waitFor(() => assert.equal(flow.getRecordLoads(), 1));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      screen.getByRole("button", {name: "Agent 对话"}).getAttribute("aria-current"),
+      "page",
+      scenario,
+    );
+    assert.equal(screen.queryByRole("heading", {name: "成果包"}), null, scenario);
+  }
+});
+
+test("竞品 Workspace 只提交最新 refresh 并忽略迟到旧快照", async () => {
+  const oldSnapshot = competitorWorkspaceSnapshot();
+  oldSnapshot.tasks[0].title = "旧快照成果包";
+  const newSnapshot = competitorWorkspaceSnapshot();
+  newSnapshot.tasks[0].title = "最新快照成果包";
+  const first = deferredValue<Response>();
+  const second = deferredValue<Response>();
+  const signals: Array<AbortSignal | null> = [];
+  let requestCount = 0;
+  globalThis.fetch = ((input, init) => {
+    const url = String(input);
+    if (!url.includes("/project-records")) throw new Error(`unexpected request: ${url}`);
+    requestCount += 1;
+    signals.push(init?.signal ?? null);
+    return requestCount === 1 ? first.promise : second.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({document});
+  render(<Home />);
+  await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+  await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+  await user.click(screen.getByRole("button", {name: "任务列表"}));
+  await user.click(screen.getByRole("button", {name: "成果文件"}));
+  assert.equal(requestCount, 2);
+
+  second.resolve(Response.json(newSnapshot));
+  assert.ok(await screen.findByRole("heading", {name: "最新快照成果包"}));
+  first.resolve(Response.json(oldSnapshot));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(screen.getByRole("heading", {name: "最新快照成果包"}));
+  assert.equal(screen.queryByRole("heading", {name: "旧快照成果包"}), null);
+  assertSignalAborted(signals[0]);
+  assertSignalNotAborted(signals[1]);
+});
+
+test("竞品 Workspace 卸载会取消 refresh 且迟到失败不提示或切页", async () => {
+  const pending = deferredValue<Response>();
+  let refreshSignal: AbortSignal | null = null;
+  globalThis.fetch = ((input, init) => {
+    const url = String(input);
+    if (!url.includes("/project-records")) throw new Error(`unexpected request: ${url}`);
+    refreshSignal = init?.signal ?? null;
+    return pending.promise;
+  }) as typeof fetch;
+  const user = userEvent.setup({document});
+  render(<Home />);
+  await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+  await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+  await user.click(screen.getByRole("button", {name: "成果文件"}));
+  assertSignalNotAborted(refreshSignal);
+  await user.click(screen.getByRole("button", {name: "← 返回 Agent 项目"}));
+  assertSignalAborted(refreshSignal);
+  pending.reject(new Error("late-refresh-secret"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(screen.getByRole("region", {name: "9 个独立 Agent 项目"}));
+  assert.doesNotMatch(document.body.textContent ?? "", /无法读取本地竞品任务记录|late-refresh-secret/u);
 });
 
 test("竞品洞察报告请求按三批生成校验并只组装一次", async () => {
