@@ -120,6 +120,24 @@ class BridgeServerTests(unittest.TestCase):
         self.assertEqual(body, b"")
         self.assertEqual(headers["access-control-allow-origin"], "http://127.0.0.1:3000")
 
+    def test_production_preflight_allows_exact_origin_and_private_network(self) -> None:
+        production_origin = "https://zhongfan-ai-workbench.lvyakun325.chatgpt.site"
+        status, headers, body = self._request(
+            "OPTIONS",
+            "/analyze-upload",
+            headers={
+                "Origin": production_origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+                "Access-Control-Request-Private-Network": "true",
+            },
+        )
+
+        self.assertEqual(status, 204)
+        self.assertEqual(body, b"")
+        self.assertEqual(headers["access-control-allow-origin"], production_origin)
+        self.assertEqual(headers["access-control-allow-private-network"], "true")
+
     def test_rejects_oversized_request_before_parsing_json(self) -> None:
         self.handler_class.max_body_bytes = 64
         status, _headers, body = self._request(

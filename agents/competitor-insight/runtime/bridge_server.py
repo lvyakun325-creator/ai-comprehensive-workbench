@@ -18,6 +18,7 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 ALLOWED_ORIGINS = {
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://zhongfan-ai-workbench.lvyakun325.chatgpt.site",
 }
 WRITE_ENDPOINTS = {
     "/analyze-path",
@@ -131,6 +132,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        if self.headers.get("Access-Control-Request-Private-Network") == "true":
+            self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
