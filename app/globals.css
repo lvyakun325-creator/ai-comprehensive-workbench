@@ -2064,18 +2064,20 @@ button {
   margin: 16px 0 0;
   padding: 13px;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
   border-radius: 12px;
   background: #f5f8fc;
   list-style: none;
 }
 .competitor-workflow li {
+  min-width: 0;
   padding: 8px;
   border: 1px solid transparent;
   border-radius: 9px;
   color: #607089;
   font-size: 11px;
+  overflow-wrap: anywhere;
 }
 .competitor-workflow li span {
   width: 21px;
@@ -2134,7 +2136,10 @@ button {
 }
 .competitor-capture-progress strong { color: #33445f; }
 .competitor-capture-progress.connecting,
-.competitor-capture-progress.scraping {
+.competitor-capture-progress.scraping,
+.competitor-capture-progress.normalizing,
+.competitor-capture-progress.generating,
+.competitor-capture-progress.bundling {
   border-color: #a9c2ff;
   background: #edf3ff;
   color: #214fae;
@@ -2144,8 +2149,7 @@ button {
   background: #effaf4;
   color: #25714d;
 }
-.competitor-capture-progress.connection-failed,
-.competitor-capture-progress.scrape-failed {
+.competitor-capture-progress.failed {
   border-color: #edc4c4;
   background: #fff6f6;
   color: #9a3e3e;
@@ -2218,30 +2222,13 @@ button {
   padding-top: 20px;
   border-top: 1px solid #dfe7f2;
 }
-.competitor-report-heading,
-.competitor-report-status,
-.competitor-report-preview-heading,
-.competitor-report-path {
+.competitor-report-status {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
 }
-.competitor-report-heading h3,
-.competitor-report-preview-heading h3 {
-  margin: 3px 0 5px;
-  color: #2f3e56;
-  font-size: 18px;
-}
-.competitor-report-heading p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 11px;
-}
-.competitor-upload-button,
-.competitor-report-actions button,
-.competitor-report-preview-heading a,
-.competitor-report-path button {
+.competitor-report-actions button {
   padding: 9px 12px;
   border: 0;
   border-radius: 9px;
@@ -2251,51 +2238,6 @@ button {
   font-size: 11px;
   font-weight: 800;
   text-decoration: none;
-}
-.competitor-upload-button input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  clip-path: inset(50%);
-}
-.competitor-upload-button.disabled {
-  cursor: not-allowed;
-  opacity: .45;
-}
-.competitor-report-stages {
-  margin: 15px 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 7px;
-  list-style: none;
-}
-.competitor-report-stages li {
-  padding: 9px 7px;
-  border: 1px solid #e1e8f2;
-  border-radius: 9px;
-  background: #f8fafc;
-  color: #78879b;
-  font-size: 10px;
-  text-align: center;
-}
-.competitor-report-stages li span {
-  display: block;
-  margin-bottom: 4px;
-  font-weight: 900;
-}
-.competitor-report-stages li.current {
-  border-color: #aac3ff;
-  background: #edf3ff;
-  color: #2f66f6;
-}
-.competitor-report-stages li.completed {
-  border-color: #b9e4ce;
-  background: #effaf4;
-  color: #25714d;
 }
 .competitor-report-status {
   min-height: 52px;
@@ -2385,43 +2327,6 @@ button {
   margin: 5px 0 0;
   font-size: 11px;
   line-height: 1.55;
-}
-.competitor-report-preview {
-  margin-top: 14px;
-  padding: 14px;
-  border: 1px solid #cbd9eb;
-  border-radius: 12px;
-  background: #fff;
-}
-.competitor-report-preview pre {
-  max-height: 480px;
-  margin: 12px 0;
-  padding: 13px;
-  overflow: auto;
-  border-radius: 9px;
-  background: #172033;
-  color: #e9eef8;
-  font: 11px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.competitor-report-path {
-  align-items: flex-start;
-}
-.competitor-report-path code {
-  min-width: 0;
-  padding: 8px 10px;
-  flex: 1 1 auto;
-  border-radius: 8px;
-  background: #f2f5f9;
-  color: #53647c;
-  font-size: 10px;
-  overflow-wrap: anywhere;
-}
-.competitor-copy-message {
-  margin: 8px 0 0;
-  color: #4d6c88;
-  font-size: 10px;
 }
 
 .matrix-overview { display: grid; grid-template-columns: minmax(220px, .75fr) minmax(0, 1.25fr); gap: 14px; }
@@ -3640,15 +3545,11 @@ button {
   .competitor-console-heading,
   .competitor-overview-actions,
   .competitor-detection,
-  .competitor-report-heading,
-  .competitor-report-status,
-  .competitor-report-preview-heading,
-  .competitor-report-path {
+  .competitor-report-status {
     align-items: stretch;
     display: grid;
   }
 
-  .competitor-report-stages,
   .competitor-evidence-summary {
     grid-template-columns: 1fr;
   }
