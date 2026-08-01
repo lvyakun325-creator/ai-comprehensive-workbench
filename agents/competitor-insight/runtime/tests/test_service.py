@@ -243,6 +243,24 @@ class ServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid_evidence_bundle"):
                 service.validate_batch(str(result["evidenceId"]), valid_batches()[0], str(request["outputDir"]))
 
+    def test_task_session_rejects_mutated_context_and_nested_keys(self) -> None:
+        request = self._artifact_request()
+        result = service.analyze_artifacts(request)
+        session_path = Path(str(request["outputDir"])) / f"{result['evidenceId']}.evidence-session.json"
+        original = json.loads(session_path.read_text(encoding="utf-8"))
+        for mutate in (
+            lambda value: value["trustedBatchContexts"][0]["dangerous"].__class__,
+            lambda value: value["evidence"]["account"].update({"rawComments": "forbidden"}),
+        ):
+            session = json.loads(json.dumps(original))
+            if mutate.__code__.co_consts and "dangerous" in str(mutate.__code__.co_consts):
+                session["trustedBatchContexts"][0]["dangerous"] = True
+            else:
+                mutate(session)
+            session_path.write_text(json.dumps(session), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid_evidence_bundle"):
+                service.validate_batch(str(result["evidenceId"]), valid_batches()[0], str(request["outputDir"]))
+
     def test_rejects_paths_outside_the_controlled_douyin_directory(self) -> None:
         outside = self.project_root / "private.xlsx"
         outside.write_bytes(workbook_bytes())

@@ -892,6 +892,8 @@ def _validate_evidence_bundle(loaded: object, evidence_id: str) -> EvidenceBundl
     allowed_keys = required | {"content", "source"}
     if set(loaded) - allowed_keys or not all(isinstance(loaded.get(key), dict) for key in ("subject", "account", "completeness", "metrics", "rankings")):
         raise ValueError("invalid_evidence_bundle")
+    if set(cast(dict[str, object], loaded["subject"])) - {"nickname", "accountId", "signature", "followers"} or set(cast(dict[str, object], loaded["account"])) - {"nickname", "accountId", "signature", "followers"}:
+        raise ValueError("invalid_evidence_bundle")
     items = cast(list[object], loaded["items"])
     if not 1 <= len(items) <= 500:
         raise ValueError("invalid_evidence_bundle")
@@ -921,7 +923,7 @@ def _validate_contexts(bundle: EvidenceBundle, contexts: object) -> list[dict[st
     }
     by_id: dict[str, dict[str, object]] = {}
     for context in contexts:
-        if not isinstance(context, dict) or not isinstance(context.get("batchId"), str) or not isinstance(context.get("allowedEvidenceIds"), list):
+        if not isinstance(context, dict) or set(context) != {"batchId", "allowedEvidenceIds"} or not isinstance(context.get("batchId"), str) or not isinstance(context.get("allowedEvidenceIds"), list):
             raise ValueError("invalid_evidence_bundle")
         batch_id = cast(str, context["batchId"])
         allowed = context["allowedEvidenceIds"]
@@ -930,7 +932,15 @@ def _validate_contexts(bundle: EvidenceBundle, contexts: object) -> list[dict[st
         by_id[batch_id] = cast(dict[str, object], context)
     if set(by_id) != set(expected):
         raise ValueError("invalid_evidence_bundle")
-    return [by_id[batch_id] for batch_id in expected]
+    canonical_inputs = _batch_inputs(bundle)
+    canonical = [
+        {"batchId": batch_id, "allowedEvidenceIds": cast(dict[str, object], batch)["allowedEvidenceIds"]}
+        for batch_id, batch in cast(dict[str, object], canonical_inputs).items()
+    ]
+    persisted = [by_id[batch_id] for batch_id in expected]
+    if persisted != canonical:
+        raise ValueError("invalid_evidence_bundle")
+    return persisted
 
 
 def _legacy_contexts(evidence_id: str) -> list[dict[str, object]]:
