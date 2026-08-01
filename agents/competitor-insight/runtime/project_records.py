@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import errno
 import fcntl
 import hashlib
 from io import BytesIO
@@ -12,9 +13,11 @@ import os
 from pathlib import Path
 import re
 import secrets
+import socket
 import stat
 import subprocess
 import threading
+import time
 from typing import Callable, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import zipfile
@@ -103,6 +106,11 @@ _BUNDLE_FIELDS = {
     "itemCount", "status", "rootDirectory", "primaryReportPath", "manifestPath", "archivePath",
     "artifactIds", "manifestSha256", "archiveSha256", "memberIdentitySha256", "createdAt", "updatedAt",
 }
+_STORE_MUTEX_HOST = "127.0.0.1"
+_STORE_MUTEX_PORT_BASE = 49_152
+_STORE_MUTEX_PORT_COUNT = 16_384
+_STORE_MUTEX_TIMEOUT_SECONDS = 5.0
+_STORE_MUTEX_RETRY_SECONDS = 0.02
 _STORE_LOCK = threading.RLock()
 _STORE_LOCK_STATE = threading.local()
 
@@ -119,6 +127,39 @@ def _store_path() -> Path:
 
 def _store_lock_path() -> Path:
     return _store_path().with_name(".project-records.lock")
+
+
+def _store_mutex_port() -> int:
+    canonical_root = os.fsencode(str(PROJECT_ROOT.resolve()))
+    digest = hashlib.sha256(b"project-records-kernel-mutex\0" + canonical_root).digest()
+    return _STORE_MUTEX_PORT_BASE + int.from_bytes(digest[:2], "big") % _STORE_MUTEX_PORT_COUNT
+
+
+def _acquire_store_kernel_mutex() -> socket.socket:
+    try:
+        deadline = time.monotonic() + _STORE_MUTEX_TIMEOUT_SECONDS
+        port = _store_mutex_port()
+    except Exception:
+        raise ValueError("record_store_locked") from None
+    while True:
+        mutex: socket.socket | None = None
+        try:
+            mutex = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            mutex.bind((_STORE_MUTEX_HOST, port))
+            return mutex
+        except OSError as error:
+            if mutex is not None:
+                mutex.close()
+            if error.errno != errno.EADDRINUSE:
+                raise ValueError("record_store_locked") from None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("record_store_locked") from None
+            time.sleep(min(_STORE_MUTEX_RETRY_SECONDS, remaining))
+        except Exception:
+            if mutex is not None:
+                mutex.close()
+            raise ValueError("record_store_locked") from None
 
 
 def _open_store_lock() -> int:
@@ -147,7 +188,7 @@ def _open_store_lock() -> int:
 
 @contextmanager
 def _store_transaction() -> object:
-    """Serialize one durable-store transaction in thread then process order."""
+    """Serialize one durable-store transaction in thread then kernel-lock order."""
     with _STORE_LOCK:
         depth = getattr(_STORE_LOCK_STATE, "depth", 0)
         if depth:
@@ -157,19 +198,25 @@ def _store_transaction() -> object:
             finally:
                 _STORE_LOCK_STATE.depth -= 1
             return
-        descriptor = _open_store_lock()
+        kernel_mutex = _acquire_store_kernel_mutex()
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            _STORE_LOCK_STATE.depth = 1
-            _STORE_LOCK_STATE.descriptor = descriptor
+            descriptor = _open_store_lock()
             try:
-                yield
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                _STORE_LOCK_STATE.depth = 1
+                _STORE_LOCK_STATE.descriptor = descriptor
+                _STORE_LOCK_STATE.kernel_mutex = kernel_mutex
+                try:
+                    yield
+                finally:
+                    del _STORE_LOCK_STATE.kernel_mutex
+                    del _STORE_LOCK_STATE.descriptor
+                    del _STORE_LOCK_STATE.depth
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
             finally:
-                del _STORE_LOCK_STATE.descriptor
-                del _STORE_LOCK_STATE.depth
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
         finally:
-            os.close(descriptor)
+            kernel_mutex.close()
 
 
 def _allowed_roots() -> tuple[Path, ...]:

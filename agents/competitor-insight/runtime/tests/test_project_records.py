@@ -60,6 +60,89 @@ def _failed_finalize_in_process(
         project_records._atomic_write = original_atomic_write
 
 
+def _hold_store_transaction_in_process(
+    project_root: str,
+    entered: object,
+    release: object,
+    results: object,
+    fail: bool,
+) -> None:
+    project_records.PROJECT_ROOT = Path(project_root)
+    try:
+        with project_records._store_transaction():
+            entered.set()  # type: ignore[union-attr]
+            if not release.wait(timeout=10):  # type: ignore[union-attr]
+                raise TimeoutError("holder_release_timeout")
+            if fail:
+                raise RuntimeError("forced_transaction_failure")
+    except BaseException as error:
+        results.put(("error", f"{type(error).__name__}:{error}"))  # type: ignore[union-attr]
+    else:
+        results.put(("ok", "released"))  # type: ignore[union-attr]
+
+
+def _enter_store_transaction_in_process(
+    project_root: str, attempted: object, entered: object, results: object,
+) -> None:
+    project_records.PROJECT_ROOT = Path(project_root)
+    attempted.set()  # type: ignore[union-attr]
+    try:
+        with project_records._store_transaction():
+            entered.set()  # type: ignore[union-attr]
+    except BaseException as error:
+        results.put(("error", f"{type(error).__name__}:{error}"))  # type: ignore[union-attr]
+    else:
+        results.put(("ok", "entered"))  # type: ignore[union-attr]
+
+
+def _paused_finalize_in_process(
+    project_root: str,
+    task_id: str,
+    payload: dict[str, object],
+    entered: object,
+    release: object,
+    results: object,
+) -> None:
+    project_records.PROJECT_ROOT = Path(project_root)
+    original_bundle_request = project_records._bundle_request
+
+    def paused_bundle_request(*args: object, **kwargs: object) -> dict[str, object]:
+        entered.set()  # type: ignore[union-attr]
+        if not release.wait(timeout=10):  # type: ignore[union-attr]
+            raise TimeoutError("finalize_release_timeout")
+        return original_bundle_request(*args, **kwargs)
+
+    project_records._bundle_request = paused_bundle_request
+    try:
+        snapshot = project_records.finalize_bundle(task_id, payload)
+        bundle = next(item for item in snapshot["bundles"] if item["taskId"] == task_id)
+        results.put(("ok", str(bundle["id"])))  # type: ignore[union-attr]
+    except BaseException as error:
+        results.put(("error", f"{type(error).__name__}:{error}"))  # type: ignore[union-attr]
+    finally:
+        project_records._bundle_request = original_bundle_request
+
+
+def _signaled_finalize_in_process(
+    project_root: str,
+    task_id: str,
+    payload: dict[str, object],
+    attempted: object,
+    completed: object,
+    results: object,
+) -> None:
+    project_records.PROJECT_ROOT = Path(project_root)
+    attempted.set()  # type: ignore[union-attr]
+    try:
+        snapshot = project_records.finalize_bundle(task_id, payload)
+        bundle = next(item for item in snapshot["bundles"] if item["taskId"] == task_id)
+        results.put(("ok", str(bundle["id"])))  # type: ignore[union-attr]
+    except BaseException as error:
+        results.put(("error", f"{type(error).__name__}:{error}"))  # type: ignore[union-attr]
+    finally:
+        completed.set()  # type: ignore[union-attr]
+
+
 class ProjectRecordTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = TemporaryDirectory()
@@ -932,6 +1015,175 @@ class ProjectRecordTests(unittest.TestCase):
             project_records.update_task("competitor-20260801-a1", {"progress": 20})
 
         self.assertEqual(outside.read_text("utf-8"), "fixture")
+
+    def test_kernel_mutex_platform_failure_is_stably_fail_closed(self) -> None:
+        self.create_task()
+        original_store = self.store_path.read_bytes()
+
+        with patch.object(
+            project_records, "_store_mutex_port", side_effect=OSError("unavailable")
+        ):
+            try:
+                project_records.update_task(
+                    "competitor-20260801-a1", {"progress": 20}
+                )
+            except Exception as error:
+                failure = error
+            else:
+                self.fail("kernel mutex failure must not fall back to flock")
+
+        self.assertIsInstance(failure, ValueError)
+        self.assertEqual(str(failure), "record_store_locked")
+        self.assertEqual(self.store_path.read_bytes(), original_store)
+
+    def test_replaced_lock_inode_cannot_bypass_failed_transaction_mutex(self) -> None:
+        self.create_task()
+        context = multiprocessing.get_context("fork")
+        holder_entered = context.Event()
+        holder_release = context.Event()
+        holder_results = context.Queue()
+        holder = context.Process(
+            target=_hold_store_transaction_in_process,
+            args=(
+                str(self.project_root), holder_entered, holder_release,
+                holder_results, True,
+            ),
+        )
+        holder.start()
+        self.assertTrue(holder_entered.wait(timeout=5))
+
+        lock_path = self.store_path.with_name(".project-records.lock")
+        original_inode = lock_path.stat().st_ino
+        replacement = lock_path.with_name(".project-records.replacement")
+        replacement.write_text("replacement", "utf-8")
+        os.replace(replacement, lock_path)
+        self.assertNotEqual(lock_path.stat().st_ino, original_inode)
+        self.assertTrue(lock_path.is_file())
+
+        attempted = context.Event()
+        contender_entered = context.Event()
+        contender_results = context.Queue()
+        contender = context.Process(
+            target=_enter_store_transaction_in_process,
+            args=(str(self.project_root), attempted, contender_entered, contender_results),
+        )
+        contender.start()
+        self.assertTrue(attempted.wait(timeout=5))
+        entered_before_release = contender_entered.wait(timeout=0.75)
+        holder_release.set()
+        holder.join(timeout=15)
+        contender.join(timeout=15)
+
+        self.assertFalse(entered_before_release)
+        self.assertEqual(holder.exitcode, 0)
+        self.assertEqual(contender.exitcode, 0)
+        self.assertEqual(holder_results.get(timeout=2)[0], "error")
+        self.assertEqual(contender_results.get(timeout=2), ("ok", "entered"))
+
+    def test_replaced_lock_inode_keeps_same_task_finalization_idempotent(self) -> None:
+        output = self.prepare_bundle_task()
+        payload = self.bundle_payload(output)
+        context = multiprocessing.get_context("fork")
+        holder_entered = context.Event()
+        holder_release = context.Event()
+        holder_results = context.Queue()
+        holder = context.Process(
+            target=_paused_finalize_in_process,
+            args=(
+                str(self.project_root), "competitor-20260801-a1", payload,
+                holder_entered, holder_release, holder_results,
+            ),
+        )
+        holder.start()
+        self.assertTrue(holder_entered.wait(timeout=5))
+
+        lock_path = self.store_path.with_name(".project-records.lock")
+        replacement = lock_path.with_name(".project-records.replacement")
+        replacement.write_text("replacement", "utf-8")
+        os.replace(replacement, lock_path)
+
+        attempted = context.Event()
+        completed = context.Event()
+        contender_results = context.Queue()
+        contender = context.Process(
+            target=_signaled_finalize_in_process,
+            args=(
+                str(self.project_root), "competitor-20260801-a1", payload,
+                attempted, completed, contender_results,
+            ),
+        )
+        contender.start()
+        self.assertTrue(attempted.wait(timeout=5))
+        completed_before_release = completed.wait(timeout=0.75)
+        holder_release.set()
+        holder.join(timeout=15)
+        contender.join(timeout=15)
+
+        self.assertFalse(completed_before_release)
+        self.assertEqual(holder.exitcode, 0)
+        self.assertEqual(contender.exitcode, 0)
+        outcomes = [holder_results.get(timeout=2), contender_results.get(timeout=2)]
+        self.assertEqual({status for status, _ in outcomes}, {"ok"})
+        self.assertEqual(len({bundle_id for _, bundle_id in outcomes}), 1)
+        persisted = project_records.read_records("competitor-insight")
+        self.assertEqual(len(persisted["bundles"]), 1)
+        self.assertEqual(len(list(output.glob("bundle-*.manifest.json"))), 1)
+        self.assertEqual(len(list(output.glob("bundle-*.zip"))), 1)
+        self.assertEqual(list(output.glob(".bundle-*")), [])
+
+    def test_replaced_lock_inode_preserves_different_task_finalizations(self) -> None:
+        first_id = "competitor-20260801-a1"
+        second_id = "competitor-20260801-b2"
+        first = self.prepare_bundle_task(first_id)
+        second = self.prepare_bundle_task(second_id)
+        context = multiprocessing.get_context("fork")
+        holder_entered = context.Event()
+        holder_release = context.Event()
+        holder_results = context.Queue()
+        holder = context.Process(
+            target=_paused_finalize_in_process,
+            args=(
+                str(self.project_root), first_id, self.bundle_payload(first),
+                holder_entered, holder_release, holder_results,
+            ),
+        )
+        holder.start()
+        self.assertTrue(holder_entered.wait(timeout=5))
+
+        lock_path = self.store_path.with_name(".project-records.lock")
+        replacement = lock_path.with_name(".project-records.replacement")
+        replacement.write_text("replacement", "utf-8")
+        os.replace(replacement, lock_path)
+
+        attempted = context.Event()
+        completed = context.Event()
+        contender_results = context.Queue()
+        contender = context.Process(
+            target=_signaled_finalize_in_process,
+            args=(
+                str(self.project_root), second_id, self.bundle_payload(second),
+                attempted, completed, contender_results,
+            ),
+        )
+        contender.start()
+        self.assertTrue(attempted.wait(timeout=5))
+        completed_before_release = completed.wait(timeout=0.75)
+        holder_release.set()
+        holder.join(timeout=15)
+        contender.join(timeout=15)
+
+        self.assertFalse(completed_before_release)
+        self.assertEqual(holder.exitcode, 0)
+        self.assertEqual(contender.exitcode, 0)
+        self.assertEqual(holder_results.get(timeout=2)[0], "ok")
+        self.assertEqual(contender_results.get(timeout=2)[0], "ok")
+        persisted = project_records.read_records("competitor-insight")
+        self.assertEqual(len(persisted["bundles"]), 2)
+        self.assertEqual({task["status"] for task in persisted["tasks"]}, {"completed"})
+        for output in (first, second):
+            self.assertEqual(len(list(output.glob("bundle-*.manifest.json"))), 1)
+            self.assertEqual(len(list(output.glob("bundle-*.zip"))), 1)
+            self.assertEqual(list(output.glob(".bundle-*")), [])
 
 
 if __name__ == "__main__":
