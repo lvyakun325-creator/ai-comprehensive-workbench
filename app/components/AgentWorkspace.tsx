@@ -8,12 +8,11 @@ import {
   getTaskResults,
   mergeProjectResults,
   mergeProjectTasks,
-  type ProjectResult,
-  type ProjectTask,
   type TaskStatusFilter,
 } from "../lib/agent-project-records.mjs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentResultFiles } from "./AgentResultFiles";
+import { CompetitorResultBundles } from "./CompetitorResultBundles";
 import { AgentTaskList } from "./AgentTaskList";
 import {
   ContentMatrixConfigPanel,
@@ -37,7 +36,7 @@ import {
 import { ModelConfigPanel } from "./ModelConfigPanel";
 import {
   loadCompetitorProjectRecords,
-  revealCompetitorArtifact,
+  type CompetitorProjectSnapshot,
 } from "../lib/competitor-project-records-client";
 
 const PROJECT_TABS = [
@@ -138,10 +137,11 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   const [activeTab, setActiveTab] = useState(PROJECT_TABS[0]);
   const [resultTaskId, setResultTaskId] = useState<string | null>(null);
   const [taskFilter, setTaskFilter] = useState<TaskStatusFilter>("all");
-  const [competitorRecords, setCompetitorRecords] = useState<{
-    tasks: readonly ProjectTask[];
-    results: readonly ProjectResult[];
-  }>({tasks: [], results: []});
+  const [competitorRecords, setCompetitorRecords] = useState<CompetitorProjectSnapshot>({
+    tasks: [],
+    bundles: [],
+    results: [],
+  });
   const [matrixDiagnosis, setMatrixDiagnosis] = useState<MatrixDiagnosisValues>({});
   const [matrixSubmitAttempted, setMatrixSubmitAttempted] = useState(false);
   const [matrixReady, setMatrixReady] = useState(false);
@@ -186,12 +186,22 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   const showRecordLoadError = useCallback(() => {
     onPreview("无法读取本地竞品任务记录，请确认 8768 服务已启动");
   }, [onPreview]);
-  const openCompletedCompetitorTask = useCallback(async (taskId: string) => {
+  const openCompletedCompetitorTask = useCallback(async (
+    taskId: string,
+    bundleId: string,
+  ) => {
     try {
       const snapshot = await refreshCompetitorRecords();
       const task = snapshot.tasks.find((item) => item.id === taskId);
-      const hasArtifacts = snapshot.results.some((item) => item.taskId === taskId);
-      if (!task || task.status !== "completed" || !hasArtifacts) {
+      const bundle = snapshot.bundles.find((item) => (
+        item.id === bundleId && item.taskId === taskId
+      ));
+      if (
+        task?.status !== "completed"
+        || task.bundleId !== bundleId
+        || bundle?.status !== "ready"
+        || !bundle.primaryArtifactId
+      ) {
         onPreview("抓取已完成，但成果记录尚未就绪，请稍后刷新");
         return;
       }
@@ -598,17 +608,23 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
           }}
         />
       ) : activeTab === "成果文件" ? (
-        <AgentResultFiles
-          agentId={agent.id}
-          getAgentResults={(agentId) =>
-            getAgentResults(agentId, mergedProjectResults)}
-          getTaskById={(taskId) => getTaskById(taskId, mergedProjectTasks)}
-          initialTaskId={resultTaskId}
-          onPreview={onPreview}
-          onRevealArtifact={isCompetitorInsight
-            ? revealCompetitorArtifact
-            : undefined}
-        />
+        isCompetitorInsight ? (
+          <CompetitorResultBundles
+            artifacts={competitorRecords.results}
+            bundles={competitorRecords.bundles}
+            initialTaskId={resultTaskId}
+            onPreview={onPreview}
+          />
+        ) : (
+          <AgentResultFiles
+            agentId={agent.id}
+            getAgentResults={(agentId) =>
+              getAgentResults(agentId, mergedProjectResults)}
+            getTaskById={(taskId) => getTaskById(taskId, mergedProjectTasks)}
+            initialTaskId={resultTaskId}
+            onPreview={onPreview}
+          />
+        )
       ) : activeTab === "Agent 配置" && isContentMatrix ? (
         <ContentMatrixConfigPanel
           activeConfig={matrixActiveConfig}
@@ -633,8 +649,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         <CompetitorInsightPanel
           mode="run"
           onPreview={onPreview}
-          onTaskCompleted={(taskId) => {
-            void openCompletedCompetitorTask(taskId);
+          onTaskCompleted={(taskId, bundleId) => {
+            void openCompletedCompetitorTask(taskId, bundleId);
           }}
         />
       ) : isContentMatrix && activeTab === "Agent 对话" ? (
