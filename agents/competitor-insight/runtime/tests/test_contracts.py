@@ -107,6 +107,25 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(result["evidenceId"], "DY-E0001")
 
+    def test_contract_types_bind_content_artifacts_to_trusted_batch_contexts(self):
+        import contracts
+
+        self.assertTrue(hasattr(contracts, "TrustedBatchContext"))
+        self.assertIn("content-overview", str(contracts.SectionClaim.__annotations__["section"]))
+        self.assertIn("content", str(contracts.SectionBatch.__annotations__["batchId"]))
+        self.assertEqual(
+            contracts.TrustedBatchContext.__annotations__["allowedEvidenceIds"],
+            list[str],
+        )
+        self.assertEqual(
+            contracts.ReportArtifact.__annotations__["sections"],
+            list[contracts.SectionBatch],
+        )
+        self.assertEqual(
+            contracts.FinalReportValidationInput.__annotations__["trustedBatchContexts"],
+            list[contracts.TrustedBatchContext],
+        )
+
     def test_section_batch_schema_requires_closed_root_and_valid_evidence(self):
         schema = self.load_section_batch_schema()
 

@@ -7,7 +7,7 @@ import unittest
 RUNTIME_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RUNTIME_DIR))
 
-from section_validator import validate_section_batch
+from section_validator import validate_section_batch as _validate_section_batch
 
 
 def evidence_bundle() -> dict[str, object]:
@@ -152,6 +152,21 @@ def content_batch() -> dict[str, object]:
     }
 
 
+def _trusted_context(batch: dict[str, object], bundle: dict[str, object]) -> dict[str, object]:
+    evidence_ids: list[str] = []
+    for key in ("claims", "topicDirections", "filmingTemplates", "conversionItems", "executionDays"):
+        for item in batch.get(key, []):
+            evidence_ids.extend(item.get("evidenceIds", []))
+    return {
+        "batchId": batch["batchId"],
+        "allowedEvidenceIds": list(dict.fromkeys(evidence_ids)),
+    }
+
+
+def validate_section_batch(batch: dict[str, object], bundle: dict[str, object]) -> dict[str, object]:
+    return _validate_section_batch(batch, bundle, _trusted_context(batch, bundle))
+
+
 def strategy_batch() -> dict[str, object]:
     return {
         "batchId": "strategy",
@@ -173,6 +188,45 @@ def strategy_batch() -> dict[str, object]:
 
 
 class SectionValidatorTests(unittest.TestCase):
+    def test_fails_closed_without_trusted_batch_context(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing_trusted_batch_context"):
+            _validate_section_batch(content_batch(), xhs_note_bundle())
+
+    def test_rejects_response_evidence_not_in_the_trusted_batch_allowlist(self) -> None:
+        bundle = xhs_note_bundle()
+        second = dict(bundle["items"][0])
+        second["evidenceId"] = "XHS-E0002"
+        bundle["items"].append(second)
+        batch = content_batch()
+        batch["claims"][0]["evidenceIds"] = ["XHS-E0002"]
+
+        with self.assertRaisesRegex(ValueError, "evidence_id_not_allowed"):
+            _validate_section_batch(
+                batch,
+                bundle,
+                {"batchId": "content", "allowedEvidenceIds": ["XHS-E0001"]},
+            )
+
+    def test_content_rejects_direct_uncaptured_visual_comment_and_private_domain_claims(self) -> None:
+        batch = content_batch()
+        batch["claims"][1] = {
+            "section": "content-structure",
+            "statement": "画面展示医生讲解并引导私域咨询",
+            "strength": "direct",
+            "evidenceIds": ["XHS-E0001"],
+            "rationale": "来自画面和评论",
+        }
+
+        with self.assertRaisesRegex(ValueError, "content_claim_requires_hypothesis"):
+            validate_section_batch(batch, xhs_note_bundle())
+
+    def test_content_rejects_unverified_visual_or_private_domain_recommendations(self) -> None:
+        batch = content_batch()
+        batch["topicDirections"][0]["angle"] = "画面展示医生讲解并引导私域咨询"
+
+        with self.assertRaisesRegex(ValueError, "content_recommendation_requires_hypothesis"):
+            validate_section_batch(batch, xhs_note_bundle())
+
     def test_content_contract_accepts_xhs_evidence_and_rejects_account_plan_fields(self) -> None:
         self.assertEqual(
             validate_section_batch(content_batch(), xhs_note_bundle())["batchId"],
@@ -202,7 +256,7 @@ class SectionValidatorTests(unittest.TestCase):
             "executionDays": [],
         }
 
-        with self.assertRaisesRegex(ValueError, "unknown_evidence_id"):
+        with self.assertRaisesRegex(ValueError, "unknown.*evidence_id"):
             validate_section_batch(batch, evidence_bundle())
 
     def test_requires_explanation_and_verification_for_weak_or_hypothesis_claims(self) -> None:

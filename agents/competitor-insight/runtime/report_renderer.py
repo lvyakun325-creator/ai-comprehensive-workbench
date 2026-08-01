@@ -137,8 +137,8 @@ def _ranking_table(bundle: EvidenceBundle, ranking_name: str) -> str:
     rows = _ranking_rows(bundle, ranking_name)
     link_label = "笔记链接" if bundle.get("platformId") == "xiaohongshu" else "作品/视频链接"
     lines = [
-        f"| 排名 | 标题 | {link_label} | 点赞 | 评论 | 收藏 | 分享 | 综合互动量 |",
-        "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        f"| 排名 | 标题 | {link_label} | 发布时间 | 点赞 | 评论 | 收藏 | 分享 | 综合互动量 |",
+        "| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for position, item in enumerate(rows, start=1):
         lines.append(
@@ -148,6 +148,7 @@ def _ranking_table(bundle: EvidenceBundle, ranking_name: str) -> str:
                     str(position),
                     _safe_text(item.get("title")),
                     _safe_text(item.get("url") or "缺失"),
+                    _safe_text(item.get("publishedAt") or "缺失"),
                     _format_count(item.get("likes")),
                     _format_count(item.get("comments")),
                     _format_count(item.get("collects")),
@@ -314,8 +315,32 @@ def _special_rankings(bundle: EvidenceBundle) -> str:
 def _validated_batch_map(
     bundle: EvidenceBundle,
     batches: list[dict[str, object]],
+    trusted_batch_contexts: object | None,
 ) -> dict[str, dict[str, object]]:
-    validated = [validate_section_batch(batch, bundle) for batch in batches]
+    if not isinstance(trusted_batch_contexts, list):
+        raise ValueError("missing_trusted_batch_contexts")
+    raw_batch_ids: set[str] = set()
+    for batch in batches:
+        if not isinstance(batch, dict) or not isinstance(batch.get("batchId"), str):
+            raise ValueError("expected_section_batch_object")
+        batch_id = str(batch["batchId"])
+        if batch_id in raw_batch_ids:
+            raise ValueError(f"duplicate_batch_id:{batch_id}")
+        raw_batch_ids.add(batch_id)
+    contexts_by_id: dict[str, object] = {}
+    for context in trusted_batch_contexts:
+        if not isinstance(context, dict) or not isinstance(context.get("batchId"), str):
+            raise ValueError("invalid_trusted_batch_context")
+        batch_id = str(context["batchId"])
+        if batch_id in contexts_by_id:
+            raise ValueError(f"duplicate_trusted_batch_context:{batch_id}")
+        contexts_by_id[batch_id] = context
+    validated = []
+    for batch in batches:
+        batch_id = str(batch["batchId"])
+        if batch_id not in contexts_by_id:
+            raise ValueError(f"missing_trusted_batch_context:{batch_id}")
+        validated.append(validate_section_batch(batch, bundle, contexts_by_id[batch_id]))
     by_id: dict[str, dict[str, object]] = {}
     for batch in validated:
         batch_id = str(batch["batchId"])
@@ -328,6 +353,8 @@ def _validated_batch_map(
             raise ValueError(f"missing_batch_id:{batch_id}")
     if len(by_id) != len(expected_ids):
         raise ValueError("unexpected_report_batch_count")
+    if set(contexts_by_id) != set(by_id):
+        raise ValueError("unexpected_trusted_batch_context")
     return by_id
 
 
@@ -378,9 +405,10 @@ def _expected_evidence_lines(
 def assemble_report(
     bundle: EvidenceBundle,
     batches: list[dict[str, object]],
+    trusted_batch_contexts: object | None = None,
 ) -> str:
     """Assemble the fixed report using only validated model text and bundle numbers."""
-    by_id = _validated_batch_map(bundle, batches)
+    by_id = _validated_batch_map(bundle, batches, trusted_batch_contexts)
     if bundle.get("inputKind") == "content":
         return _assemble_content_report(bundle, by_id)
 
@@ -588,13 +616,14 @@ def validate_final_report(
     markdown: str,
     bundle: EvidenceBundle,
     batches: list[dict[str, object]],
+    trusted_batch_contexts: object | None = None,
 ) -> list[str]:
     """Return stable final-report errors for structure, evidence, and numeric leaks."""
     errors: list[str] = []
-    by_id = _validated_batch_map(bundle, batches)
+    by_id = _validated_batch_map(bundle, batches, trusted_batch_contexts)
     if bundle.get("inputKind") == "content":
         return _validate_content_final_report(markdown, bundle, by_id)
-    if markdown != assemble_report(bundle, batches):
+    if markdown != assemble_report(bundle, batches, trusted_batch_contexts):
         errors.append("report_content_mismatch")
     lines, active, found_fence = _active_lines(markdown)
     if found_fence:

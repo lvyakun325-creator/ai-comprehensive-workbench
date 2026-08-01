@@ -22,6 +22,7 @@ function config(overrides = {}) {
 
 function fixtureInput() {
   return {
+    allowedEvidenceIds: ["DY-E0001"],
     account: {
       nickname: "示例账号",
       followers: 12000,
@@ -243,12 +244,36 @@ test("content prompt and parser accept XHS evidence IDs with the exact 3/1/0 con
   assert.match(turns[0].content, /topicDirections 必须恰好 3 项/);
   assert.match(turns[0].content, /filmingTemplates 必须恰好 1 项/);
   assert.match(turns[0].content, /executionDays 必须为空数组/);
-  assert.deepEqual(parseCompetitorBatchResponse(JSON.stringify(validContentBatch())), validContentBatch());
+  assert.deepEqual(
+    parseCompetitorBatchResponse(JSON.stringify(validContentBatch()), ["XHS-E0001"]),
+    validContentBatch(),
+  );
 
   const invalid = validContentBatch();
   invalid.executionDays = [{ day: 1, action: "不应出现", evidenceIds: ["XHS-E0001"], complianceNotes: ["不承诺疗效"] }];
   assert.throws(
-    () => parseCompetitorBatchResponse(JSON.stringify(invalid)),
+    () => parseCompetitorBatchResponse(JSON.stringify(invalid), ["XHS-E0001"]),
+    (error) => error instanceof CompetitorReportRuntimeError
+      && error.code === "INVALID_MODEL_OUTPUT",
+  );
+});
+
+test("batch input and response parser bind evidence IDs to the trusted allowlist", () => {
+  const input = fixtureInput();
+  delete input.allowedEvidenceIds;
+  assert.throws(
+    () => buildCompetitorBatchPrompt("strategy", input),
+    (error) => error instanceof CompetitorReportRuntimeError
+      && error.code === "INVALID_REQUEST",
+  );
+
+  const unauthorized = validContentBatch();
+  unauthorized.claims[0].evidenceIds = ["XHS-E9999"];
+  assert.throws(
+    () => parseCompetitorBatchResponse(
+      JSON.stringify(unauthorized),
+      ["XHS-E0001"],
+    ),
     (error) => error instanceof CompetitorReportRuntimeError
       && error.code === "INVALID_MODEL_OUTPUT",
   );
@@ -283,6 +308,7 @@ test("prompt rejects unknown batches and sanitized input above 80000 characters"
     () =>
       buildCompetitorBatchPrompt("strategy", {
         account: { nickname: "示例账号" },
+        allowedEvidenceIds: ["DY-E0001"],
         evidence: "x".repeat(80_001),
       }),
     (error) =>
@@ -295,12 +321,14 @@ test("parser accepts each complete formal batch shape and returns ordinary recor
   assert.deepEqual(
     parseCompetitorBatchResponse(
       `\`\`\`json\n${JSON.stringify(validBatch("strategy"))}\n\`\`\``,
+      ["DY-E0001"],
     ),
     validBatch("strategy"),
   );
   for (const batchId of ["strategy", "performance", "execution"]) {
     const parsed = parseCompetitorBatchResponse(
       JSON.stringify(validBatch(batchId)),
+      ["DY-E0001"],
     );
     assert.deepEqual(parsed, validBatch(batchId));
     assert.equal(Object.getPrototypeOf(parsed), Object.prototype);
@@ -321,7 +349,7 @@ test("parser rejects non-whole JSON, dangerous keys and unknown batches", () => 
     '{"batchId":"strategy","nested":{"constructor":{"prototype":{}}}}',
   ]) {
     assert.throws(
-      () => parseCompetitorBatchResponse(text),
+      () => parseCompetitorBatchResponse(text, ["DY-E0001"]),
       (error) => error instanceof CompetitorReportRuntimeError,
       text.slice(0, 80),
     );
@@ -369,7 +397,7 @@ test("parser rejects formal-schema violations before a batch can succeed", () =>
       index < 6 ? structuredClone(validBatch("strategy")) : validBatch("execution");
     mutate(batch);
     assert.throws(
-      () => parseCompetitorBatchResponse(JSON.stringify(batch)),
+      () => parseCompetitorBatchResponse(JSON.stringify(batch), ["DY-E0001"]),
       (error) =>
         error instanceof CompetitorReportRuntimeError
         && error.code === "INVALID_MODEL_OUTPUT",

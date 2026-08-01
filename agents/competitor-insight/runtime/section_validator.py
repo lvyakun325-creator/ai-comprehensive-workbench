@@ -104,6 +104,17 @@ _NEGATION_SCOPE_ESCAPE_PATTERN = re.compile(
     r"(?:并非|不是|不等于)\s*(?:不应|不能|不得|不要|不建议)"
     r"|(?:不得不|不能不)"
 )
+_CONTENT_CAPABILITY_TERMS = {
+    "visual": ("画面", "镜头", "视觉"),
+    "comment_text": ("评论正文", "评论区", "评论内容"),
+    "conversion": ("商品", "私域", "直播", "转化", "咨询"),
+}
+_CONTENT_CAPABILITY_FIELDS = {
+    "visual": ("ocr", "visualEvidence", "frames"),
+    "comment_text": ("commentTexts", "commentText", "commentsText"),
+    "conversion": ("product", "products", "privateDomain", "live", "conversion", "conversionPath"),
+}
+_CONTROLLED_EVIDENCE_ID = re.compile(r"^[A-Z][A-Z0-9]*-E\d{4,}$")
 
 
 def _object(value: object, error: str) -> dict[str, object]:
@@ -223,7 +234,61 @@ def _known_evidence(bundle: EvidenceBundle) -> dict[str, dict[str, object]]:
     return known
 
 
-def _evidence_ids(value: object, known: dict[str, dict[str, object]]) -> list[str]:
+def _trusted_allowed_evidence_ids(
+    batch_id: str,
+    context: object | None,
+    known: dict[str, dict[str, object]],
+) -> set[str]:
+    if not isinstance(context, dict):
+        raise ValueError("missing_trusted_batch_context")
+    if context.get("batchId") != batch_id:
+        raise ValueError("trusted_batch_context_mismatch")
+    allowed = context.get("allowedEvidenceIds")
+    if not isinstance(allowed, list) or not allowed:
+        raise ValueError("invalid_trusted_allowed_evidence_ids")
+    if any(
+        not isinstance(evidence_id, str)
+        or not _CONTROLLED_EVIDENCE_ID.fullmatch(evidence_id)
+        for evidence_id in allowed
+    ):
+        raise ValueError("invalid_trusted_allowed_evidence_ids")
+    if len(set(cast(list[str], allowed))) != len(allowed):
+        raise ValueError("duplicate_trusted_allowed_evidence_id")
+    if any(evidence_id not in known for evidence_id in cast(list[str], allowed)):
+        raise ValueError("unknown_trusted_allowed_evidence_id")
+    return set(cast(list[str], allowed))
+
+
+def _content_capabilities(bundle: EvidenceBundle) -> set[str]:
+    content = bundle.get("content", {})
+    if not isinstance(content, dict):
+        return set()
+    return {
+        capability
+        for capability, fields in _CONTENT_CAPABILITY_FIELDS.items()
+        if any(content.get(field) not in (None, "", [], {}) for field in fields)
+    }
+
+
+def _required_content_capabilities(section: str, *texts: str) -> set[str]:
+    combined = "\n".join(texts)
+    required = {
+        capability
+        for capability, terms in _CONTENT_CAPABILITY_TERMS.items()
+        if any(term in combined for term in terms)
+    }
+    if section == "conversion":
+        required.add("conversion")
+    if "来自画面和评论" in combined:
+        required.update({"visual", "comment_text"})
+    return required
+
+
+def _evidence_ids(
+    value: object,
+    known: dict[str, dict[str, object]],
+    allowed_evidence_ids: set[str],
+) -> list[str]:
     raw_ids = _list(value, "invalid_evidence_ids")
     if not raw_ids:
         raise ValueError("evidence_ids_required")
@@ -232,6 +297,8 @@ def _evidence_ids(value: object, known: dict[str, dict[str, object]]) -> list[st
         evidence_id = _text(raw_id, "invalid_evidence_id")
         if evidence_id not in known:
             raise ValueError(f"unknown_evidence_id:{evidence_id}")
+        if evidence_id not in allowed_evidence_ids:
+            raise ValueError(f"evidence_id_not_allowed:{evidence_id}")
         evidence_ids.append(evidence_id)
     return evidence_ids
 
@@ -256,6 +323,8 @@ def _validate_claim(
     raw: object,
     known: dict[str, dict[str, object]],
     allowed_sections: set[str],
+    content_capabilities: set[str],
+    allowed_evidence_ids: set[str],
 ) -> dict[str, object]:
     claim = _object(raw, "invalid_claim")
     _keys(
@@ -272,7 +341,7 @@ def _validate_claim(
     strength = _text(claim["strength"], "invalid_claim_strength")
     if strength not in STRENGTH_LABELS:
         raise ValueError(f"invalid_claim_strength:{strength}")
-    _evidence_ids(claim["evidenceIds"], known)
+    _evidence_ids(claim["evidenceIds"], known, allowed_evidence_ids)
 
     rationale = claim.get("rationale")
     if not isinstance(rationale, str) or not rationale.strip():
@@ -291,48 +360,72 @@ def _validate_claim(
     elif "verificationPlan" in claim:
         verification = _text(claim["verificationPlan"], "invalid_verification_plan")
         _check_model_text(verification)
+    required_capabilities = _required_content_capabilities(
+        section,
+        statement,
+        str(rationale),
+        str(claim.get("verificationPlan", "")),
+    ) if section in _BATCH_SECTIONS["content"] else set()
+    if required_capabilities - content_capabilities and strength != "hypothesis":
+        raise ValueError("content_claim_requires_hypothesis")
     _optional_compliance_notes(claim, required=False)
     return claim
 
 
-def _validate_topic(raw: object, known: dict[str, dict[str, object]]) -> dict[str, object]:
+def _validate_topic(
+    raw: object,
+    known: dict[str, dict[str, object]],
+    allowed_evidence_ids: set[str],
+) -> dict[str, object]:
     topic = _object(raw, "invalid_topic_direction")
     _keys(topic, _TOPIC_KEYS, _TOPIC_KEYS, "topic_direction")
     for field in ("title", "angle"):
         _check_model_text(_text(topic[field], f"invalid_topic_{field}"))
-    _evidence_ids(topic["evidenceIds"], known)
+    _evidence_ids(topic["evidenceIds"], known, allowed_evidence_ids)
     _optional_compliance_notes(topic, required=True)
     return topic
 
 
-def _validate_filming(raw: object, known: dict[str, dict[str, object]]) -> dict[str, object]:
+def _validate_filming(
+    raw: object,
+    known: dict[str, dict[str, object]],
+    allowed_evidence_ids: set[str],
+) -> dict[str, object]:
     template = _object(raw, "invalid_filming_template")
     _keys(template, _FILMING_KEYS, _FILMING_KEYS, "filming_template")
     for field in ("name", "hook"):
         _check_model_text(_text(template[field], f"invalid_filming_{field}"))
     _text_list(template["structure"], "invalid_filming_structure", allow_empty=False)
-    _evidence_ids(template["evidenceIds"], known)
+    _evidence_ids(template["evidenceIds"], known, allowed_evidence_ids)
     _optional_compliance_notes(template, required=True)
     return template
 
 
-def _validate_conversion(raw: object, known: dict[str, dict[str, object]]) -> dict[str, object]:
+def _validate_conversion(
+    raw: object,
+    known: dict[str, dict[str, object]],
+    allowed_evidence_ids: set[str],
+) -> dict[str, object]:
     item = _object(raw, "invalid_conversion_item")
     _keys(item, _CONVERSION_KEYS, _CONVERSION_KEYS, "conversion_item")
     _check_model_text(_text(item["action"], "invalid_conversion_action"))
-    _evidence_ids(item["evidenceIds"], known)
+    _evidence_ids(item["evidenceIds"], known, allowed_evidence_ids)
     _optional_compliance_notes(item, required=True)
     return item
 
 
-def _validate_execution(raw: object, known: dict[str, dict[str, object]]) -> dict[str, object]:
+def _validate_execution(
+    raw: object,
+    known: dict[str, dict[str, object]],
+    allowed_evidence_ids: set[str],
+) -> dict[str, object]:
     item = _object(raw, "invalid_execution_day")
     _keys(item, _EXECUTION_KEYS, _EXECUTION_KEYS, "execution_day")
     day = item["day"]
     if isinstance(day, bool) or not isinstance(day, int) or not 1 <= day <= 7:
         raise ValueError("invalid_execution_day_number")
     _check_model_text(_text(item["action"], "invalid_execution_action"))
-    _evidence_ids(item["evidenceIds"], known)
+    _evidence_ids(item["evidenceIds"], known, allowed_evidence_ids)
     _optional_compliance_notes(item, required=True)
     return item
 
@@ -405,7 +498,38 @@ def _validate_content_contract(batch: dict[str, object]) -> None:
         raise ValueError("content_execution_days_must_be_empty")
 
 
-def validate_section_batch(batch: object, bundle: EvidenceBundle) -> dict[str, object]:
+def _validate_content_recommendation_capabilities(
+    batch: dict[str, object],
+    content_capabilities: set[str],
+) -> None:
+    recommendation_texts: list[tuple[str, tuple[str, ...]]] = []
+    for topic in cast(list[dict[str, object]], batch["topicDirections"]):
+        recommendation_texts.append((
+            "",
+            (str(topic.get("title", "")), str(topic.get("angle", ""))),
+        ))
+    for template in cast(list[dict[str, object]], batch["filmingTemplates"]):
+        recommendation_texts.append((
+            "",
+            (
+                str(template.get("name", "")),
+                str(template.get("hook", "")),
+                *tuple(str(item) for item in cast(list[object], template.get("structure", []))),
+            ),
+        ))
+    for item in cast(list[dict[str, object]], batch["conversionItems"]):
+        recommendation_texts.append(("conversion", (str(item.get("action", "")),)))
+    for section, texts in recommendation_texts:
+        required = _required_content_capabilities(section, *texts)
+        if required - content_capabilities and "待验证假设" not in "\n".join(texts):
+            raise ValueError("content_recommendation_requires_hypothesis")
+
+
+def validate_section_batch(
+    batch: object,
+    bundle: EvidenceBundle,
+    trusted_batch_context: object | None = None,
+) -> dict[str, object]:
     """Return a detached validated batch or raise a stable validation error."""
     normalized = deepcopy(_object(batch, "expected_section_batch_object"))
     _keys(normalized, _BATCH_KEYS, _BATCH_KEYS, "batch")
@@ -413,6 +537,12 @@ def validate_section_batch(batch: object, bundle: EvidenceBundle) -> dict[str, o
     if batch_id not in _BATCH_SECTIONS:
         raise ValueError(f"invalid_batch_id:{batch_id}")
     known = _known_evidence(bundle)
+    allowed_evidence_ids = _trusted_allowed_evidence_ids(
+        batch_id,
+        trusted_batch_context,
+        known,
+    )
+    content_capabilities = _content_capabilities(bundle)
 
     claims = _list(normalized["claims"], "invalid_claims")
     topics = _list(normalized["topicDirections"], "invalid_topic_directions")
@@ -429,16 +559,31 @@ def validate_section_batch(batch: object, bundle: EvidenceBundle) -> dict[str, o
 
     normalized["batchId"] = batch_id
     normalized["claims"] = [
-        _validate_claim(item, known, _BATCH_SECTIONS[batch_id])
+        _validate_claim(
+            item,
+            known,
+            _BATCH_SECTIONS[batch_id],
+            content_capabilities,
+            allowed_evidence_ids,
+        )
         for item in claims
     ]
-    normalized["topicDirections"] = [_validate_topic(item, known) for item in topics]
-    normalized["filmingTemplates"] = [_validate_filming(item, known) for item in filming]
-    normalized["conversionItems"] = [_validate_conversion(item, known) for item in conversions]
-    normalized["executionDays"] = [_validate_execution(item, known) for item in execution]
+    normalized["topicDirections"] = [
+        _validate_topic(item, known, allowed_evidence_ids) for item in topics
+    ]
+    normalized["filmingTemplates"] = [
+        _validate_filming(item, known, allowed_evidence_ids) for item in filming
+    ]
+    normalized["conversionItems"] = [
+        _validate_conversion(item, known, allowed_evidence_ids) for item in conversions
+    ]
+    normalized["executionDays"] = [
+        _validate_execution(item, known, allowed_evidence_ids) for item in execution
+    ]
 
     if batch_id == "execution":
         _validate_execution_contract(normalized, bundle, known)
     if batch_id == "content":
         _validate_content_contract(normalized)
+        _validate_content_recommendation_capabilities(normalized, content_capabilities)
     return normalized

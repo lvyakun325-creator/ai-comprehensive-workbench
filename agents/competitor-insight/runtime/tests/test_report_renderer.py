@@ -8,7 +8,12 @@ RUNTIME_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RUNTIME_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from report_renderer import assemble_report, render_evidence_reference, validate_final_report
+from contracts import SectionClaim, SectionBatch
+from report_renderer import (
+    assemble_report as _assemble_report,
+    render_evidence_reference,
+    validate_final_report as _validate_final_report,
+)
 from test_section_validator import content_batch, evidence_bundle, execution_batch, xhs_note_bundle
 
 
@@ -71,6 +76,28 @@ def valid_batches() -> list[dict[str, object]]:
     return [strategy, performance, execution_batch()]
 
 
+def trusted_contexts(batches: list[dict[str, object]]) -> list[dict[str, object]]:
+    contexts = []
+    for batch in batches:
+        evidence_ids: list[str] = []
+        for key in ("claims", "topicDirections", "filmingTemplates", "conversionItems", "executionDays"):
+            for item in batch.get(key, []):
+                evidence_ids.extend(item.get("evidenceIds", []))
+        contexts.append({
+            "batchId": batch["batchId"],
+            "allowedEvidenceIds": list(dict.fromkeys(evidence_ids)),
+        })
+    return contexts
+
+
+def assemble_report(bundle: dict[str, object], batches: list[dict[str, object]]) -> str:
+    return _assemble_report(bundle, batches, trusted_contexts(batches))
+
+
+def validate_final_report(markdown: str, bundle: dict[str, object], batches: list[dict[str, object]]) -> list[str]:
+    return _validate_final_report(markdown, bundle, batches, trusted_contexts(batches))
+
+
 class ReportRendererTests(unittest.TestCase):
     def test_account_report_has_the_confirmed_fixed_heading_structure(self) -> None:
         markdown = assemble_report(evidence_bundle(), valid_batches())
@@ -122,12 +149,44 @@ class ReportRendererTests(unittest.TestCase):
         ]
         positions = [markdown.index(heading) for heading in headings]
         self.assertEqual(positions, sorted(positions))
-        self.assertIn("| 排名 | 标题 | 作品/视频链接 | 点赞 | 评论 | 收藏 | 分享 | 综合互动量 |", markdown)
+        self.assertIn("| 排名 | 标题 | 作品/视频链接 | 发布时间 | 点赞 | 评论 | 收藏 | 分享 | 综合互动量 |", markdown)
+        self.assertIn("发布时间", markdown)
+        self.assertIn("2026-07-01 10:00:00", markdown)
+        self.assertIn("2026-07-02 10:00:00", markdown)
         self.assertIn("DY-E0001", markdown)
         self.assertIn("点赞：12,000", markdown)
         self.assertIn("基于标题和互动数据的弱判断", markdown)
         self.assertIn("待验证假设", markdown)
         self.assertNotIn("999,999", markdown)
+
+    def test_xhs_account_rankings_render_note_link_and_published_at_or_missing(self) -> None:
+        bundle = evidence_bundle()
+        bundle["platformId"] = "xiaohongshu"
+        bundle["reportType"] = "xhs-account"
+        for item in bundle["items"]:
+            item["evidenceId"] = item["evidenceId"].replace("DY-", "XHS-")
+        batches = valid_batches()
+        for batch in batches:
+            for key in ("claims", "topicDirections", "filmingTemplates", "conversionItems", "executionDays"):
+                for item in batch[key]:
+                    item["evidenceIds"] = [
+                        evidence_id.replace("DY-", "XHS-")
+                        for evidence_id in item["evidenceIds"]
+                    ]
+        bundle["items"][0]["publishedAt"] = ""
+
+        markdown = assemble_report(bundle, batches)
+
+        self.assertIn(
+            "| 排名 | 标题 | 笔记链接 | 发布时间 | 点赞 | 评论 | 收藏 | 分享 | 综合互动量 |",
+            markdown,
+        )
+        self.assertIn("| 1 | 作品一 | https://example.com/1 | 缺失 |", markdown)
+        self.assertIn("| 2 | 作品二 | https://example.com/2 | 2026-07-02 10:00:00 |", markdown)
+
+    def test_python_contract_types_include_content_batch_and_sections(self) -> None:
+        self.assertIn("content-overview", str(SectionClaim.__annotations__["section"]))
+        self.assertIn("content", str(SectionBatch.__annotations__["batchId"]))
 
     def test_escapes_model_text_so_it_cannot_inject_html_or_markdown_structure(self) -> None:
         markdown = assemble_report(evidence_bundle(), valid_batches())
@@ -218,10 +277,10 @@ class ReportRendererTests(unittest.TestCase):
             validate_final_report(swapped_overview, bundle, batches),
         )
 
-        top_row = "| 1 | 作品一 | https://example.com/1 | 12,000 | 320 | 860 | 210 | 13,390 |"
+        top_row = "| 1 | 作品一 | https://example.com/1 | 2026-07-01 10:00:00 | 12,000 | 320 | 860 | 210 | 13,390 |"
         swapped_table = markdown.replace(
             top_row,
-            "| 1 | 作品一 | https://example.com/1 | 1,000 | 320 | 860 | 210 | 13,390 |",
+            "| 1 | 作品一 | https://example.com/1 | 2026-07-01 10:00:00 | 1,000 | 320 | 860 | 210 | 13,390 |",
             1,
         )
         self.assertIn(

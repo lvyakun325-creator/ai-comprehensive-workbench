@@ -1,6 +1,11 @@
 from typing import Literal, NotRequired, TypedDict
 
 
+AccountClaimSection = Literal["strategy", "business", "content", "traffic", "data"]
+ContentClaimSection = Literal["content-overview", "content-structure", "interaction", "conversion"]
+SectionBatchId = Literal["strategy", "performance", "execution", "content"]
+
+
 class EvidenceItem(TypedDict):
     evidenceId: str
     sourceRow: int
@@ -32,7 +37,7 @@ class EvidenceBundle(TypedDict):
 
 
 class SectionClaim(TypedDict):
-    section: Literal["strategy", "business", "content", "traffic", "data"]
+    section: AccountClaimSection | ContentClaimSection
     statement: str
     strength: Literal["direct", "weak", "hypothesis"]
     evidenceIds: list[str]
@@ -42,12 +47,19 @@ class SectionClaim(TypedDict):
 
 
 class SectionBatch(TypedDict):
-    batchId: Literal["strategy", "performance", "execution"]
+    batchId: SectionBatchId
     claims: list[SectionClaim]
     topicDirections: list[dict[str, object]]
     filmingTemplates: list[dict[str, object]]
     conversionItems: list[dict[str, object]]
     executionDays: list[dict[str, object]]
+
+
+class TrustedBatchContext(TypedDict):
+    """Server-controlled evidence allowlist for one requested model batch."""
+
+    batchId: SectionBatchId
+    allowedEvidenceIds: list[str]
 
 
 class ReportArtifact(TypedDict):
@@ -60,6 +72,7 @@ class FinalReportValidationInput(TypedDict):
     markdown: str
     evidence: EvidenceBundle
     batches: list[SectionBatch]
+    trustedBatchContexts: list[TrustedBatchContext]
 
 
 def validate_contract_shape(
