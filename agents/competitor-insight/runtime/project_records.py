@@ -30,6 +30,8 @@ STORE_COMPONENTS = (
 ALLOWED_STATUSES = {"waiting", "running", "completed", "failed", "stopped"}
 ALLOWED_ARTIFACT_KINDS = {
     "excel",
+    "file",
+    "image",
     "markdown",
     "json",
     "image-directory",
@@ -91,12 +93,13 @@ _TASK_FIELDS = {
 _V1_TASK_FIELDS = _TASK_FIELDS - {"inputKind", "category", "bundleId"}
 _ARTIFACT_FIELDS = {
     "id", "agentId", "taskId", "kind", "name", "filename", "absolutePath", "sizeBytes",
-    "createdAt", "completedAt", "previewable", "exists", "isDirectory", "markdown",
+    "contentSha256", "createdAt", "completedAt", "previewable", "exists", "isDirectory", "markdown",
 }
+_V1_ARTIFACT_FIELDS = _ARTIFACT_FIELDS - {"contentSha256"}
 _BUNDLE_FIELDS = {
     "id", "agentId", "taskId", "platformId", "inputKind", "category", "subjectName",
     "itemCount", "status", "rootDirectory", "primaryReportPath", "manifestPath", "archivePath",
-    "artifactIds", "createdAt", "updatedAt",
+    "artifactIds", "manifestSha256", "archiveSha256", "memberIdentitySha256", "createdAt", "updatedAt",
 }
 _STORE_LOCK = threading.RLock()
 
@@ -179,9 +182,15 @@ def _valid_task_record(task: object, fields: set[str]) -> bool:
     )
 
 
-def _valid_artifact_record(artifact: object) -> bool:
+def _valid_sha256(value: object, *, nullable: bool = False) -> bool:
+    return (nullable and value is None) or (
+        isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{64}", value))
+    )
+
+
+def _valid_artifact_record(artifact: object, fields: set[str] = _ARTIFACT_FIELDS) -> bool:
     root = PROJECT_ROOT.resolve() / "outputs" / "competitor-insight"
-    return isinstance(artifact, dict) and set(artifact) == _ARTIFACT_FIELDS and (
+    return isinstance(artifact, dict) and set(artifact) == fields and (
         bool(_ARTIFACT_ID.fullmatch(cast(str, artifact.get("id", ""))))
         and artifact.get("agentId") == AGENT_ID and bool(_TASK_ID.fullmatch(cast(str, artifact.get("taskId", ""))))
         and artifact.get("kind") in ALLOWED_ARTIFACT_KINDS
@@ -191,6 +200,9 @@ def _valid_artifact_record(artifact: object) -> bool:
         and _valid_timestamp(artifact.get("createdAt")) and _valid_timestamp(artifact.get("completedAt"))
         and isinstance(artifact.get("previewable"), bool) and isinstance(artifact.get("exists"), bool) and isinstance(artifact.get("isDirectory"), bool)
         and artifact.get("markdown") is None
+        and ("contentSha256" not in fields or _valid_sha256(artifact.get("contentSha256"), nullable=True))
+        and (not artifact.get("isDirectory") or artifact.get("contentSha256") is None)
+        and (artifact.get("kind") in {"image-directory", "output-directory"}) == artifact.get("isDirectory")
     )
 
 
@@ -200,7 +212,7 @@ def _validate_v1_store(loaded: object) -> dict[str, object]:
     if loaded.get("schemaVersion") != 1 or not isinstance(loaded.get("tasks"), list) or not isinstance(loaded.get("artifacts"), list):
         raise ValueError("record_store_damaged")
     tasks = cast(list[dict[str, object]], loaded["tasks"]); artifacts = cast(list[dict[str, object]], loaded["artifacts"])
-    if any(not _valid_task_record(task, _V1_TASK_FIELDS) for task in tasks) or any(not _valid_artifact_record(item) for item in artifacts):
+    if any(not _valid_task_record(task, _V1_TASK_FIELDS) for task in tasks) or any(not _valid_artifact_record(item, _V1_ARTIFACT_FIELDS) for item in artifacts):
         raise ValueError("record_store_damaged")
     task_ids = [cast(str, item["id"]) for item in tasks]; artifact_ids = [cast(str, item["id"]) for item in artifacts]
     if len(task_ids) != len(set(task_ids)) or len(artifact_ids) != len(set(artifact_ids)):
@@ -258,6 +270,9 @@ def _append_legacy_bundle(store: dict[str, object], task: dict[str, object]) -> 
         "manifestPath": str(root / f"{bundle_id}.manifest.json"),
         "archivePath": str(root / f"{bundle_id}.zip"),
         "artifactIds": [item["id"] for item in artifacts],
+        "manifestSha256": None,
+        "archiveSha256": None,
+        "memberIdentitySha256": None,
         "createdAt": task["completedAt"] or now,
         "updatedAt": now,
     })
@@ -270,7 +285,7 @@ def _migrate_v1(store: dict[str, object]) -> dict[str, object]:
     migrated: dict[str, object] = {
         "schemaVersion": SCHEMA_VERSION,
         "tasks": [dict(task) for task in _tasks(store)],
-        "artifacts": [dict(item) for item in _artifacts(store)],
+        "artifacts": [{**item, "contentSha256": None} for item in _artifacts(store)],
         "bundles": [],
     }
     for task in _tasks(migrated):
@@ -341,7 +356,13 @@ def _validate_v2_store(loaded: object) -> dict[str, object]:
             or not 0 <= cast(int, bundle["itemCount"]) <= 100_000
             or len(cast(list[object], bundle["artifactIds"])) != len(set(cast(list[object], bundle["artifactIds"])))
             or any(not isinstance(item, str) or not _ARTIFACT_ID.fullmatch(item) for item in cast(list[object], bundle["artifactIds"]))
+            or not all(_valid_sha256(bundle.get(field), nullable=True) for field in ("manifestSha256", "archiveSha256", "memberIdentitySha256"))
         ):
+            raise ValueError("record_store_damaged")
+        commitments = tuple(bundle.get(field) for field in ("manifestSha256", "archiveSha256", "memberIdentitySha256"))
+        if bundle.get("status") == "ready" and not all(isinstance(value, str) for value in commitments):
+            raise ValueError("record_store_damaged")
+        if bundle.get("status") == "legacy" and any(value is not None for value in commitments) and not all(isinstance(value, str) for value in commitments):
             raise ValueError("record_store_damaged")
         if bundle.get("status") == "ready" and not _valid_category(
             bundle.get("platformId"), bundle.get("inputKind"), bundle.get("category")
@@ -368,6 +389,17 @@ def _validate_v2_store(loaded: object) -> dict[str, object]:
             raise ValueError("record_store_damaged")
     for bundle in bundles_by_id.values():
         if any(artifact_id not in artifact_by_id or artifact_by_id[artifact_id].get("taskId") != bundle.get("taskId") for artifact_id in cast(list[str], bundle["artifactIds"])):
+            raise ValueError("record_store_damaged")
+        if bundle.get("status") == "ready" and any(
+            artifact_by_id[artifact_id].get("isDirectory")
+            or not _valid_sha256(artifact_by_id[artifact_id].get("contentSha256"))
+            for artifact_id in cast(list[str], bundle["artifactIds"])
+        ):
+            raise ValueError("record_store_damaged")
+        if bundle.get("status") == "ready" and not any(
+            artifact_by_id[artifact_id].get("absolutePath") == bundle.get("primaryReportPath")
+            for artifact_id in cast(list[str], bundle["artifactIds"])
+        ):
             raise ValueError("record_store_damaged")
     return cast(dict[str, object], loaded)
 
@@ -515,12 +547,15 @@ def create_task(payload: dict[str, object]) -> dict[str, object]:
     if payload["agentId"] != AGENT_ID:
         raise ValueError("invalid_agent_id")
     task_id = _task_id(payload["id"])
+    platform_id = payload["platformId"]
+    if not isinstance(platform_id, str) or platform_id not in {"douyin", "xiaohongshu"}:
+        raise ValueError("invalid_platform_id")
     created_at = _now()
     task: dict[str, object] = {
         "id": task_id,
         "agentId": AGENT_ID,
         "title": _safe_text(payload["title"], "title"),
-        "platformId": _safe_text(payload["platformId"], "platform_id", 64),
+        "platformId": platform_id,
         "platformLabel": _safe_text(payload["platformLabel"], "platform_label", 64),
         "skillId": _safe_text(payload["skillId"], "skill_id", 128),
         "sourceUrl": sanitize_source_url(cast(str, payload["sourceUrl"])),
@@ -667,14 +702,36 @@ def _artifact_kind(path: Path, output_dir: Path) -> str | None:
         return "image-directory" if has_images else None
     return {
         ".xlsx": "excel",
+        **{extension: "image" for extension in _IMAGE_EXTENSIONS},
         ".md": "markdown",
         ".json": "json",
     }.get(path.suffix.casefold())
 
 
-def _artifact_record(task_id: str, path: Path, kind: str) -> dict[str, object]:
+def _file_snapshot(path: Path) -> tuple[bytes, os.stat_result]:
+    directory_fd = _open_directory_fd(path.parent)
+    try:
+        return _read_member_snapshot(directory_fd, path.name, validate_archive_name=False)
+    finally:
+        os.close(directory_fd)
+
+
+def _artifact_record(
+    task_id: str,
+    path: Path,
+    kind: str,
+    snapshot: tuple[bytes, os.stat_result] | None = None,
+) -> dict[str, object]:
     digest = hashlib.sha256(f"{task_id}\0{path}".encode("utf-8")).hexdigest()[:16]
-    stat_result = path.stat()
+    is_directory = kind in {"image-directory", "output-directory"}
+    if is_directory:
+        stat_result = path.stat()
+        content_sha256: str | None = None
+        size_bytes = 0
+    else:
+        data, stat_result = snapshot or _file_snapshot(path)
+        content_sha256 = hashlib.sha256(data).hexdigest()
+        size_bytes = len(data)
     return {
         "id": f"artifact-{digest}",
         "agentId": AGENT_ID,
@@ -683,14 +740,15 @@ def _artifact_record(task_id: str, path: Path, kind: str) -> dict[str, object]:
         "name": path.name,
         "filename": path.name,
         "absolutePath": str(path),
-        "sizeBytes": 0 if path.is_dir() else stat_result.st_size,
+        "sizeBytes": size_bytes,
+        "contentSha256": content_sha256,
         "createdAt": datetime.fromtimestamp(
             stat_result.st_mtime, timezone.utc
         ).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "completedAt": _now(),
         "previewable": kind == "markdown",
         "exists": True,
-        "isDirectory": path.is_dir(),
+        "isDirectory": is_directory,
         "markdown": None,
     }
 
@@ -703,12 +761,16 @@ def _scan_paths(
     discovered: dict[str, Path] = {str(output_dir): output_dir}
     for raw in explicit_paths:
         path = _validate_existing_path(raw)
+        if path.is_relative_to(output_dir) and _is_sensitive_relative(path.relative_to(output_dir)):
+            continue
         discovered[str(path)] = path
     try:
         for root, directories, files in os.walk(output_dir, followlinks=False):
             current = Path(root)
             directories[:] = [
-                name for name in directories if not (current / name).is_symlink()
+                name for name in directories
+                if not (current / name).is_symlink()
+                and not _is_sensitive_relative((current / name).relative_to(output_dir))
             ]
             if any(
                 Path(name).suffix.casefold() in _IMAGE_EXTENSIONS
@@ -718,7 +780,7 @@ def _scan_paths(
                 discovered[str(current)] = current
             for filename in files:
                 candidate = current / filename
-                if candidate.is_symlink():
+                if candidate.is_symlink() or _is_sensitive_relative(candidate.relative_to(output_dir)):
                     continue
                 if (
                     candidate.suffix.casefold() in {".xlsx", ".md", ".json"}
@@ -728,6 +790,53 @@ def _scan_paths(
     except OSError:
         raise ValueError("artifact_scan_failed") from None
     return list(discovered.values())
+
+
+def _registered_directory_members(task_id: str, output_dir: Path, directory: Path) -> list[dict[str, object]]:
+    root_fd = _open_directory_fd(output_dir)
+    names: set[str] = set()
+
+    def visit(name: str) -> None:
+        parent_fd = os.dup(root_fd)
+        directory_fd = -1
+        try:
+            for component in name.split("/"):
+                next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                os.close(parent_fd)
+                parent_fd = next_fd
+            directory_fd = parent_fd
+            parent_fd = -1
+            for child in os.listdir(directory_fd):
+                child_name = f"{name}/{child}"
+                relative = Path(child_name)
+                _archive_name(relative)
+                if _is_sensitive_relative(relative):
+                    continue
+                metadata = os.stat(child, dir_fd=directory_fd, follow_symlinks=False)
+                if stat.S_ISDIR(metadata.st_mode):
+                    visit(child_name)
+                elif stat.S_ISREG(metadata.st_mode):
+                    names.add(child_name)
+        except OSError:
+            raise ValueError("artifact_scan_failed") from None
+        finally:
+            if directory_fd >= 0:
+                os.close(directory_fd)
+            if parent_fd >= 0:
+                os.close(parent_fd)
+
+    try:
+        root_name = _archive_name(directory.relative_to(output_dir))
+        visit(root_name)
+        records: list[dict[str, object]] = []
+        for name in sorted(names):
+            snapshot = _read_member_snapshot(root_fd, name)
+            path = output_dir / name
+            kind = "image" if path.suffix.casefold() in _IMAGE_EXTENSIONS else "file"
+            records.append(_artifact_record(task_id, path, kind, snapshot))
+        return records
+    finally:
+        os.close(root_fd)
 
 
 def register_artifacts(task_id: str, payload: dict[str, object]) -> dict[str, object]:
@@ -753,6 +862,9 @@ def register_artifacts(task_id: str, payload: dict[str, object]) -> dict[str, ob
         kind = _artifact_kind(path, output_dir)
         if kind in ALLOWED_ARTIFACT_KINDS:
             generated.append(_artifact_record(normalized_task_id, path, cast(str, kind)))
+            if kind == "image-directory":
+                generated.extend(_registered_directory_members(normalized_task_id, output_dir, path))
+    generated = list({cast(str, item["absolutePath"]): item for item in generated}.values())
     if len(generated) > MAX_ARTIFACTS_PER_TASK:
         raise ValueError("too_many_artifacts")
     with _STORE_LOCK:
@@ -936,9 +1048,14 @@ def _open_directory_fd(path: Path) -> int:
     return descriptor
 
 
-def _read_member_snapshot(root_fd: int, name: str) -> tuple[bytes, os.stat_result]:
+def _read_member_snapshot(
+    root_fd: int, name: str, *, validate_archive_name: bool = True,
+) -> tuple[bytes, os.stat_result]:
     parts = name.split("/")
-    _archive_name(Path(name))
+    if validate_archive_name:
+        _archive_name(Path(name))
+    elif not name or "\0" in name or "/" in name:
+        raise ValueError("invalid_bundle_file")
     parent_fd = os.dup(root_fd)
     descriptor = -1
     try:
@@ -970,22 +1087,32 @@ def _read_member_snapshot(root_fd: int, name: str) -> tuple[bytes, os.stat_resul
         os.close(parent_fd)
 
 
-def _authorized_paths(store: dict[str, object], task: dict[str, object], output_dir: Path) -> dict[str, str]:
+def _authorized_paths(
+    store: dict[str, object], task: dict[str, object], output_dir: Path,
+) -> tuple[dict[str, dict[str, object]], set[str]]:
     artifact_ids = task.get("artifactIds")
     if not isinstance(artifact_ids, list):
         raise ValueError("record_store_damaged")
     by_id = {item.get("id"): item for item in _artifacts(store) if item.get("taskId") == task.get("id")}
-    authorized: dict[str, str] = {}
+    authorized: dict[str, dict[str, object]] = {}
+    containers: set[str] = set()
     for artifact_id in artifact_ids:
         item = by_id.get(artifact_id)
-        if not isinstance(item, dict) or item.get("kind") == "output-directory":
+        if not isinstance(item, dict):
+            raise ValueError("record_store_damaged")
+        if item.get("kind") == "output-directory":
             continue
         raw = item.get("absolutePath")
         if not isinstance(raw, str):
             raise ValueError("record_store_damaged")
         path = _strict_task_member(raw, output_dir)
-        authorized[str(path)] = cast(str, item.get("kind", "file"))
-    return authorized
+        if item.get("isDirectory"):
+            containers.add(str(path))
+        elif _valid_sha256(item.get("contentSha256")):
+            authorized[str(path)] = item
+        else:
+            raise ValueError("artifact_identity_missing")
+    return authorized, containers
 
 
 def _bundle_request(task_id: str, payload: dict[str, object], task: dict[str, object], store: dict[str, object]) -> dict[str, object]:
@@ -998,9 +1125,21 @@ def _bundle_request(task_id: str, payload: dict[str, object], task: dict[str, ob
     explicit = payload["explicitPaths"]
     if not isinstance(explicit, list) or not explicit or len(explicit) > MAX_BUNDLE_FILES:
         raise ValueError("invalid_explicit_paths")
-    authorized = _authorized_paths(store, task, output_dir)
+    authorized, containers = _authorized_paths(store, task, output_dir)
     requested = [_strict_task_member(value, output_dir) for value in explicit]
-    if len({str(path) for path in requested}) != len(requested) or any(str(path) not in authorized for path in requested):
+    if len({str(path) for path in requested}) != len(requested):
+        raise ValueError("artifact_not_authorized")
+    selected: dict[str, dict[str, object]] = {}
+    for path in requested:
+        if str(path) in authorized:
+            selected[str(path)] = authorized[str(path)]
+        elif str(path) in containers:
+            for raw, artifact in authorized.items():
+                if Path(raw).is_relative_to(path):
+                    selected[raw] = artifact
+        else:
+            raise ValueError("artifact_not_authorized")
+    if not selected:
         raise ValueError("artifact_not_authorized")
     primary = _strict_task_member(payload["primaryReportPath"], output_dir)
     if str(primary) not in authorized or primary.suffix.casefold() != ".md":
@@ -1008,60 +1147,26 @@ def _bundle_request(task_id: str, payload: dict[str, object], task: dict[str, ob
     item_count = payload["itemCount"]
     if isinstance(item_count, bool) or not isinstance(item_count, int) or not 0 <= item_count <= 100_000:
         raise ValueError("invalid_item_count")
-    return {"taskId": task_id, "outputDir": output_dir, "primary": primary, "requested": requested, "authorized": authorized, "subjectName": _safe_text(payload["subjectName"], "subject_name"), "itemCount": item_count}
+    return {"taskId": task_id, "outputDir": output_dir, "primary": primary, "selected": selected, "subjectName": _safe_text(payload["subjectName"], "subject_name"), "itemCount": item_count}
 
 
-def _member_names(root_fd: int, requested: list[Path], output_dir: Path) -> list[str]:
-    names: set[str] = set()
-    def visit(name: str) -> None:
-        parent = os.dup(root_fd)
-        child = -1
-        try:
-            parts = name.split("/")
-            for component in parts[:-1]:
-                next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-                os.close(parent); parent = next_fd
-            child = os.open(parts[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
-            for item in os.listdir(child):
-                child_name = f"{name}/{item}"
-                relative = Path(child_name)
-                _archive_name(relative)
-                if _is_sensitive_relative(relative):
-                    raise ValueError("sensitive_path_not_allowed")
-                metadata = os.stat(item, dir_fd=child, follow_symlinks=False)
-                if stat.S_ISDIR(metadata.st_mode):
-                    visit(child_name)
-                elif stat.S_ISREG(metadata.st_mode):
-                    names.add(child_name)
-                else:
-                    raise ValueError("invalid_bundle_file")
-        except OSError:
-            raise ValueError("bundle_file_changed") from None
-        finally:
-            if child >= 0: os.close(child)
-            os.close(parent)
-    for path in requested:
-        relative = path.relative_to(output_dir)
-        name = _archive_name(relative)
-        root_stat = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-        if stat.S_ISDIR(root_stat.st_mode):
-            visit(name)
-        elif stat.S_ISREG(root_stat.st_mode):
-            names.add(name)
-        else:
-            raise ValueError("invalid_bundle_file")
-    if not names or len(names) > MAX_BUNDLE_FILES:
+def _snapshots(
+    root_fd: int, selected: dict[str, dict[str, object]], output_dir: Path,
+) -> list[dict[str, object]]:
+    if not selected or len(selected) > MAX_BUNDLE_FILES:
         raise ValueError("invalid_bundle_files")
-    return sorted(names)
-
-
-def _snapshots(root_fd: int, names: list[str], kinds: dict[str, str]) -> list[dict[str, object]]:
-    total = 0; result: list[dict[str, object]] = []
-    for name in names:
+    total = 0
+    result: list[dict[str, object]] = []
+    for raw, artifact in sorted(selected.items()):
+        name = _archive_name(Path(raw).relative_to(output_dir))
         data, info = _read_member_snapshot(root_fd, name)
         total += len(data)
-        if total > MAX_BUNDLE_BYTES: raise ValueError("bundle_too_large")
-        result.append({"path": name, "sizeBytes": len(data), "sha256": hashlib.sha256(data).hexdigest(), "kind": kinds.get(name, "file"), "data": data, "inode": info.st_ino})
+        digest = hashlib.sha256(data).hexdigest()
+        if total > MAX_BUNDLE_BYTES:
+            raise ValueError("bundle_too_large")
+        if len(data) != artifact.get("sizeBytes") or digest != artifact.get("contentSha256"):
+            raise ValueError("artifact_changed")
+        result.append({"path": name, "sizeBytes": len(data), "sha256": digest, "kind": artifact["kind"], "data": data, "inode": info.st_ino, "artifactId": artifact["id"]})
     return result
 
 
@@ -1079,33 +1184,74 @@ def _write_archive_exclusive(directory_fd: int, temporary: str, data: bytes) -> 
         os.close(descriptor)
 
 
-def _publish_bundle(output_dir: Path, bundle_id: str, primary: Path, snapshots: list[dict[str, object]]) -> tuple[Path, Path]:
+def _member_identity_digest(primary_name: str, snapshots: list[dict[str, object]]) -> str:
+    identity = {
+        "primaryReport": primary_name,
+        "files": [
+            {key: item[key] for key in ("artifactId", "path", "sizeBytes", "sha256", "kind")}
+            for item in snapshots
+        ],
+    }
+    encoded = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _rollback_published_files(directory_fd: int, published: dict[str, int]) -> None:
+    removed = False
+    for name, inode in published.items():
+        try:
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISREG(info.st_mode) and info.st_ino == inode:
+                os.unlink(name, dir_fd=directory_fd)
+                removed = True
+        except FileNotFoundError:
+            continue
+    if removed:
+        os.fsync(directory_fd)
+
+
+def _publish_bundle(
+    output_dir: Path, bundle_id: str, primary: Path, snapshots: list[dict[str, object]],
+) -> tuple[Path, Path, dict[str, str], int, dict[str, int]]:
     root_fd = _open_directory_fd(output_dir)
     manifest_name = f"{bundle_id}.manifest.json"; archive_name = f"{bundle_id}.zip"
     token = secrets.token_hex(16); manifest_temp = f".{bundle_id}.{token}.manifest.tmp"; archive_temp = f".{bundle_id}.{token}.archive.tmp"
-    manifest = json.dumps({"schemaVersion": 1, "primaryReport": _archive_name(primary.relative_to(output_dir)), "files": [{key: item[key] for key in ("path", "sizeBytes", "sha256", "kind")} for item in snapshots]}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    primary_name = _archive_name(primary.relative_to(output_dir))
+    manifest = json.dumps({"schemaVersion": 1, "primaryReport": primary_name, "files": [{key: item[key] for key in ("path", "sizeBytes", "sha256", "kind")} for item in snapshots]}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     stream = BytesIO()
     with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for item in snapshots: archive.writestr(cast(str, item["path"]), cast(bytes, item["data"]))
         archive.writestr("bundle-manifest.json", manifest)
+    archive_bytes = stream.getvalue()
+    commitments = {
+        "manifestSha256": hashlib.sha256(manifest).hexdigest(),
+        "archiveSha256": hashlib.sha256(archive_bytes).hexdigest(),
+        "memberIdentitySha256": _member_identity_digest(primary_name, snapshots),
+    }
+    published: dict[str, int] = {}
+    keep_fd = False
     try:
         _write_archive_exclusive(root_fd, manifest_temp, manifest)
-        _write_archive_exclusive(root_fd, archive_temp, stream.getvalue())
+        _write_archive_exclusive(root_fd, archive_temp, archive_bytes)
         os.link(manifest_temp, manifest_name, src_dir_fd=root_fd, dst_dir_fd=root_fd, follow_symlinks=False)
-        try:
-            os.link(archive_temp, archive_name, src_dir_fd=root_fd, dst_dir_fd=root_fd, follow_symlinks=False)
-        except Exception:
-            os.unlink(manifest_name, dir_fd=root_fd)
-            raise
+        published[manifest_name] = os.stat(manifest_name, dir_fd=root_fd, follow_symlinks=False).st_ino
+        os.link(archive_temp, archive_name, src_dir_fd=root_fd, dst_dir_fd=root_fd, follow_symlinks=False)
+        published[archive_name] = os.stat(archive_name, dir_fd=root_fd, follow_symlinks=False).st_ino
         os.fsync(root_fd)
+        keep_fd = True
     except FileExistsError:
+        _rollback_published_files(root_fd, published)
         raise ValueError("bundle_output_exists") from None
+    except Exception:
+        _rollback_published_files(root_fd, published)
+        raise
     finally:
         for name in (manifest_temp, archive_temp):
             try: os.unlink(name, dir_fd=root_fd)
             except FileNotFoundError: pass
-        os.close(root_fd)
-    return output_dir / manifest_name, output_dir / archive_name
+        if not keep_fd:
+            os.close(root_fd)
+    return output_dir / manifest_name, output_dir / archive_name, commitments, root_fd, published
 
 
 def _new_bundle_id(store: dict[str, object]) -> str:
@@ -1119,6 +1265,7 @@ def _new_bundle_id(store: dict[str, object]) -> str:
 def _commit_ready_bundle(
     store: dict[str, object], task: dict[str, object], request: dict[str, object],
     primary: Path, manifest_path: Path, archive_path: Path, bundle_id: str,
+    commitments: dict[str, str],
 ) -> None:
     now = _now()
     bundle = {
@@ -1127,7 +1274,9 @@ def _commit_ready_bundle(
         "category": task["category"], "subjectName": request["subjectName"],
         "itemCount": request["itemCount"], "status": "ready", "rootDirectory": str(request["outputDir"]),
         "primaryReportPath": str(primary), "manifestPath": str(manifest_path),
-        "archivePath": str(archive_path), "artifactIds": list(task["artifactIds"]),
+        "archivePath": str(archive_path),
+        "artifactIds": [item["id"] for item in cast(dict[str, dict[str, object]], request["selected"]).values()],
+        **commitments,
         "createdAt": now, "updatedAt": now,
     }
     _bundles(store).append(bundle)
@@ -1156,17 +1305,18 @@ def finalize_bundle(task_id: str, payload: dict[str, object]) -> dict[str, objec
         output_dir = cast(Path, request["outputDir"])
         root_fd = _open_directory_fd(output_dir)
         try:
-            names = _member_names(root_fd, cast(list[Path], request["requested"]), output_dir)
-            kinds = {
-                _archive_name(Path(raw).relative_to(output_dir)): kind
-                for raw, kind in cast(dict[str, str], request["authorized"]).items()
-            }
-            snapshots = _snapshots(root_fd, names, kinds)
+            snapshots = _snapshots(root_fd, cast(dict[str, dict[str, object]], request["selected"]), output_dir)
         finally:
             os.close(root_fd)
-        manifest_path, archive_path = _publish_bundle(output_dir, bundle_id, primary, snapshots)
-        _commit_ready_bundle(store, task, request, primary, manifest_path, archive_path, bundle_id)
-        _atomic_write(store)
+        manifest_path, archive_path, commitments, publish_fd, published = _publish_bundle(output_dir, bundle_id, primary, snapshots)
+        try:
+            _commit_ready_bundle(store, task, request, primary, manifest_path, archive_path, bundle_id, commitments)
+            _atomic_write(store)
+        except Exception:
+            _rollback_published_files(publish_fd, published)
+            raise
+        finally:
+            os.close(publish_fd)
         return _snapshot(store, AGENT_ID)
 
 
@@ -1221,20 +1371,49 @@ def _materialize_legacy_archive(store: dict[str, object], bundle: dict[str, obje
         raise ValueError("bundle_missing")
     root_fd = _open_directory_fd(root)
     try:
-        names = [_archive_name(path.relative_to(root)) for path in files]
-        snapshots = _snapshots(root_fd, names, {})
+        artifacts_by_path = {
+            str(Path(cast(str, item["absolutePath"])).resolve(strict=False)): item
+            for item in _artifacts(store)
+            if item.get("taskId") == bundle.get("taskId") and isinstance(item.get("absolutePath"), str)
+        }
+        snapshots: list[dict[str, object]] = []
+        for path in files:
+            name = _archive_name(path.relative_to(root))
+            data, info = _read_member_snapshot(root_fd, name)
+            artifact = artifacts_by_path.get(str(path))
+            if not isinstance(artifact, dict):
+                raise ValueError("bundle_missing")
+            snapshots.append({
+                "path": name,
+                "sizeBytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "kind": artifact["kind"],
+                "data": data,
+                "inode": info.st_ino,
+                "artifactId": artifact["id"],
+            })
     finally:
         os.close(root_fd)
-    manifest_path, archive_path = _publish_bundle(root, cast(str, bundle["id"]), primary, snapshots)
-    bundle["manifestPath"] = str(manifest_path)
-    bundle["archivePath"] = str(archive_path)
-    bundle["updatedAt"] = _now()
-    _atomic_write(store)
+    manifest_path, archive_path, commitments, publish_fd, published = _publish_bundle(root, cast(str, bundle["id"]), primary, snapshots)
+    try:
+        bundle["manifestPath"] = str(manifest_path)
+        bundle["archivePath"] = str(archive_path)
+        bundle.update(commitments)
+        bundle["updatedAt"] = _now()
+        _atomic_write(store)
+    except Exception:
+        _rollback_published_files(publish_fd, published)
+        raise
+    finally:
+        os.close(publish_fd)
     return archive_path
 
 
-def _ready_archive_is_valid(bundle: dict[str, object]) -> bool:
+def _ready_archive_is_valid(store: dict[str, object], bundle: dict[str, object]) -> bool:
     try:
+        commitments = tuple(bundle.get(field) for field in ("manifestSha256", "archiveSha256", "memberIdentitySha256"))
+        if not all(_valid_sha256(value) for value in commitments):
+            return False
         root = Path(cast(str, bundle["rootDirectory"])).resolve(strict=True)
         manifest_path = Path(cast(str, bundle["manifestPath"])).resolve(strict=True)
         archive_path = Path(cast(str, bundle["archivePath"])).resolve(strict=True)
@@ -1246,6 +1425,10 @@ def _ready_archive_is_valid(bundle: dict[str, object]) -> bool:
             archive_bytes, _ = _read_member_snapshot(root_fd, archive_path.name)
         finally:
             os.close(root_fd)
+        if hashlib.sha256(manifest_bytes).hexdigest() != bundle.get("manifestSha256"):
+            return False
+        if hashlib.sha256(archive_bytes).hexdigest() != bundle.get("archiveSha256"):
+            return False
         manifest = json.loads(manifest_bytes.decode("utf-8"))
         if not isinstance(manifest, dict) or set(manifest) != {"schemaVersion", "primaryReport", "files"} or manifest.get("schemaVersion") != 1:
             return False
@@ -1253,10 +1436,25 @@ def _ready_archive_is_valid(bundle: dict[str, object]) -> bool:
         if not isinstance(files, list) or not isinstance(manifest.get("primaryReport"), str):
             return False
         primary_name = _archive_name(Path(cast(str, manifest["primaryReport"])))
+        primary_path = Path(cast(str, bundle["primaryReportPath"])).resolve(strict=False)
+        if primary_path.parent != root or primary_name != _archive_name(primary_path.relative_to(root)):
+            return False
+        artifact_by_id = {cast(str, item["id"]): item for item in _artifacts(store)}
+        allowed: dict[str, dict[str, object]] = {}
+        for artifact_id in cast(list[object], bundle["artifactIds"]):
+            artifact = artifact_by_id.get(cast(str, artifact_id))
+            if not isinstance(artifact, dict) or artifact.get("taskId") != bundle.get("taskId") or artifact.get("isDirectory"):
+                continue
+            path = Path(cast(str, artifact.get("absolutePath"))).resolve(strict=False)
+            if path.is_relative_to(root):
+                allowed[_archive_name(path.relative_to(root))] = artifact
+        if not allowed or primary_name not in allowed:
+            return False
         member_names: set[str] = set()
+        identity_members: list[dict[str, object]] = []
         with zipfile.ZipFile(BytesIO(archive_bytes)) as archive:
             names = archive.namelist()
-            if len(names) != len(set(names)) or set(names) != {"bundle-manifest.json", *(cast(str, item.get("path")) for item in files if isinstance(item, dict))}:
+            if len(names) != len(set(names)) or set(names) != {"bundle-manifest.json", *allowed}:
                 return False
             if archive.read("bundle-manifest.json") != manifest_bytes:
                 return False
@@ -1264,11 +1462,25 @@ def _ready_archive_is_valid(bundle: dict[str, object]) -> bool:
                 if not isinstance(item, dict) or set(item) != {"path", "sizeBytes", "sha256", "kind"}:
                     return False
                 name = _archive_name(Path(cast(str, item.get("path"))))
+                artifact = allowed.get(name)
+                if not isinstance(artifact, dict) or item.get("kind") != artifact.get("kind"):
+                    return False
+                if item.get("sizeBytes") != artifact.get("sizeBytes"):
+                    return False
+                if bundle.get("status") == "ready" and item.get("sha256") != artifact.get("contentSha256"):
+                    return False
                 member_names.add(name)
                 data = archive.read(name)
                 if len(data) != item.get("sizeBytes") or hashlib.sha256(data).hexdigest() != item.get("sha256"):
                     return False
-        return primary_name in member_names
+                identity_members.append({
+                    "artifactId": artifact["id"], "path": name,
+                    "sizeBytes": item["sizeBytes"], "sha256": item["sha256"], "kind": item["kind"],
+                })
+        return (
+            member_names == set(allowed)
+            and _member_identity_digest(primary_name, identity_members) == bundle.get("memberIdentitySha256")
+        )
     except (OSError, UnicodeError, json.JSONDecodeError, zipfile.BadZipFile, ValueError, TypeError):
         return False
 
@@ -1284,11 +1496,12 @@ def bundle_archive(bundle_id: str) -> Path:
             raise ValueError("bundle_missing")
         archive_raw = bundle.get("archivePath")
         if bundle.get("status") == "legacy" and (not isinstance(archive_raw, str) or not Path(archive_raw).is_file()):
-            return _materialize_legacy_archive(store, bundle)
+            _materialize_legacy_archive(store, bundle)
+            archive_raw = bundle.get("archivePath")
         if not isinstance(archive_raw, str):
             raise ValueError("bundle_missing")
         archive = Path(archive_raw)
-        if _has_symlink_ancestor(archive) or not archive.is_file() or not _ready_archive_is_valid(bundle):
+        if _has_symlink_ancestor(archive) or not archive.is_file() or not _ready_archive_is_valid(store, bundle):
             bundle["status"] = "missing"
             bundle["updatedAt"] = _now()
             _atomic_write(store)
@@ -1308,6 +1521,14 @@ def reveal_bundle(
             _atomic_write(store)
         bundle = _find_bundle(store, normalized_bundle_id)
         if bundle.get("status") == "missing":
+            raise ValueError("bundle_missing")
+        archive_raw = bundle.get("archivePath")
+        if bundle.get("status") == "legacy" and (not isinstance(archive_raw, str) or not Path(archive_raw).is_file()):
+            _materialize_legacy_archive(store, bundle)
+        if not _ready_archive_is_valid(store, bundle):
+            bundle["status"] = "missing"
+            bundle["updatedAt"] = _now()
+            _atomic_write(store)
             raise ValueError("bundle_missing")
         root = bundle.get("rootDirectory")
         if not isinstance(root, str):

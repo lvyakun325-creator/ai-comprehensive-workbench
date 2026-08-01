@@ -1,3 +1,5 @@
+import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -143,6 +145,7 @@ class ProjectRecordTests(unittest.TestCase):
             {item["kind"] for item in artifacts},
             {
                 "excel",
+                "image",
                 "markdown",
                 "json",
                 "image-directory",
@@ -657,6 +660,142 @@ class ProjectRecordTests(unittest.TestCase):
 
         self.assertEqual(retry["tasks"][0]["status"], "completed")
         self.assertTrue(Path(retry["bundles"][0]["archivePath"]).is_file())
+
+    def test_registered_directory_freezes_its_members_before_late_child_exists(self) -> None:
+        output = self.prepare_bundle_task()
+        images = output / "images"
+        images.mkdir()
+        first_image = images / "01.jpg"
+        first_image.write_bytes(b"first-image")
+        project_records.register_artifacts(
+            "competitor-20260801-a1",
+            {"outputDir": str(output), "explicitPaths": [str(images)]},
+        )
+        late_child = images / "late-unregistered.txt"
+        late_child.write_text("late fixture", "utf-8")
+        payload = self.bundle_payload(output)
+        payload["explicitPaths"] = [*payload["explicitPaths"], str(images)]
+
+        snapshot = project_records.finalize_bundle("competitor-20260801-a1", payload)
+
+        with zipfile.ZipFile(snapshot["bundles"][0]["archivePath"]) as archive:
+            self.assertIn("images/01.jpg", archive.namelist())
+            self.assertNotIn("images/late-unregistered.txt", archive.namelist())
+
+    def test_bundle_archive_rejects_coordinated_manifest_and_zip_replacement(self) -> None:
+        output = self.prepare_bundle_task()
+        snapshot = project_records.finalize_bundle("competitor-20260801-a1", self.bundle_payload(output))
+        bundle = snapshot["bundles"][0]
+        replacement = output / "replacement.md"
+        replacement.write_text("replacement fixture", "utf-8")
+        replacement_bytes = replacement.read_bytes()
+        manifest = json.dumps(
+            {
+                "schemaVersion": 1,
+                "primaryReport": "replacement.md",
+                "files": [{
+                    "path": "replacement.md",
+                    "sizeBytes": len(replacement_bytes),
+                    "sha256": hashlib.sha256(replacement_bytes).hexdigest(),
+                    "kind": "markdown",
+                }],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        stream = BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            archive.writestr("replacement.md", replacement_bytes)
+            archive.writestr("bundle-manifest.json", manifest)
+        Path(bundle["manifestPath"]).write_bytes(manifest)
+        Path(bundle["archivePath"]).write_bytes(stream.getvalue())
+
+        calls: list[list[str]] = []
+        with self.assertRaisesRegex(ValueError, "bundle_missing"):
+            project_records.reveal_bundle(bundle["id"], runner=lambda argv, **_: calls.append(argv))
+        self.assertEqual(calls, [])
+        with self.assertRaisesRegex(ValueError, "bundle_missing"):
+            project_records.bundle_archive(bundle["id"])
+
+        self.assertEqual(project_records.read_records("competitor-insight")["bundles"][0]["status"], "missing")
+
+    def test_create_task_rejects_platforms_outside_closed_schema(self) -> None:
+        for platform_id in ("unknown", "", None, "douyin "):
+            with self.subTest(platform_id=platform_id):
+                with self.assertRaisesRegex(ValueError, "invalid_platform_id"):
+                    self.create_task(platformId=platform_id)
+        self.assertFalse(self.store_path.exists())
+
+    def test_finalize_removes_published_files_when_store_commit_fails(self) -> None:
+        output = self.prepare_bundle_task()
+        payload = self.bundle_payload(output)
+
+        with patch.object(project_records, "_atomic_write", side_effect=OSError("store_write_failed")):
+            with self.assertRaisesRegex(OSError, "store_write_failed"):
+                project_records.finalize_bundle("competitor-20260801-a1", payload)
+
+        self.assertEqual(list(output.glob("bundle-*.manifest.json")), [])
+        self.assertEqual(list(output.glob("bundle-*.zip")), [])
+        retry = project_records.finalize_bundle("competitor-20260801-a1", payload)
+        self.assertEqual(retry["tasks"][0]["status"], "completed")
+
+    def test_finalize_cleans_each_link_interruption_and_allows_retry(self) -> None:
+        original_link = os.link
+        output = self.prepare_bundle_task()
+        for failing_call in (1, 2):
+            with self.subTest(failing_call=failing_call):
+                calls = {"count": 0}
+
+                def interrupt_link(*args: object, **kwargs: object) -> None:
+                    calls["count"] += 1
+                    if calls["count"] == failing_call:
+                        raise OSError("link_interrupted")
+                    original_link(*args, **kwargs)
+
+                with patch.object(project_records.os, "link", side_effect=interrupt_link):
+                    with self.assertRaisesRegex(OSError, "link_interrupted"):
+                        project_records.finalize_bundle(
+                            "competitor-20260801-a1", self.bundle_payload(output)
+                        )
+                self.assertEqual(list(output.glob("bundle-*.manifest.json")), [])
+                self.assertEqual(list(output.glob("bundle-*.zip")), [])
+        self.assertEqual(
+            project_records.finalize_bundle(
+                "competitor-20260801-a1", self.bundle_payload(output)
+            )["tasks"][0]["status"],
+            "completed",
+        )
+
+    def test_directory_registration_skips_sensitive_and_symlink_children(self) -> None:
+        output = self.prepare_bundle_task()
+        images = output / "images"
+        images.mkdir()
+        (images / "01.jpg").write_bytes(b"image")
+        (images / "COOKIE.jpg").write_bytes(b"unsafe fixture")
+        outside = self.project_root / "outside.jpg"
+        outside.write_bytes(b"outside fixture")
+        (images / "linked.jpg").symlink_to(outside)
+
+        snapshot = project_records.register_artifacts(
+            "competitor-20260801-a1",
+            {"outputDir": str(output), "explicitPaths": [str(images)]},
+        )
+
+        paths = {Path(item["absolutePath"]).name for item in snapshot["artifacts"]}
+        self.assertIn("01.jpg", paths)
+        self.assertNotIn("COOKIE.jpg", paths)
+        self.assertNotIn("linked.jpg", paths)
+
+    def test_ready_bundle_requires_all_store_commitments(self) -> None:
+        output = self.prepare_bundle_task()
+        project_records.finalize_bundle("competitor-20260801-a1", self.bundle_payload(output))
+        corrupted = json.loads(self.store_path.read_text("utf-8"))
+        corrupted["bundles"][0]["archiveSha256"] = None
+        self.store_path.write_text(json.dumps(corrupted), "utf-8")
+
+        with self.assertRaisesRegex(ValueError, "record_store_damaged"):
+            project_records.read_records("competitor-insight")
 
 
 if __name__ == "__main__":
