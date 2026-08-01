@@ -50,3 +50,26 @@ test("declares both platform routes ready", () => {
     ],
   );
 });
+
+test("classifies clear account and content paths while short links stay unknown", () => {
+  assert.equal(
+    detectCompetitorPlatform("https://www.douyin.com/user/a").inputKindHint,
+    "account",
+  );
+  assert.equal(
+    detectCompetitorPlatform("https://www.douyin.com/video/1").inputKindHint,
+    "content",
+  );
+  assert.equal(
+    detectCompetitorPlatform("https://www.xiaohongshu.com/user/profile/a").categoryHint,
+    "xhs-account",
+  );
+  assert.equal(
+    detectCompetitorPlatform("https://www.xiaohongshu.com/explore/1").categoryHint,
+    "xhs-note",
+  );
+  assert.equal(
+    detectCompetitorPlatform("https://v.douyin.com/abc/").inputKindHint,
+    "unknown",
+  );
+});
