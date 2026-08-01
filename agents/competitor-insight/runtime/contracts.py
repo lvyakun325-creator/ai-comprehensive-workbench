@@ -46,6 +46,43 @@ class SectionClaim(TypedDict):
     complianceNotes: NotRequired[list[str]]
 
 
+class ContentSectionClaim(TypedDict):
+    section: ContentClaimSection
+    statement: str
+    strength: Literal["hypothesis"]
+    evidenceIds: list[str]
+    rationale: str
+    verificationPlan: str
+    complianceNotes: NotRequired[list[str]]
+
+
+class ContentTopicDirection(TypedDict):
+    title: str
+    angle: str
+    strength: Literal["hypothesis"]
+    verificationPlan: str
+    evidenceIds: list[str]
+    complianceNotes: list[str]
+
+
+class ContentFilmingTemplate(TypedDict):
+    name: str
+    hook: str
+    structure: list[str]
+    strength: Literal["hypothesis"]
+    verificationPlan: str
+    evidenceIds: list[str]
+    complianceNotes: list[str]
+
+
+class ContentConversionItem(TypedDict):
+    action: str
+    strength: Literal["hypothesis"]
+    verificationPlan: str
+    evidenceIds: list[str]
+    complianceNotes: list[str]
+
+
 class SectionBatch(TypedDict):
     batchId: SectionBatchId
     claims: list[SectionClaim]
@@ -53,6 +90,18 @@ class SectionBatch(TypedDict):
     filmingTemplates: list[dict[str, object]]
     conversionItems: list[dict[str, object]]
     executionDays: list[dict[str, object]]
+
+
+class ContentSectionBatch(TypedDict):
+    batchId: Literal["content"]
+    claims: list[ContentSectionClaim]
+    topicDirections: list[ContentTopicDirection]
+    filmingTemplates: list[ContentFilmingTemplate]
+    conversionItems: list[ContentConversionItem]
+    executionDays: list[object]
+
+
+ReportSectionBatch = SectionBatch | ContentSectionBatch
 
 
 class TrustedBatchContext(TypedDict):
@@ -65,13 +114,13 @@ class TrustedBatchContext(TypedDict):
 class ReportArtifact(TypedDict):
     reportVersion: Literal["1.0"]
     evidence: EvidenceBundle
-    sections: list[SectionBatch]
+    sections: list[ReportSectionBatch]
 
 
 class FinalReportValidationInput(TypedDict):
     markdown: str
     evidence: EvidenceBundle
-    batches: list[SectionBatch]
+    batches: list[ReportSectionBatch]
     trustedBatchContexts: list[TrustedBatchContext]
 
 

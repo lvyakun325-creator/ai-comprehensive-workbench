@@ -104,17 +104,8 @@ _NEGATION_SCOPE_ESCAPE_PATTERN = re.compile(
     r"(?:并非|不是|不等于)\s*(?:不应|不能|不得|不要|不建议)"
     r"|(?:不得不|不能不)"
 )
-_CONTENT_CAPABILITY_TERMS = {
-    "visual": ("画面", "镜头", "视觉"),
-    "comment_text": ("评论正文", "评论区", "评论内容"),
-    "conversion": ("商品", "私域", "直播", "转化", "咨询"),
-}
-_CONTENT_CAPABILITY_FIELDS = {
-    "visual": ("ocr", "visualEvidence", "frames"),
-    "comment_text": ("commentTexts", "commentText", "commentsText"),
-    "conversion": ("product", "products", "privateDomain", "live", "conversion", "conversionPath"),
-}
 _CONTROLLED_EVIDENCE_ID = re.compile(r"^[A-Z][A-Z0-9]*-E\d{4,}$")
+_MAX_VERIFICATION_PLAN_CHARACTERS = 1_000
 
 
 def _object(value: object, error: str) -> dict[str, object]:
@@ -259,31 +250,6 @@ def _trusted_allowed_evidence_ids(
     return set(cast(list[str], allowed))
 
 
-def _content_capabilities(bundle: EvidenceBundle) -> set[str]:
-    content = bundle.get("content", {})
-    if not isinstance(content, dict):
-        return set()
-    return {
-        capability
-        for capability, fields in _CONTENT_CAPABILITY_FIELDS.items()
-        if any(content.get(field) not in (None, "", [], {}) for field in fields)
-    }
-
-
-def _required_content_capabilities(section: str, *texts: str) -> set[str]:
-    combined = "\n".join(texts)
-    required = {
-        capability
-        for capability, terms in _CONTENT_CAPABILITY_TERMS.items()
-        if any(term in combined for term in terms)
-    }
-    if section == "conversion":
-        required.add("conversion")
-    if "来自画面和评论" in combined:
-        required.update({"visual", "comment_text"})
-    return required
-
-
 def _evidence_ids(
     value: object,
     known: dict[str, dict[str, object]],
@@ -319,11 +285,18 @@ def _optional_compliance_notes(
     )
 
 
+def _verification_plan(value: object, error: str) -> str:
+    plan = _text(value, error)
+    if len(plan) > _MAX_VERIFICATION_PLAN_CHARACTERS:
+        raise ValueError("verification_plan_too_long")
+    _check_model_text(plan)
+    return plan
+
+
 def _validate_claim(
     raw: object,
     known: dict[str, dict[str, object]],
     allowed_sections: set[str],
-    content_capabilities: set[str],
     allowed_evidence_ids: set[str],
 ) -> dict[str, object]:
     claim = _object(raw, "invalid_claim")
@@ -341,6 +314,8 @@ def _validate_claim(
     strength = _text(claim["strength"], "invalid_claim_strength")
     if strength not in STRENGTH_LABELS:
         raise ValueError(f"invalid_claim_strength:{strength}")
+    if section in _BATCH_SECTIONS["content"] and strength != "hypothesis":
+        raise ValueError("content_claim_requires_hypothesis")
     _evidence_ids(claim["evidenceIds"], known, allowed_evidence_ids)
 
     rationale = claim.get("rationale")
@@ -353,36 +328,44 @@ def _validate_claim(
     _check_model_text(rationale)
 
     if strength in {"weak", "hypothesis"}:
-        verification = claim.get("verificationPlan")
-        if not isinstance(verification, str) or not verification.strip():
+        if "verificationPlan" not in claim:
             raise ValueError(f"{strength}_claim_requires_label")
-        _check_model_text(verification)
+        _verification_plan(
+            claim["verificationPlan"],
+            f"{strength}_claim_requires_label",
+        )
     elif "verificationPlan" in claim:
-        verification = _text(claim["verificationPlan"], "invalid_verification_plan")
-        _check_model_text(verification)
-    required_capabilities = _required_content_capabilities(
-        section,
-        statement,
-        str(rationale),
-        str(claim.get("verificationPlan", "")),
-    ) if section in _BATCH_SECTIONS["content"] else set()
-    if required_capabilities - content_capabilities and strength != "hypothesis":
-        raise ValueError("content_claim_requires_hypothesis")
+        _verification_plan(claim["verificationPlan"], "invalid_verification_plan")
     _optional_compliance_notes(claim, required=False)
     return claim
+
+
+def _validate_structured_hypothesis(value: dict[str, object], item_name: str) -> None:
+    strength = _text(value["strength"], f"invalid_{item_name}_strength")
+    if strength != "hypothesis":
+        raise ValueError(f"{item_name}_requires_hypothesis")
+    _verification_plan(
+        value["verificationPlan"],
+        f"invalid_{item_name}_verification_plan",
+    )
 
 
 def _validate_topic(
     raw: object,
     known: dict[str, dict[str, object]],
     allowed_evidence_ids: set[str],
+    *,
+    content_hypothesis: bool = False,
 ) -> dict[str, object]:
     topic = _object(raw, "invalid_topic_direction")
-    _keys(topic, _TOPIC_KEYS, _TOPIC_KEYS, "topic_direction")
+    allowed_keys = _TOPIC_KEYS | ({"strength", "verificationPlan"} if content_hypothesis else set())
+    _keys(topic, allowed_keys, allowed_keys, "topic_direction")
     for field in ("title", "angle"):
         _check_model_text(_text(topic[field], f"invalid_topic_{field}"))
     _evidence_ids(topic["evidenceIds"], known, allowed_evidence_ids)
     _optional_compliance_notes(topic, required=True)
+    if content_hypothesis:
+        _validate_structured_hypothesis(topic, "topic_direction")
     return topic
 
 
@@ -390,14 +373,19 @@ def _validate_filming(
     raw: object,
     known: dict[str, dict[str, object]],
     allowed_evidence_ids: set[str],
+    *,
+    content_hypothesis: bool = False,
 ) -> dict[str, object]:
     template = _object(raw, "invalid_filming_template")
-    _keys(template, _FILMING_KEYS, _FILMING_KEYS, "filming_template")
+    allowed_keys = _FILMING_KEYS | ({"strength", "verificationPlan"} if content_hypothesis else set())
+    _keys(template, allowed_keys, allowed_keys, "filming_template")
     for field in ("name", "hook"):
         _check_model_text(_text(template[field], f"invalid_filming_{field}"))
     _text_list(template["structure"], "invalid_filming_structure", allow_empty=False)
     _evidence_ids(template["evidenceIds"], known, allowed_evidence_ids)
     _optional_compliance_notes(template, required=True)
+    if content_hypothesis:
+        _validate_structured_hypothesis(template, "filming_template")
     return template
 
 
@@ -405,12 +393,17 @@ def _validate_conversion(
     raw: object,
     known: dict[str, dict[str, object]],
     allowed_evidence_ids: set[str],
+    *,
+    content_hypothesis: bool = False,
 ) -> dict[str, object]:
     item = _object(raw, "invalid_conversion_item")
-    _keys(item, _CONVERSION_KEYS, _CONVERSION_KEYS, "conversion_item")
+    allowed_keys = _CONVERSION_KEYS | ({"strength", "verificationPlan"} if content_hypothesis else set())
+    _keys(item, allowed_keys, allowed_keys, "conversion_item")
     _check_model_text(_text(item["action"], "invalid_conversion_action"))
     _evidence_ids(item["evidenceIds"], known, allowed_evidence_ids)
     _optional_compliance_notes(item, required=True)
+    if content_hypothesis:
+        _validate_structured_hypothesis(item, "conversion_item")
     return item
 
 
@@ -498,33 +491,6 @@ def _validate_content_contract(batch: dict[str, object]) -> None:
         raise ValueError("content_execution_days_must_be_empty")
 
 
-def _validate_content_recommendation_capabilities(
-    batch: dict[str, object],
-    content_capabilities: set[str],
-) -> None:
-    recommendation_texts: list[tuple[str, tuple[str, ...]]] = []
-    for topic in cast(list[dict[str, object]], batch["topicDirections"]):
-        recommendation_texts.append((
-            "",
-            (str(topic.get("title", "")), str(topic.get("angle", ""))),
-        ))
-    for template in cast(list[dict[str, object]], batch["filmingTemplates"]):
-        recommendation_texts.append((
-            "",
-            (
-                str(template.get("name", "")),
-                str(template.get("hook", "")),
-                *tuple(str(item) for item in cast(list[object], template.get("structure", []))),
-            ),
-        ))
-    for item in cast(list[dict[str, object]], batch["conversionItems"]):
-        recommendation_texts.append(("conversion", (str(item.get("action", "")),)))
-    for section, texts in recommendation_texts:
-        required = _required_content_capabilities(section, *texts)
-        if required - content_capabilities and "待验证假设" not in "\n".join(texts):
-            raise ValueError("content_recommendation_requires_hypothesis")
-
-
 def validate_section_batch(
     batch: object,
     bundle: EvidenceBundle,
@@ -542,7 +508,6 @@ def validate_section_batch(
         trusted_batch_context,
         known,
     )
-    content_capabilities = _content_capabilities(bundle)
 
     claims = _list(normalized["claims"], "invalid_claims")
     topics = _list(normalized["topicDirections"], "invalid_topic_directions")
@@ -563,19 +528,36 @@ def validate_section_batch(
             item,
             known,
             _BATCH_SECTIONS[batch_id],
-            content_capabilities,
             allowed_evidence_ids,
         )
         for item in claims
     ]
     normalized["topicDirections"] = [
-        _validate_topic(item, known, allowed_evidence_ids) for item in topics
+        _validate_topic(
+            item,
+            known,
+            allowed_evidence_ids,
+            content_hypothesis=batch_id == "content",
+        )
+        for item in topics
     ]
     normalized["filmingTemplates"] = [
-        _validate_filming(item, known, allowed_evidence_ids) for item in filming
+        _validate_filming(
+            item,
+            known,
+            allowed_evidence_ids,
+            content_hypothesis=batch_id == "content",
+        )
+        for item in filming
     ]
     normalized["conversionItems"] = [
-        _validate_conversion(item, known, allowed_evidence_ids) for item in conversions
+        _validate_conversion(
+            item,
+            known,
+            allowed_evidence_ids,
+            content_hypothesis=batch_id == "content",
+        )
+        for item in conversions
     ]
     normalized["executionDays"] = [
         _validate_execution(item, known, allowed_evidence_ids) for item in execution
@@ -585,5 +567,4 @@ def validate_section_batch(
         _validate_execution_contract(normalized, bundle, known)
     if batch_id == "content":
         _validate_content_contract(normalized)
-        _validate_content_recommendation_capabilities(normalized, content_capabilities)
     return normalized

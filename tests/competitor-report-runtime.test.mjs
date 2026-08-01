@@ -126,8 +126,9 @@ function validContentBatch() {
       {
         section: "content-overview",
         statement: "标题呈现日常管理主题",
-        strength: "direct",
-        rationale: "来自输入标题字段",
+        strength: "hypothesis",
+        rationale: "来自输入标题字段的有限观察",
+        verificationPlan: "补充同主题内容样本后核验",
         ...evidenceFields,
       },
       {
@@ -141,7 +142,7 @@ function validContentBatch() {
       {
         section: "interaction",
         statement: "互动数据可作为后续观察信号",
-        strength: "weak",
+        strength: "hypothesis",
         rationale: "仅来自单条内容的既有数据",
         verificationPlan: "结合更多同类内容核验",
         ...evidenceFields,
@@ -158,16 +159,22 @@ function validContentBatch() {
     topicDirections: ["一", "二", "三"].map((label) => ({
       title: `复用角度${label}`,
       angle: "从日常管理场景切入",
+      strength: "hypothesis",
+      verificationPlan: "补充同类内容样本后核验",
       ...evidenceFields,
     })),
     filmingTemplates: [{
       name: "单内容拍法",
       hook: "用作品主题自然开场",
       structure: ["主题", "日常提醒"],
+      strength: "hypothesis",
+      verificationPlan: "补充画面与口播记录后核验",
       ...evidenceFields,
     }],
     conversionItems: [{
-      action: "仅作为待验证假设，不对转化效果作出承诺",
+      action: "提供合规资料记录入口",
+      strength: "hypothesis",
+      verificationPlan: "补充承接记录后核验",
       ...evidenceFields,
     }],
     executionDays: [],
@@ -253,6 +260,40 @@ test("content prompt and parser accept XHS evidence IDs with the exact 3/1/0 con
   invalid.executionDays = [{ day: 1, action: "不应出现", evidenceIds: ["XHS-E0001"], complianceNotes: ["不承诺疗效"] }];
   assert.throws(
     () => parseCompetitorBatchResponse(JSON.stringify(invalid), ["XHS-E0001"]),
+    (error) => error instanceof CompetitorReportRuntimeError
+      && error.code === "INVALID_MODEL_OUTPUT",
+  );
+});
+
+test("content parser requires structured hypotheses instead of text-only safety labels", () => {
+  const directSynonym = validContentBatch();
+  directSynonym.claims[1] = {
+    section: "content-structure",
+    statement: "视频由医生出镜讲解，评论称购买后有效",
+    strength: "direct",
+    rationale: "作者在视频中加微信承接",
+    evidenceIds: ["XHS-E0001"],
+  };
+  assert.throws(
+    () => parseCompetitorBatchResponse(JSON.stringify(directSynonym), ["XHS-E0001"]),
+    (error) => error instanceof CompetitorReportRuntimeError
+      && error.code === "INVALID_MODEL_OUTPUT",
+  );
+
+  const textOnly = validContentBatch();
+  textOnly.topicDirections[0].angle = "待验证假设：视频由医生出镜，评论称购买有效，加微信咨询";
+  delete textOnly.topicDirections[0].strength;
+  delete textOnly.topicDirections[0].verificationPlan;
+  assert.throws(
+    () => parseCompetitorBatchResponse(JSON.stringify(textOnly), ["XHS-E0001"]),
+    (error) => error instanceof CompetitorReportRuntimeError
+      && error.code === "INVALID_MODEL_OUTPUT",
+  );
+
+  const overlongPlan = validContentBatch();
+  overlongPlan.filmingTemplates[0].verificationPlan = "核验".repeat(501);
+  assert.throws(
+    () => parseCompetitorBatchResponse(JSON.stringify(overlongPlan), ["XHS-E0001"]),
     (error) => error instanceof CompetitorReportRuntimeError
       && error.code === "INVALID_MODEL_OUTPUT",
   );

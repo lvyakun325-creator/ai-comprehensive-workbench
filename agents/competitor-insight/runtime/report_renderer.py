@@ -483,7 +483,8 @@ def _content_completeness(bundle: EvidenceBundle) -> str:
 def _content_topics(batch: dict[str, object], bundle: EvidenceBundle) -> str:
     lines: list[str] = []
     for index, topic in enumerate(cast(list[dict[str, object]], batch["topicDirections"]), start=1):
-        lines.append(f"{index}. **{_safe_text(topic.get('title'))}**：{_safe_text(topic.get('angle'))}")
+        lines.append(f"{index}. **待验证假设**：**{_safe_text(topic.get('title'))}**：{_safe_text(topic.get('angle'))}")
+        lines.append(f"   - 验证方式：{_safe_text(topic.get('verificationPlan'))}")
         lines.extend(_evidence_lines(topic.get("evidenceIds"), bundle))
         lines.append(f"   - 合规提示：{_safe_text('；'.join(cast(list[str], topic.get('complianceNotes', []))))}")
     return "\n".join(lines)
@@ -493,7 +494,8 @@ def _content_filming(batch: dict[str, object], bundle: EvidenceBundle) -> str:
     template = cast(list[dict[str, object]], batch["filmingTemplates"])[0]
     structure = " → ".join(_safe_text(item) for item in cast(list[str], template.get("structure", [])))
     return "\n".join((
-        f"- **{_safe_text(template.get('name'))}**：开场 {_safe_text(template.get('hook'))}；结构 {structure}",
+        f"- **待验证假设**：**{_safe_text(template.get('name'))}**：开场 {_safe_text(template.get('hook'))}；结构 {structure}",
+        f"  - 验证方式：{_safe_text(template.get('verificationPlan'))}",
         *_evidence_lines(template.get("evidenceIds"), bundle),
         f"  - 合规提示：{_safe_text('；'.join(cast(list[str], template.get('complianceNotes', []))))}",
     ))
@@ -502,7 +504,8 @@ def _content_filming(batch: dict[str, object], bundle: EvidenceBundle) -> str:
 def _content_conversion(batch: dict[str, object], bundle: EvidenceBundle) -> str:
     lines: list[str] = ["仅基于已提供证据输出；商品、私域、直播与实际转化链路未提供时均为待验证假设。"]
     for item in cast(list[dict[str, object]], batch["conversionItems"]):
-        lines.append(f"- {_safe_text(item.get('action'))}")
+        lines.append(f"- **待验证假设**：{_safe_text(item.get('action'))}")
+        lines.append(f"  - 验证方式：{_safe_text(item.get('verificationPlan'))}")
         lines.extend(_evidence_lines(item.get("evidenceIds"), bundle))
         lines.append(f"  - 合规提示：{_safe_text('；'.join(cast(list[str], item.get('complianceNotes', []))))}")
     return "\n".join(lines)

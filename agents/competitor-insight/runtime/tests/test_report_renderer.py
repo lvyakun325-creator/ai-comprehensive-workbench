@@ -76,26 +76,44 @@ def valid_batches() -> list[dict[str, object]]:
     return [strategy, performance, execution_batch()]
 
 
-def trusted_contexts(batches: list[dict[str, object]]) -> list[dict[str, object]]:
-    contexts = []
-    for batch in batches:
-        evidence_ids: list[str] = []
-        for key in ("claims", "topicDirections", "filmingTemplates", "conversionItems", "executionDays"):
-            for item in batch.get(key, []):
-                evidence_ids.extend(item.get("evidenceIds", []))
-        contexts.append({
-            "batchId": batch["batchId"],
-            "allowedEvidenceIds": list(dict.fromkeys(evidence_ids)),
-        })
-    return contexts
+_ACCOUNT_REQUEST_CONTEXTS = [
+    {"batchId": "strategy", "allowedEvidenceIds": ["DY-E0001"]},
+    {"batchId": "performance", "allowedEvidenceIds": ["DY-E0002"]},
+    {"batchId": "execution", "allowedEvidenceIds": ["DY-E0001", "DY-E0002"]},
+]
+_XHS_ACCOUNT_REQUEST_CONTEXTS = [
+    {"batchId": "strategy", "allowedEvidenceIds": ["XHS-E0001"]},
+    {"batchId": "performance", "allowedEvidenceIds": ["XHS-E0002"]},
+    {"batchId": "execution", "allowedEvidenceIds": ["XHS-E0001", "XHS-E0002"]},
+]
+_CONTENT_REQUEST_CONTEXTS = [
+    {"batchId": "content", "allowedEvidenceIds": ["XHS-E0001"]},
+]
 
 
-def assemble_report(bundle: dict[str, object], batches: list[dict[str, object]]) -> str:
-    return _assemble_report(bundle, batches, trusted_contexts(batches))
+def trusted_contexts_for_bundle(bundle: dict[str, object]) -> list[dict[str, object]]:
+    if bundle.get("inputKind") == "content":
+        return deepcopy(_CONTENT_REQUEST_CONTEXTS)
+    if bundle.get("platformId") == "xiaohongshu":
+        return deepcopy(_XHS_ACCOUNT_REQUEST_CONTEXTS)
+    return deepcopy(_ACCOUNT_REQUEST_CONTEXTS)
 
 
-def validate_final_report(markdown: str, bundle: dict[str, object], batches: list[dict[str, object]]) -> list[str]:
-    return _validate_final_report(markdown, bundle, batches, trusted_contexts(batches))
+def assemble_report(
+    bundle: dict[str, object],
+    batches: list[dict[str, object]],
+    contexts: list[dict[str, object]] | None = None,
+) -> str:
+    return _assemble_report(bundle, batches, contexts or trusted_contexts_for_bundle(bundle))
+
+
+def validate_final_report(
+    markdown: str,
+    bundle: dict[str, object],
+    batches: list[dict[str, object]],
+    contexts: list[dict[str, object]] | None = None,
+) -> list[str]:
+    return _validate_final_report(markdown, bundle, batches, contexts or trusted_contexts_for_bundle(bundle))
 
 
 class ReportRendererTests(unittest.TestCase):
@@ -127,6 +145,27 @@ class ReportRendererTests(unittest.TestCase):
         self.assertNotIn("起号期", markdown)
         self.assertNotIn("7 天", markdown)
         self.assertEqual(validate_final_report(markdown, xhs_note_bundle(), [content_batch()]), [])
+
+    def test_content_renderer_explicitly_labels_each_model_recommendation_as_hypothesis(self) -> None:
+        markdown = assemble_report(xhs_note_bundle(), [content_batch()])
+
+        self.assertIn("1. **待验证假设**：**复用角度一**", markdown)
+        self.assertIn("- **待验证假设**：**单内容拍法**", markdown)
+        self.assertIn("- **待验证假设**：提供合规资料记录入口", markdown)
+        self.assertIn("验证方式：补充同类内容样本后核验", markdown)
+
+    def test_assemble_and_final_reject_bundle_known_evidence_outside_request_context(self) -> None:
+        bundle = evidence_bundle()
+        batches = valid_batches()
+        batches[0]["claims"][0]["evidenceIds"] = ["DY-E0002"]
+        contexts = trusted_contexts_for_bundle(bundle)
+
+        with self.assertRaisesRegex(ValueError, "evidence_id_not_allowed:DY-E0002"):
+            assemble_report(bundle, batches, contexts)
+
+        valid_markdown = assemble_report(bundle, valid_batches(), contexts)
+        with self.assertRaisesRegex(ValueError, "evidence_id_not_allowed:DY-E0002"):
+            validate_final_report(valid_markdown, bundle, batches, contexts)
 
     def test_renders_bundle_rankings_and_evidence_numbers_in_fixed_section_order(self) -> None:
         bundle = evidence_bundle()
@@ -220,8 +259,11 @@ class ReportRendererTests(unittest.TestCase):
         )
         for invalid, error in cases:
             with self.subTest(error=error):
+                contexts = trusted_contexts_for_bundle(evidence_bundle())
+                if error == "invalid_batch_id":
+                    contexts.append({"batchId": "unknown", "allowedEvidenceIds": ["DY-E0001"]})
                 with self.assertRaisesRegex(ValueError, error):
-                    assemble_report(evidence_bundle(), invalid)
+                    assemble_report(evidence_bundle(), invalid, contexts)
 
     def test_renders_a_reference_only_from_the_bundle(self) -> None:
         reference = render_evidence_reference("DY-E0001", evidence_bundle())

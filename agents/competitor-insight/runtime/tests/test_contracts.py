@@ -76,10 +76,15 @@ class ContractTests(unittest.TestCase):
                 self.claim(section)
                 for section in ("content-overview", "content-structure", "interaction", "conversion")
             ]
+            for claim in batch["claims"]:
+                claim["strength"] = "hypothesis"
+                claim["verificationPlan"] = "补充同类内容样本后核验"
             batch["topicDirections"] = [
                 {
                     "title": f"复用方向{label}",
                     "angle": "生活方式提醒",
+                    "strength": "hypothesis",
+                    "verificationPlan": "补充同类内容样本后核验",
                     "evidenceIds": evidence_ids,
                     "complianceNotes": compliance_notes,
                 }
@@ -90,6 +95,8 @@ class ContractTests(unittest.TestCase):
                     "name": "单内容拍法",
                     "hook": "先讲观察",
                     "structure": ["证据", "建议"],
+                    "strength": "hypothesis",
+                    "verificationPlan": "补充画面记录后核验",
                     "evidenceIds": evidence_ids,
                     "complianceNotes": compliance_notes,
                 }
@@ -119,12 +126,27 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             contracts.ReportArtifact.__annotations__["sections"],
-            list[contracts.SectionBatch],
+            list[contracts.ReportSectionBatch],
         )
         self.assertEqual(
             contracts.FinalReportValidationInput.__annotations__["trustedBatchContexts"],
             list[contracts.TrustedBatchContext],
         )
+
+    def test_contract_types_expose_content_hypothesis_recommendations(self):
+        import contracts
+
+        self.assertEqual(
+            contracts.ContentSectionClaim.__annotations__["strength"],
+            contracts.Literal["hypothesis"],
+        )
+        for shape in (
+            contracts.ContentTopicDirection,
+            contracts.ContentFilmingTemplate,
+            contracts.ContentConversionItem,
+        ):
+            self.assertEqual(shape.__annotations__["strength"], contracts.Literal["hypothesis"])
+            self.assertEqual(shape.__annotations__["verificationPlan"], str)
 
     def test_section_batch_schema_requires_closed_root_and_valid_evidence(self):
         schema = self.load_section_batch_schema()
@@ -199,6 +221,39 @@ class ContractTests(unittest.TestCase):
                 batch = self.valid_section_batch("execution")
                 mutate(batch)
                 self.assertNotEqual(list(validator.iter_errors(batch)), [])
+
+    def test_content_schema_requires_structured_hypotheses_for_all_model_text(self):
+        validator = Draft202012Validator(self.load_section_batch_schema())
+
+        direct_claim = self.valid_section_batch("content")
+        direct_claim["claims"][0]["strength"] = "direct"
+        direct_claim["claims"][0].pop("verificationPlan")
+        text_only_topic = self.valid_section_batch("content")
+        text_only_topic["topicDirections"][0].pop("strength")
+        text_only_topic["topicDirections"][0].pop("verificationPlan")
+        direct_filming = self.valid_section_batch("content")
+        direct_filming["filmingTemplates"][0]["strength"] = "direct"
+        missing_conversion_plan = self.valid_section_batch("content")
+        missing_conversion_plan["conversionItems"] = [
+            {
+                "action": "提供资料入口",
+                "strength": "hypothesis",
+                "evidenceIds": ["DY-E0001"],
+                "complianceNotes": ["不承诺疗效"],
+            }
+        ]
+        overlong_verification = self.valid_section_batch("content")
+        overlong_verification["topicDirections"][0]["verificationPlan"] = "核验" * 501
+
+        for invalid in (
+            direct_claim,
+            text_only_topic,
+            direct_filming,
+            missing_conversion_plan,
+            overlong_verification,
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertNotEqual(list(validator.iter_errors(invalid)), [])
 
 
 if __name__ == "__main__":

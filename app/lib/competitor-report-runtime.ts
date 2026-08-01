@@ -30,6 +30,7 @@ const BATCH_IDS = new Set<CompetitorBatchId>([
 const DEFAULT_GENERATION_TIMEOUT_MS = 180_000;
 const MAX_INPUT_CHARACTERS = 80_000;
 const MAX_MODEL_OUTPUT_CHARACTERS = 40_000;
+const MAX_VERIFICATION_PLAN_CHARACTERS = 1_000;
 const MAX_PROVIDER_RESPONSE_BYTES = 128 * 1024;
 const MAX_URL_CHARACTERS = 2_048;
 const MAX_API_KEY_CHARACTERS = 4_096;
@@ -85,6 +86,7 @@ const EXECUTION_DAY_KEYS = [
   "evidenceIds",
   "complianceNotes",
 ] as const;
+const CONTENT_HYPOTHESIS_KEYS = ["strength", "verificationPlan"] as const;
 const CLAIM_STRENGTHS = new Set(["direct", "weak", "hypothesis"]);
 const BATCH_CONTRACTS = {
   strategy: {
@@ -401,10 +403,10 @@ function promptContract(batchId: CompetitorBatchId): string {
   }
   if (batchId === "content") {
     return `- batchId 必须为 content。
-- claims 的 section 必须且只能覆盖 ${Array.from(BATCH_CONTRACTS.content.sections).join("、")}，每个 section 恰好一项。
-- topicDirections 必须恰好 ${BATCH_CONTRACTS.content.topicCount} 项；每项只能包含 ${TOPIC_KEYS.join("、")}，全部必填；title、angle 为非空字符串，evidenceIds、complianceNotes 为至少一项的非空字符串数组。
-- filmingTemplates 必须恰好 ${BATCH_CONTRACTS.content.filmingCount} 项；每项只能包含 ${FILMING_KEYS.join("、")}，全部必填；name、hook 为非空字符串，structure、evidenceIds、complianceNotes 为至少一项的非空字符串数组。
-- conversionItems 为数组；每项只能包含 ${CONVERSION_KEYS.join("、")}，全部必填；action 为非空字符串，evidenceIds、complianceNotes 为至少一项的非空字符串数组。
+- claims 的 section 必须且只能覆盖 ${Array.from(BATCH_CONTRACTS.content.sections).join("、")}，每个 section 恰好一项；所有 claim 的 strength 必须为 hypothesis，且 verificationPlan 非空。
+- topicDirections 必须恰好 ${BATCH_CONTRACTS.content.topicCount} 项；每项只能包含 ${[...TOPIC_KEYS, ...CONTENT_HYPOTHESIS_KEYS].join("、")}，全部必填；strength 必须为 hypothesis，verificationPlan 为非空字符串。
+- filmingTemplates 必须恰好 ${BATCH_CONTRACTS.content.filmingCount} 项；每项只能包含 ${[...FILMING_KEYS, ...CONTENT_HYPOTHESIS_KEYS].join("、")}，全部必填；strength 必须为 hypothesis，verificationPlan 为非空字符串。
+- conversionItems 为数组；每项只能包含 ${[...CONVERSION_KEYS, ...CONTENT_HYPOTHESIS_KEYS].join("、")}，全部必填；strength 必须为 hypothesis，verificationPlan 为非空字符串。
 - executionDays 必须为空数组。`;
   }
   return `- batchId 必须为 execution，claims 必须为空数组。
@@ -504,12 +506,13 @@ function validateBatchShape(batch: Record<string, unknown>): void {
     requireNonEmptyString(claim.statement);
     const strength = requireNonEmptyString(claim.strength);
     if (!CLAIM_STRENGTHS.has(strength)) invalidModelOutput();
+    if (batchId === "content" && strength !== "hypothesis") invalidModelOutput();
     requireNonEmptyStrings(claim.evidenceIds);
     requireNonEmptyString(claim.rationale);
     if (strength === "weak" || strength === "hypothesis") {
-      requireNonEmptyString(claim.verificationPlan);
+      requireBoundedVerificationPlan(claim.verificationPlan);
     } else if (claim.verificationPlan !== undefined) {
-      requireNonEmptyString(claim.verificationPlan);
+      requireBoundedVerificationPlan(claim.verificationPlan);
     }
     if (claim.complianceNotes !== undefined) {
       requireNonEmptyStrings(claim.complianceNotes);
@@ -518,27 +521,39 @@ function validateBatchShape(batch: Record<string, unknown>): void {
 
   for (const value of topics) {
     const topic = requireRecord(value);
-    assertExactKeys(topic, TOPIC_KEYS, TOPIC_KEYS);
+    assertExactKeys(
+      topic,
+      batchId === "content" ? [...TOPIC_KEYS, ...CONTENT_HYPOTHESIS_KEYS] : TOPIC_KEYS,
+    );
     requireNonEmptyString(topic.title);
     requireNonEmptyString(topic.angle);
     requireNonEmptyStrings(topic.evidenceIds);
     requireNonEmptyStrings(topic.complianceNotes);
+    if (batchId === "content") requireStructuredHypothesis(topic);
   }
   for (const value of filming) {
     const template = requireRecord(value);
-    assertExactKeys(template, FILMING_KEYS, FILMING_KEYS);
+    assertExactKeys(
+      template,
+      batchId === "content" ? [...FILMING_KEYS, ...CONTENT_HYPOTHESIS_KEYS] : FILMING_KEYS,
+    );
     requireNonEmptyString(template.name);
     requireNonEmptyString(template.hook);
     requireNonEmptyStrings(template.structure);
     requireNonEmptyStrings(template.evidenceIds);
     requireNonEmptyStrings(template.complianceNotes);
+    if (batchId === "content") requireStructuredHypothesis(template);
   }
   for (const value of conversions) {
     const conversion = requireRecord(value);
-    assertExactKeys(conversion, CONVERSION_KEYS, CONVERSION_KEYS);
+    assertExactKeys(
+      conversion,
+      batchId === "content" ? [...CONVERSION_KEYS, ...CONTENT_HYPOTHESIS_KEYS] : CONVERSION_KEYS,
+    );
     requireNonEmptyString(conversion.action);
     requireNonEmptyStrings(conversion.evidenceIds);
     requireNonEmptyStrings(conversion.complianceNotes);
+    if (batchId === "content") requireStructuredHypothesis(conversion);
   }
 
   const days = new Set<number>();
@@ -564,6 +579,16 @@ function validateBatchShape(batch: Record<string, unknown>): void {
     requireNonEmptyStrings(executionDay.evidenceIds);
     requireNonEmptyStrings(executionDay.complianceNotes);
   }
+}
+
+function requireStructuredHypothesis(value: Record<string, unknown>): void {
+  if (requireNonEmptyString(value.strength) !== "hypothesis") invalidModelOutput();
+  requireBoundedVerificationPlan(value.verificationPlan);
+}
+
+function requireBoundedVerificationPlan(value: unknown): void {
+  const plan = requireNonEmptyString(value);
+  if (plan.length > MAX_VERIFICATION_PLAN_CHARACTERS) invalidModelOutput();
 }
 
 function assertExactKeys(

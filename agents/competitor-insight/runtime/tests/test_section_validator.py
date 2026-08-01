@@ -137,34 +137,36 @@ def content_batch() -> dict[str, object]:
     return {
         "batchId": "content",
         "claims": [
-            {"section": "content-overview", "statement": "标题呈现日常管理主题", "strength": "direct", "rationale": "来自标题字段", **evidence_fields},
+            {"section": "content-overview", "statement": "标题呈现日常管理主题", "strength": "hypothesis", "rationale": "来自标题字段的有限观察", "verificationPlan": "补充同主题内容样本后核验", **evidence_fields},
             {"section": "content-structure", "statement": "画面结构未提供，作为待验证假设", "strength": "hypothesis", "rationale": "证据包未提供画面字段", "verificationPlan": "补充画面记录后核验", **evidence_fields},
-            {"section": "interaction", "statement": "互动数据可作为后续观察信号", "strength": "weak", "rationale": "仅来自单条内容数据", "verificationPlan": "结合更多内容核验", **evidence_fields},
+            {"section": "interaction", "statement": "互动数据可作为后续观察信号", "strength": "hypothesis", "rationale": "仅来自单条内容数据", "verificationPlan": "结合更多内容核验", **evidence_fields},
             {"section": "conversion", "statement": "转化链路未提供，作为待验证假设", "strength": "hypothesis", "rationale": "输入未提供商品或私域字段", "verificationPlan": "补充承接记录后核验", **evidence_fields},
         ],
         "topicDirections": [
-            {"title": f"复用角度{label}", "angle": "从日常管理场景切入", **evidence_fields}
+            {"title": f"复用角度{label}", "angle": "从日常管理场景切入", "strength": "hypothesis", "verificationPlan": "补充同类内容样本后核验", **evidence_fields}
             for label in ("一", "二", "三")
         ],
-        "filmingTemplates": [{"name": "单内容拍法", "hook": "用主题自然开场", "structure": ["主题", "日常提醒"], **evidence_fields}],
-        "conversionItems": [{"action": "仅作为待验证假设，不承诺转化效果", **evidence_fields}],
+        "filmingTemplates": [{"name": "单内容拍法", "hook": "用主题自然开场", "structure": ["主题", "日常提醒"], "strength": "hypothesis", "verificationPlan": "补充画面与口播记录后核验", **evidence_fields}],
+        "conversionItems": [{"action": "提供合规资料记录入口", "strength": "hypothesis", "verificationPlan": "补充承接记录后核验", **evidence_fields}],
         "executionDays": [],
     }
 
 
-def _trusted_context(batch: dict[str, object], bundle: dict[str, object]) -> dict[str, object]:
-    evidence_ids: list[str] = []
-    for key in ("claims", "topicDirections", "filmingTemplates", "conversionItems", "executionDays"):
-        for item in batch.get(key, []):
-            evidence_ids.extend(item.get("evidenceIds", []))
-    return {
-        "batchId": batch["batchId"],
-        "allowedEvidenceIds": list(dict.fromkeys(evidence_ids)),
-    }
+_REQUEST_CONTEXTS = {
+    "strategy": {"batchId": "strategy", "allowedEvidenceIds": ["DY-E0001"]},
+    "performance": {"batchId": "performance", "allowedEvidenceIds": ["DY-E0001", "DY-E0002"]},
+    "execution": {"batchId": "execution", "allowedEvidenceIds": ["DY-E0001", "DY-E0002"]},
+    "content": {"batchId": "content", "allowedEvidenceIds": ["XHS-E0001"]},
+}
 
 
 def validate_section_batch(batch: dict[str, object], bundle: dict[str, object]) -> dict[str, object]:
-    return _validate_section_batch(batch, bundle, _trusted_context(batch, bundle))
+    batch_id = batch["batchId"]
+    context = _REQUEST_CONTEXTS.get(
+        batch_id,
+        {"batchId": batch_id, "allowedEvidenceIds": ["DY-E0001", "DY-E0002"]},
+    )
+    return _validate_section_batch(batch, bundle, context)
 
 
 def strategy_batch() -> dict[str, object]:
@@ -220,12 +222,43 @@ class SectionValidatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "content_claim_requires_hypothesis"):
             validate_section_batch(batch, xhs_note_bundle())
 
-    def test_content_rejects_unverified_visual_or_private_domain_recommendations(self) -> None:
+    def test_content_allows_synonym_recommendation_only_with_structured_hypothesis(self) -> None:
         batch = content_batch()
         batch["topicDirections"][0]["angle"] = "画面展示医生讲解并引导私域咨询"
 
-        with self.assertRaisesRegex(ValueError, "content_recommendation_requires_hypothesis"):
-            validate_section_batch(batch, xhs_note_bundle())
+        normalized = validate_section_batch(batch, xhs_note_bundle())
+
+        self.assertEqual(normalized["topicDirections"][0]["strength"], "hypothesis")
+        self.assertIn("核验", normalized["topicDirections"][0]["verificationPlan"])
+
+    def test_content_rejects_direct_synonym_claim_without_captured_capability(self) -> None:
+        batch = content_batch()
+        batch["claims"][1] = {
+            "section": "content-structure",
+            "statement": "视频由医生出镜讲解，评论称购买后有效",
+            "strength": "direct",
+            "evidenceIds": ["XHS-E0001"],
+            "rationale": "作者在视频中加微信承接",
+        }
+
+        with self.assertRaisesRegex(ValueError, "content_claim_requires_hypothesis"):
+            _validate_section_batch(batch, xhs_note_bundle(), _REQUEST_CONTEXTS["content"])
+
+    def test_content_rejects_text_only_hypothesis_recommendation_without_structured_fields(self) -> None:
+        batch = content_batch()
+        batch["topicDirections"][0]["angle"] = "待验证假设：视频由医生出镜，评论称购买有效，加微信咨询"
+        batch["topicDirections"][0].pop("strength")
+        batch["topicDirections"][0].pop("verificationPlan")
+
+        with self.assertRaisesRegex(ValueError, "missing_topic_direction_keys"):
+            _validate_section_batch(batch, xhs_note_bundle(), _REQUEST_CONTEXTS["content"])
+
+    def test_content_rejects_overlong_structured_verification_plan(self) -> None:
+        batch = content_batch()
+        batch["filmingTemplates"][0]["verificationPlan"] = "核验" * 501
+
+        with self.assertRaisesRegex(ValueError, "verification_plan_too_long"):
+            _validate_section_batch(batch, xhs_note_bundle(), _REQUEST_CONTEXTS["content"])
 
     def test_content_contract_accepts_xhs_evidence_and_rejects_account_plan_fields(self) -> None:
         self.assertEqual(

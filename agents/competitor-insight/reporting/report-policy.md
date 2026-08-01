@@ -8,7 +8,7 @@
 
 首期唯一输入源是用户提供的**单个抖音账号 Excel** 证据文件及其确定性解析结果；不混入小红书、其他账号、网页抓取或模型自行补充的数据。模型只输出符合 `section-batch.schema.json` 的 JSON 对象，不输出 Markdown、代码块、说明文字或其他字段。
 
-账号正式模型输出严格分为三批：`strategy`、`performance`、`execution`，不得使用其他批次名。所有批次保留统一根字段；`strategy` 和 `performance` 的选题、拍法、转化与执行数组必须为空，`execution` 的 `claims` 必须为空。单内容只允许一批 `content`：其 claims 必须且只能覆盖 `content-overview`、`content-structure`、`interaction`、`conversion`，复用角度恰好 3 项、拍法恰好 1 项、执行日恰好 0 项。
+账号正式模型输出严格分为三批：`strategy`、`performance`、`execution`，不得使用其他批次名。所有批次保留统一根字段；`strategy` 和 `performance` 的选题、拍法、转化与执行数组必须为空，`execution` 的 `claims` 必须为空。单内容只允许一批 `content`：其 claims 必须且只能覆盖 `content-overview`、`content-structure`、`interaction`、`conversion`，且全部 `strength: "hypothesis"` 并有非空 `verificationPlan`；复用角度恰好 3 项、拍法恰好 1 项、执行日恰好 0 项。content 的每个选题、拍法和转化项也必须显式提供 `strength: "hypothesis"` 与非空 `verificationPlan`。
 
 `strategy` 的每条判断必须以 `section` 标明 `strategy`、`business` 或 `content`；`performance` 的每条判断必须以 `section` 标明 `traffic` 或 `data`。不得依赖数组位置猜测章节，也不得跨批次放置判断。
 
@@ -18,7 +18,7 @@
 
 ## 证据与判断口径
 
-每条内容证据使用 `evidenceId`、`sourceRow`、标题、发布时间、链接、点赞、评论、收藏、分享、总互动及各榜单名次。所有发现、选题、拍法、转化动作和每日执行项均须列明至少一个 `evidenceId`。内容输入仅具备标题、互动等字段时，画面/镜头、评论正文/评论区、商品/私域/直播/转化链路均属缺失能力：相关 `direct` 断言必须拒绝；选题、拍法与承接动作必须显式标为“待验证假设”，否则拒绝。只有对应的结构化字段确实存在时，才可使用相应能力。
+每条内容证据使用 `evidenceId`、`sourceRow`、标题、发布时间、链接、点赞、评论、收藏、分享、总互动及各榜单名次。所有发现、选题、拍法、转化动作和每日执行项均须列明至少一个 `evidenceId`。单内容的模型文本一律是结构化待验证假设：禁止 `direct` 或 `weak` claim，且选题、拍法、转化不得只在正文写入“待验证假设”作为放行条件；字段缺失、非 hypothesis strength 或空验证计划均拒绝。标题、时间和指标等确定性事实由 renderer 从 EvidenceBundle 直接注入，不由模型作事实性表述。
 
 `direct` 仅用于可由数据或作品原文直接支持的陈述；`weak` 用于证据有限但存在合理信号的判断；`hypothesis` 用于尚未被证实的推测。`weak` 与 `hypothesis` 必须说明依据和验证方式，不得表述为既成事实。所有要求提供的 `complianceNotes` 均至少包含一条非空合规提示。
 
