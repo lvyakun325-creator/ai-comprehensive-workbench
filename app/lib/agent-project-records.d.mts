@@ -40,8 +40,8 @@ export type ProjectBundle = {
   taskId: string;
   platformId: string;
   platformLabel: string;
-  inputKind: "account" | "content";
-  category: ProjectBundleCategory;
+  inputKind: "unknown" | "account" | "content";
+  category: ProjectBundleCategory | null;
   title: string;
   subjectName: string;
   sourceUrl: string;

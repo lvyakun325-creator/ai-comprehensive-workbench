@@ -82,6 +82,7 @@ export function CompetitorReportRunner({
   onEvidencePaused,
   onFailed,
   onPreEvidenceTerminated,
+  onStopped,
   onBeforeRetry,
   onStageChange,
   retryBlocked = false,
@@ -94,6 +95,7 @@ export function CompetitorReportRunner({
     reason: PreEvidenceTerminationReason,
     message: string,
   ) => void;
+  onStopped?: (message: string) => Promise<boolean>;
   onBeforeRetry?: () => Promise<boolean>;
   onStageChange?: (stage: ReportWorkflowStage, message: string) => void;
   retryBlocked?: boolean;
@@ -140,7 +142,6 @@ export function CompetitorReportRunner({
       || nextStage === "generating"
       || nextStage === "validating"
       || nextStage === "saving"
-      || nextStage === "stopped"
     ) {
       onStageChange?.("generating", message);
     }
@@ -389,12 +390,11 @@ export function CompetitorReportRunner({
     stage,
   ]);
 
-  const stopReport = useCallback(() => {
+  const stopReport = useCallback(async () => {
     if (!ACTIVE_STAGES.has(stage)) return;
     tokenRef.current += 1;
     controllerRef.current?.abort();
     controllerRef.current = null;
-    setStage("stopped");
     setErrorMessage("");
     setFailedBatchId(null);
     const message = evidenceRef.current
@@ -402,11 +402,21 @@ export function CompetitorReportRunner({
       : "已停止本次抓取成果分析。";
     setStatusMessage(message);
     if (evidenceRef.current) {
-      onStageChange?.("generating", message);
+      setRetryPreparing(true);
+      setStatusMessage("模型请求已停止，正在同步停止状态…");
+      const persisted = onStopped ? await onStopped(message) : true;
+      setStage("stopped");
+      setStatusMessage(
+        persisted
+          ? message
+          : "已停止生成，但任务状态同步失败；请检查本地任务服务。",
+      );
+      setRetryPreparing(false);
     } else {
+      setStage("stopped");
       onPreEvidenceTerminated?.("stopped", message);
     }
-  }, [onPreEvidenceTerminated, onStageChange, stage]);
+  }, [onPreEvidenceTerminated, onStopped, stage]);
 
   useEffect(() => {
     if (!analysisRequest || analysisRequest.requestId === lastAnalysisRequestRef.current) return;
@@ -472,7 +482,7 @@ export function CompetitorReportRunner({
           <p>{statusMessage}</p>
         </div>
         <div className="competitor-report-actions">
-          {active ? <button onClick={stopReport} type="button">停止生成</button> : null}
+          {active ? <button onClick={() => void stopReport()} type="button">停止生成</button> : null}
           {canRetry ? (
             <button
               disabled={retryBlocked || retryPreparing}

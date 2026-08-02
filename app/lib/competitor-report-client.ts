@@ -124,6 +124,7 @@ async function postReportBridge<T>(
   parseSuccess: (value: unknown) => T,
 ): Promise<T> {
   assertNotAborted(signal);
+  await verifyReportBridgeHealth(signal);
   let response: Response;
   try {
     response = await fetch(`${REPORT_BRIDGE_ORIGIN}${path}`, {
@@ -152,6 +153,41 @@ async function postReportBridge<T>(
   } catch (error) {
     if (error instanceof CompetitorReportClientError) throw error;
     throw invalidResponse();
+  }
+}
+
+async function verifyReportBridgeHealth(signal: AbortSignal): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`${REPORT_BRIDGE_ORIGIN}/health`, {
+      method: "GET",
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+      headers: {accept: "application/json"},
+      signal,
+    });
+  } catch (error) {
+    if (signal.aborted || isAbortError(error)) throw abortError();
+    throw new CompetitorReportClientError(
+      "BRIDGE_UNAVAILABLE",
+      "无法连接本地报告服务，请确认 8768 服务已启动。",
+    );
+  }
+  const body = await readBoundedJson(response, signal);
+  if (
+    !response.ok
+    || !body
+    || typeof body !== "object"
+    || Array.isArray(body)
+    || (body as Record<string, unknown>).ok !== true
+    || (body as Record<string, unknown>).stage !== "healthy"
+    || (body as Record<string, unknown>).service !== "competitor-insight-report"
+  ) {
+    throw new CompetitorReportClientError(
+      "BRIDGE_UNAVAILABLE",
+      "无法确认本地报告服务身份，请检查 8768 端口后重试。",
+    );
   }
 }
 
@@ -207,6 +243,7 @@ async function readBoundedJson(
       // Releasing a closed response stream must not replace the stable result.
     }
   }
+  if (signal.aborted) throw abortError();
   try {
     return JSON.parse(chunks.join(""));
   } catch {

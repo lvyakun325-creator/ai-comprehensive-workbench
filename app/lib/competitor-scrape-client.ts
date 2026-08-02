@@ -68,7 +68,12 @@ function expectedCategory(platformId: CompetitorPlatformId, inputKind: Competito
   return inputKind === "account" ? "xhs-account" : "xhs-note";
 }
 
-function parseReadyResponse(payload: unknown, route: CompetitorPlatformRoute, taskId: string): ScrapeReadyResponse {
+function parseReadyResponse(
+  payload: unknown,
+  route: CompetitorPlatformRoute,
+  taskId: string,
+  healthOutputRoot: string,
+): ScrapeReadyResponse {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new ScrapeClientError("SCRAPE_RESPONSE_INVALID", "抓取服务返回的数据不完整，请重试。");
   }
@@ -87,7 +92,7 @@ function parseReadyResponse(payload: unknown, route: CompetitorPlatformRoute, ta
     throw new ScrapeClientError("SCRAPE_RESPONSE_INVALID", "抓取服务返回的成果分类无效，请重试。");
   }
   const outputDir = normalizeAbsolutePath(value.outputDir);
-  if (!outputDir || outputDir.split("/").at(-1) !== taskId) {
+  if (!outputDir || outputDir !== `${healthOutputRoot}/${taskId}`) {
     throw new ScrapeClientError("SCRAPE_RESPONSE_INVALID", "抓取服务返回的任务目录无效，请重试。");
   }
   const dataPath = normalizeAbsolutePath(value.dataPath);
@@ -147,7 +152,18 @@ export async function scrapeCompetitorLink(
   signal?: AbortSignal,
 ): Promise<ScrapeReadyResponse> {
   const health = await fetchJson(`${route.bridgeUrl}/health`, { signal }, "SCRAPE_BRIDGE_UNAVAILABLE", "本地抓取服务未就绪，请先启动后重试。");
-  if (!health || typeof health !== "object" || (health as { ok?: unknown }).ok !== true) {
+  const healthRecord = health && typeof health === "object" && !Array.isArray(health)
+    ? health as Record<string, unknown>
+    : null;
+  const healthOutputRoot = normalizeAbsolutePath(healthRecord?.outputDir);
+  const expectedSuffix = `/outputs/competitor-insight/${route.id}`;
+  if (
+    healthRecord?.ok !== true
+    || healthRecord.status !== "ready"
+    || healthRecord.service !== route.skillId
+    || !healthOutputRoot
+    || !healthOutputRoot.endsWith(expectedSuffix)
+  ) {
     throw new ScrapeClientError("SCRAPE_BRIDGE_UNAVAILABLE", "本地抓取服务未就绪，请先启动后重试。");
   }
   const payload = await fetchJson(
@@ -156,5 +172,5 @@ export async function scrapeCompetitorLink(
     "SCRAPE_REQUEST_FAILED",
     "抓取任务未完成，请检查链接后重试。",
   );
-  return parseReadyResponse(payload, route, taskId);
+  return parseReadyResponse(payload, route, taskId, healthOutputRoot);
 }

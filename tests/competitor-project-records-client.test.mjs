@@ -112,6 +112,19 @@ const jsonResponse = (body, init = {}) => new Response(JSON.stringify(body), {
   },
 });
 
+function withRecordsHealth(handler) {
+  return async (input, init) => {
+    if (String(input).endsWith("/health")) {
+      return jsonResponse({
+        ok: true,
+        stage: "healthy",
+        service: "competitor-insight-report",
+      });
+    }
+    return handler(input, init);
+  };
+}
+
 function task5LegacyStateSnapshots() {
   const runtimeDir = path.join(process.cwd(), "agents", "competitor-insight", "runtime");
   const testDir = path.join(runtimeDir, "tests");
@@ -147,7 +160,7 @@ test("loads a complete typed competitor snapshot", async (context) => {
   context.after(() => {
     globalThis.fetch = originalFetch;
   });
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = withRecordsHealth(async (url, init) => {
     assert.equal(
       String(url),
       "http://127.0.0.1:8768/project-records?agentId=competitor-insight",
@@ -158,7 +171,7 @@ test("loads a complete typed competitor snapshot", async (context) => {
       tasks: [TASK_FIXTURE],
       artifacts: [ARTIFACT_FIXTURE],
     });
-  };
+  });
 
   const snapshot = await loadCompetitorProjectRecords();
 
@@ -167,15 +180,35 @@ test("loads a complete typed competitor snapshot", async (context) => {
   assert.equal(snapshot.results[0].absolutePath, ARTIFACT_FIXTURE.absolutePath);
 });
 
+test("wrong records health identity fails closed before project records are requested", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let businessRequests = 0;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/health")) {
+      return jsonResponse({ok: true, stage: "healthy", service: "wrong-service"});
+    }
+    businessRequests += 1;
+    return jsonResponse({ok: true, tasks: [], artifacts: [], bundles: []});
+  };
+
+  await assert.rejects(
+    loadCompetitorProjectRecords(),
+    (error) => error?.code === "BRIDGE_UNAVAILABLE",
+  );
+  assert.equal(businessRequests, 0);
+});
+
 test("parses one bundle with child artifact ids", async (context) => {
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
-  globalThis.fetch = async () => jsonResponse({
+  globalThis.fetch = withRecordsHealth(async () => jsonResponse({
     ok: true,
     tasks: [TASK_FIXTURE],
     bundles: [BUNDLE_FIXTURE],
     artifacts: [ARTIFACT_FIXTURE],
-  });
+  }));
 
   const snapshot = await loadCompetitorProjectRecords();
 
@@ -187,18 +220,20 @@ test("parses one bundle with child artifact ids", async (context) => {
 test("keeps v1 legacy bundles from rejecting compatible task and artifact snapshots", async (context) => {
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
-  globalThis.fetch = async () => jsonResponse({
+  globalThis.fetch = withRecordsHealth(async () => jsonResponse({
     ok: true,
     tasks: [{...TASK_FIXTURE, inputKind: "unknown", category: null}],
     artifacts: [LEGACY_ARTIFACT_FIXTURE],
     bundles: [LEGACY_BUNDLE_FIXTURE],
-  });
+  }));
 
   const snapshot = await loadCompetitorProjectRecords();
 
   assert.equal(snapshot.tasks[0].id, TASK_FIXTURE.id);
   assert.equal(snapshot.results[0].id, ARTIFACT_FIXTURE.id);
-  assert.deepEqual(snapshot.bundles, []);
+  assert.equal(snapshot.bundles.length, 1);
+  assert.equal(snapshot.bundles[0].status, "legacy");
+  assert.equal(snapshot.bundles[0].primaryArtifactId, LEGACY_ARTIFACT_FIXTURE.id);
 });
 
 test("filters Task5 materialized and refreshed-missing legacy snapshots without losing history", async (context) => {
@@ -214,11 +249,12 @@ test("filters Task5 materialized and refreshed-missing legacy snapshots without 
   assert.equal(missing.bundles[0].status, "missing");
 
   for (const body of [materialized, missing]) {
-    globalThis.fetch = async () => jsonResponse({ok: true, ...body});
+    globalThis.fetch = withRecordsHealth(async () => jsonResponse({ok: true, ...body}));
     const snapshot = await loadCompetitorProjectRecords();
     assert.equal(snapshot.tasks.length, 1);
-    assert.equal(snapshot.results.length, 3);
-    assert.deepEqual(snapshot.bundles, []);
+    assert.equal(snapshot.results.length, 4);
+    assert.equal(snapshot.bundles.length, 1);
+    assert.equal(snapshot.bundles[0].status, body.bundles[0].status);
   }
 });
 
@@ -233,9 +269,9 @@ test("rejects mixed invalid or v2-marked legacy commitments", async (context) =>
     {...LEGACY_BUNDLE_FIXTURE, status: "ready"},
   ];
   for (const bundle of malformed) {
-    globalThis.fetch = async () => jsonResponse({
+    globalThis.fetch = withRecordsHealth(async () => jsonResponse({
       ok: true, tasks: [task], artifacts: [LEGACY_ARTIFACT_FIXTURE], bundles: [bundle],
-    });
+    }));
     await assert.rejects(
       loadCompetitorProjectRecords(),
       (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
@@ -255,17 +291,17 @@ test("rejects every missing or unexpected field in a legacy bundle", async (cont
   for (const field of Object.keys(LEGACY_BUNDLE_FIXTURE)) {
     const malformed = {...LEGACY_BUNDLE_FIXTURE};
     delete malformed[field];
-    globalThis.fetch = async () => jsonResponse({...base, bundles: [malformed]});
+    globalThis.fetch = withRecordsHealth(async () => jsonResponse({...base, bundles: [malformed]}));
     await assert.rejects(
       loadCompetitorProjectRecords(),
       (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
       `missing legacy field ${field}`,
     );
   }
-  globalThis.fetch = async () => jsonResponse({
+  globalThis.fetch = withRecordsHealth(async () => jsonResponse({
     ...base,
     bundles: [{...LEGACY_BUNDLE_FIXTURE, unexpected: "not-a-task5-field"}],
-  });
+  }));
   await assert.rejects(
     loadCompetitorProjectRecords(),
     (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
@@ -289,19 +325,19 @@ test("rejects legacy bundles with broken task artifact or controlled-path relati
     {name: "artifact ids", bundle: {...LEGACY_BUNDLE_FIXTURE, artifactIds: ["artifact-0000000000000002"]}},
   ];
   for (const {name, bundle} of cases) {
-    globalThis.fetch = async () => jsonResponse({ok: true, tasks: [task], artifacts: [LEGACY_ARTIFACT_FIXTURE], bundles: [bundle]});
+    globalThis.fetch = withRecordsHealth(async () => jsonResponse({ok: true, tasks: [task], artifacts: [LEGACY_ARTIFACT_FIXTURE], bundles: [bundle]}));
     await assert.rejects(
       loadCompetitorProjectRecords(),
       (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
       `broken legacy ${name}`,
     );
   }
-  globalThis.fetch = async () => jsonResponse({
+  globalThis.fetch = withRecordsHealth(async () => jsonResponse({
     ok: true,
     tasks: [{...task, bundleId: "bundle-0000000000000002"}],
     artifacts: [LEGACY_ARTIFACT_FIXTURE],
     bundles: [LEGACY_BUNDLE_FIXTURE],
-  });
+  }));
   await assert.rejects(
     loadCompetitorProjectRecords(),
     (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
@@ -313,7 +349,7 @@ test("finalizes loads reveals and safely downloads a bundle by id", async (conte
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
   const calls = [];
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = withRecordsHealth(async (url, init) => {
     calls.push({url: String(url), init});
     if (String(url).endsWith("/download")) {
       return new Response(new Uint8Array([0x50, 0x4b, 3, 4]), {
@@ -328,7 +364,7 @@ test("finalizes loads reveals and safely downloads a bundle by id", async (conte
     if (String(url).endsWith("/reveal")) return jsonResponse({ok: true, bundleId: BUNDLE_FIXTURE.id});
     if (init?.method === "POST") return jsonResponse({ok: true, tasks: [TASK_FIXTURE], artifacts: [ARTIFACT_FIXTURE], bundles: [BUNDLE_FIXTURE]});
     return jsonResponse({ok: true, bundle: BUNDLE_FIXTURE, task: TASK_FIXTURE, artifacts: [ARTIFACT_FIXTURE], markdown: "# preview", previewable: true});
-  };
+  });
 
   const finalized = await finalizeCompetitorBundle(TASK_FIXTURE.id, {
     platformId: "xiaohongshu", inputKind: "account", category: "xhs-account",
@@ -354,7 +390,7 @@ test("rejects invalid bundle download media length and ZIP signature", async (co
     new Response(new Uint8Array([0x50, 0x4b]), {status: 200, headers: {"content-type": "application/zip", "content-length": String(513 * 1024 * 1024)}}),
     new Response(new Uint8Array([1, 2, 3, 4]), {status: 200, headers: {"content-type": "application/zip", "content-length": "4"}}),
   ]) {
-    globalThis.fetch = async () => response.clone();
+    globalThis.fetch = withRecordsHealth(async () => response.clone());
     await assert.rejects(
       downloadCompetitorBundle(BUNDLE_FIXTURE.id),
       (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
@@ -365,7 +401,7 @@ test("rejects invalid bundle download media length and ZIP signature", async (co
 test("normalizes unknown download errors and stalled ZIP aborts", async (context) => {
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
-  globalThis.fetch = async () => jsonResponse({error: "SECRET_FROM_BODY", message: "sensitive"}, {status: 500});
+  globalThis.fetch = withRecordsHealth(async () => jsonResponse({error: "SECRET_FROM_BODY", message: "sensitive"}, {status: 500}));
   await assert.rejects(
     downloadCompetitorBundle(BUNDLE_FIXTURE.id),
     (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INTERNAL_ERROR" && !/SECRET_FROM_BODY|sensitive/u.test(error.message),
@@ -376,10 +412,10 @@ test("normalizes unknown download errors and stalled ZIP aborts", async (context
     start(controller) { controller.enqueue(new Uint8Array([0x50, 0x4b])); },
     cancel() { canceled = true; },
   });
-  globalThis.fetch = async () => new Response(stalled, {
+  globalThis.fetch = withRecordsHealth(async () => new Response(stalled, {
     status: 200,
     headers: {"content-type": "application/zip", "content-length": "4"},
-  });
+  }));
   const controller = new AbortController();
   const pending = downloadCompetitorBundle(BUNDLE_FIXTURE.id, controller.signal);
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -413,10 +449,10 @@ test("normalizes non-2xx error-body aborts during done, read rejection, and canc
     },
   ];
   for (const {name, makeBody} of scenarios) {
-    globalThis.fetch = async () => new Response(makeBody(), {
+    globalThis.fetch = withRecordsHealth(async () => new Response(makeBody(), {
       status: 500,
       headers: {"content-type": "application/json"},
-    });
+    }));
     const controller = new AbortController();
     const pending = downloadCompetitorBundle(BUNDLE_FIXTURE.id, controller.signal);
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -443,10 +479,10 @@ test("cancels a genuinely oversized streamed ZIP body without allocating 512 MiB
     },
     cancel() { canceled = true; },
   });
-  globalThis.fetch = async () => new Response(body, {
+  globalThis.fetch = withRecordsHealth(async () => new Response(body, {
     status: 200,
     headers: {"content-type": "application/zip", "content-length": String(512 * 1024 * 1024)},
-  });
+  }));
 
   await assert.rejects(
     downloadCompetitorBundle(BUNDLE_FIXTURE.id),
@@ -459,10 +495,10 @@ test("cancels a genuinely oversized streamed ZIP body without allocating 512 MiB
 test("rejects inconsistent bundle detail preview tuples", async (context) => {
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
-  globalThis.fetch = async () => jsonResponse({
+  globalThis.fetch = withRecordsHealth(async () => jsonResponse({
     ok: true, bundle: BUNDLE_FIXTURE, task: TASK_FIXTURE, artifacts: [ARTIFACT_FIXTURE],
     markdown: null, previewable: true,
-  });
+  }));
   await assert.rejects(
     loadCompetitorBundleDetail(BUNDLE_FIXTURE.id),
     (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
@@ -475,7 +511,7 @@ test("creates updates and registers one task through exact bridge contracts", as
     globalThis.fetch = originalFetch;
   });
   const calls = [];
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = withRecordsHealth(async (url, init) => {
     calls.push({url: String(url), init});
     if (String(url).endsWith("/project-tasks")) {
       return jsonResponse({ok: true, task: {...TASK_FIXTURE, status: "waiting", progress: 10}});
@@ -484,7 +520,7 @@ test("creates updates and registers one task through exact bridge contracts", as
       return jsonResponse({ok: true, task: {...TASK_FIXTURE, status: "running", progress: 60}});
     }
     return jsonResponse({ok: true, tasks: [TASK_FIXTURE], artifacts: [ARTIFACT_FIXTURE]});
-  };
+  });
 
   const created = await createCompetitorTask({
     id: TASK_FIXTURE.id,
@@ -520,10 +556,10 @@ test("reveals an artifact by id with an empty JSON body", async (context) => {
     globalThis.fetch = originalFetch;
   });
   let request;
-  globalThis.fetch = async (url, init) => {
+  globalThis.fetch = withRecordsHealth(async (url, init) => {
     request = {url: String(url), init};
     return jsonResponse({ok: true, artifactId: ARTIFACT_FIXTURE.id});
-  };
+  });
 
   await revealCompetitorArtifact(ARTIFACT_FIXTURE.id);
 
@@ -545,7 +581,7 @@ test("rejects malformed tasks artifacts and unsafe source URLs", async (context)
     {ok: true, tasks: [TASK_FIXTURE], artifacts: [{...ARTIFACT_FIXTURE, kind: "executable"}]},
     {ok: true, tasks: [TASK_FIXTURE], artifacts: [{...ARTIFACT_FIXTURE, id: "bad-id"}]},
   ]) {
-    globalThis.fetch = async () => jsonResponse(body);
+    globalThis.fetch = withRecordsHealth(async () => jsonResponse(body));
     await assert.rejects(
       loadCompetitorProjectRecords(),
       (error) =>
@@ -560,11 +596,11 @@ test("maps bridge errors without echoing a response body", async (context) => {
   context.after(() => {
     globalThis.fetch = originalFetch;
   });
-  globalThis.fetch = async () => jsonResponse({
+  globalThis.fetch = withRecordsHealth(async () => jsonResponse({
     ok: false,
     error: "RECORD_STORE_DAMAGED",
     message: "sensitive server detail",
-  }, {status: 503});
+  }, {status: 503}));
 
   await assert.rejects(
     loadCompetitorProjectRecords(),

@@ -375,10 +375,11 @@ export function CompetitorResultBundles({
             const safeTitle = sanitizeDisplayText(bundle.title, "未命名成果包");
             const safeSubject = sanitizeDisplayText(bundle.subjectName, "未知主体");
             const expanded = expandedBundleIds.has(bundle.id);
+            const available = bundle.status === "ready" || bundle.status === "legacy";
             const complete = bundle.status === "ready"
               && Boolean(primary)
               && primary?.exists !== false;
-            const disabled = bundle.status !== "ready" || !bundle.primaryArtifactId;
+            const disabled = !available || !bundle.primaryArtifactId;
             const categoryLabel = CATEGORIES.find(([value]) => value === bundle.category)?.[1]
               ?? bundle.platformLabel;
             return (
@@ -424,14 +425,14 @@ export function CompetitorResultBundles({
                   <button
                     aria-busy={downloadingBundleId === bundle.id}
                     aria-label="下载成果包"
-                    disabled={bundle.status !== "ready" || downloadingBundleId !== null}
+                    disabled={!available || downloadingBundleId !== null}
                     onClick={() => void downloadBundle(bundle)}
                     type="button"
                   >{downloadingBundleId === bundle.id ? "正在下载" : "下载成果包"}</button>
                   <button
                     aria-busy={revealingBundleId === bundle.id}
                     aria-label="在访达中显示"
-                    disabled={bundle.status !== "ready" || revealingBundleId !== null}
+                    disabled={!available || revealingBundleId !== null}
                     onClick={() => void revealBundle(bundle)}
                     type="button"
                   >{revealingBundleId === bundle.id ? "正在定位" : "在访达中显示"}</button>

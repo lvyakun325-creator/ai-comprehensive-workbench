@@ -212,7 +212,9 @@ export async function loadCompetitorBundleDetail(
   ) throw invalidResponse();
   const task = parseTask(record.task);
   const artifacts = record.artifacts.map(parseArtifact);
-  const bundle = parseBundle(record.bundle, task, artifacts);
+  const bundle = isCompatibleLegacyBundle(record.bundle, [task], artifacts)
+    ? parseLegacyBundle(record.bundle, task, artifacts)
+    : parseBundle(record.bundle, task, artifacts);
   if (bundle.id !== bundleId) throw invalidResponse();
   return {bundle, markdown: record.markdown, previewable: record.previewable};
 }
@@ -222,6 +224,7 @@ export async function downloadCompetitorBundle(
   signal?: AbortSignal,
 ): Promise<{filename: string; blob: Blob}> {
   assertBundleId(bundleId);
+  await verifyRecordBridgeHealth(signal);
   let response: Response;
   try {
     response = await fetch(`${RECORD_BRIDGE_ORIGIN}/project-bundles/${bundleId}/download`, {
@@ -305,6 +308,7 @@ function jsonRequest(
 }
 
 async function requestBridge(path: string, init: RequestInit): Promise<unknown> {
+  await verifyRecordBridgeHealth(init.signal);
   let response: Response;
   try {
     response = await fetch(`${RECORD_BRIDGE_ORIGIN}${path}`, {
@@ -331,6 +335,39 @@ async function requestBridge(path: string, init: RequestInit): Promise<unknown> 
     );
   }
   return body;
+}
+
+async function verifyRecordBridgeHealth(signal?: AbortSignal | null): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`${RECORD_BRIDGE_ORIGIN}/health`, {
+      method: "GET",
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+      headers: {accept: "application/json"},
+      signal: signal ?? undefined,
+    });
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw abortError();
+    throw new CompetitorProjectRecordsClientError(
+      "BRIDGE_UNAVAILABLE",
+      "无法连接本地任务服务，请确认 8768 服务已启动。",
+    );
+  }
+  const body = await readBoundedJson(response, signal);
+  if (
+    !response.ok
+    || !isRecord(body)
+    || body.ok !== true
+    || body.stage !== "healthy"
+    || body.service !== "competitor-insight-report"
+  ) {
+    throw new CompetitorProjectRecordsClientError(
+      "BRIDGE_UNAVAILABLE",
+      "无法确认本地任务服务身份，请检查 8768 端口后重试。",
+    );
+  }
 }
 
 async function readBoundedJson(
@@ -394,9 +431,15 @@ function parseSnapshot(value: unknown): CompetitorProjectSnapshot {
   return {
     tasks,
     results,
-    bundles: (record.bundles ?? []).flatMap((item) =>
-      isCompatibleLegacyBundle(item, tasks, results) ? [] : [parseSnapshotBundle(item, tasks, results)],
-    ),
+    bundles: (record.bundles ?? []).map((item) => {
+      if (isCompatibleLegacyBundle(item, tasks, results)) {
+        const raw = requireRecord(item);
+        const task = tasks.find((candidate) => candidate.id === raw.taskId);
+        if (!task) throw invalidResponse();
+        return parseLegacyBundle(raw, task, results);
+      }
+      return parseSnapshotBundle(item, tasks, results);
+    }),
   };
 }
 
@@ -531,6 +574,40 @@ function parseBundle(
     rootDirectory: value.rootDirectory, artifactIds: artifactIds as string[],
     itemCount: value.itemCount as number, createdAt: value.createdAt,
     completedAt: value.updatedAt,
+  };
+}
+
+function parseLegacyBundle(
+  value: Record<string, unknown>,
+  task: ProjectTask,
+  artifacts: readonly ProjectResult[],
+): ProjectBundle {
+  if (!isCompatibleLegacyBundle(value, [task], artifacts)) throw invalidResponse();
+  const artifactIds = value.artifactIds as string[];
+  const primary = artifacts.find(
+    (item) => artifactIds.includes(item.id)
+      && sameLegacyPath(item.absolutePath ?? "", String(value.primaryReportPath)),
+  );
+  return {
+    id: value.id as string,
+    agentId: "competitor-insight",
+    taskId: task.id,
+    platformId: task.platformId as string,
+    platformLabel: task.platformLabel ?? "",
+    inputKind: "unknown",
+    category: null,
+    title: task.title,
+    subjectName: value.subjectName as string,
+    sourceUrl: task.sourceUrl ?? "",
+    status: value.status as "legacy" | "missing",
+    primaryArtifactId: primary?.id ?? null,
+    manifestPath: value.manifestPath as string | null,
+    archivePath: value.archivePath as string | null,
+    rootDirectory: value.rootDirectory as string,
+    artifactIds,
+    itemCount: value.itemCount as number,
+    createdAt: value.createdAt as string,
+    completedAt: value.updatedAt as string,
   };
 }
 
@@ -766,9 +843,10 @@ function isLegacyBundlePaths(value: Record<string, unknown>, task: ProjectTask):
 }
 
 function isLegacyBundleMemberPath(value: string, root: string): boolean {
-  return isCleanAbsolutePath(value)
-    && isCleanAbsolutePath(root)
-    && normalizedLegacyPath(value).startsWith(`${normalizedLegacyPath(root)}/`);
+  if (!isCleanAbsolutePath(value) || !isCleanAbsolutePath(root)) return false;
+  const member = normalizedLegacyPath(value);
+  const normalizedRoot = normalizedLegacyPath(root);
+  return member === normalizedRoot || member.startsWith(`${normalizedRoot}/`);
 }
 
 function sameLegacyPath(left: string, right: string): boolean {

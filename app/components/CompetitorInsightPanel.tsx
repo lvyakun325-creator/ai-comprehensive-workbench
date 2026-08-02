@@ -259,6 +259,10 @@ export function CompetitorInsightPanel({
   const preparePendingRetry = async (): Promise<boolean> => {
     const pending = pendingAnalysisRef.current;
     if (!pending || !isCurrentPending(pending) || isTaskStateSettling) return false;
+    if (pending.terminalWriteStarted) {
+      await submit();
+      return false;
+    }
     setIsTaskStateSettling(true);
     setIsDispatching(true);
     moveToPhase("generating", "正在恢复任务状态，完成后继续生成报告…");
@@ -311,6 +315,35 @@ export function CompetitorInsightPanel({
     }
   };
 
+  const stopPendingReport = async (message: string): Promise<boolean> => {
+    const pending = pendingAnalysisRef.current;
+    if (!pending || !isCurrentPending(pending)) return false;
+    pending.terminalWriteStarted = true;
+    setIsTaskStateSettling(true);
+    setIsDispatching(true);
+    moveToPhase("generating", "模型请求已停止，正在同步停止状态…");
+    try {
+      await writeTaskState(pending.taskId, {
+        status: "stopped",
+        progress: 70,
+        currentStep: "用户已停止报告生成",
+        errorSummary: null,
+      });
+      if (!isCurrentPending(pending)) return false;
+      onRecordsChanged?.();
+      setIsTaskStateSettling(false);
+      setIsDispatching(false);
+      moveToPhase("failed", message);
+      return true;
+    } catch {
+      if (!isCurrentPending(pending)) return false;
+      setIsTaskStateSettling(true);
+      setIsDispatching(true);
+      moveToPhase("failed", "已停止生成，但任务状态同步失败，请检查本地任务服务。链接入口保持锁定。");
+      return false;
+    }
+  };
+
   const completePendingReport = async (report: ReportReadyResponse) => {
     const pending = pendingAnalysisRef.current;
     if (!pending || !pending.scrape || !isCurrentPending(pending)) return;
@@ -354,7 +387,7 @@ export function CompetitorInsightPanel({
     }
   };
 
-  const submit = async () => {
+  async function submit() {
     if (
       detection.kind !== "ready"
       || !detection.platformId
@@ -445,7 +478,7 @@ export function CompetitorInsightPanel({
       }
       await failAnalysis(taskId, safeAnalysisError(error), epoch, true);
     }
-  };
+  }
 
   return (
     <section className={`competitor-console ${mode}`} aria-labelledby="competitor-console-title">
@@ -555,6 +588,7 @@ export function CompetitorInsightPanel({
             onPreEvidenceTerminated={(reason, message) => {
               void terminatePreEvidence(reason, message);
             }}
+            onStopped={stopPendingReport}
             onStageChange={handleReportStageChange}
             retryBlocked={isTaskStateSettling}
           />
