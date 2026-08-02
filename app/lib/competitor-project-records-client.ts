@@ -832,9 +832,15 @@ function hasExactFields(value: Record<string, unknown>, fields: ReadonlySet<stri
 function isLegacyBundlePaths(value: Record<string, unknown>, task: ProjectTask): boolean {
   if (typeof value.rootDirectory !== "string" || typeof value.id !== "string") return false;
   const root = value.rootDirectory;
-  const expectedSuffix = `/outputs/competitor-insight/${task.platformId}/${task.id}`;
+  const rootSegments = normalizedLegacyPath(root).split("/").slice(1);
+  const isPlatformChild = rootSegments.some((segment, index) => (
+    segment === "outputs"
+    && rootSegments[index + 1] === "competitor-insight"
+    && rootSegments[index + 2] === task.platformId
+    && index + 3 < rootSegments.length
+  ));
   return isCleanAbsolutePath(root)
-    && root.endsWith(expectedSuffix)
+    && isPlatformChild
     && value.manifestPath === `${root}/${value.id}.manifest.json`
     && value.archivePath === `${root}/${value.id}.zip`
     && typeof value.primaryReportPath === "string"
@@ -862,6 +868,7 @@ function normalizedLegacyPath(value: string): string {
 function isCleanAbsolutePath(value: string): boolean {
   return value.startsWith("/")
     && !value.includes("\0")
+    && !value.includes("\\")
     && value.split("/").slice(1).every((part) => part !== "" && part !== "." && part !== "..");
 }
 

@@ -938,11 +938,11 @@ test("竞品成果包只在点击后预览下载和按 bundleId 定位", async (
   assert.match(screen.getByRole("status", {name: "成果包操作状态"}).textContent ?? "", /已在访达中显示/u);
 });
 
-test("v1 legacy 快照保留成果卡并首次预览下载成功", async () => {
+test("v1 legacy 快照保留成果卡且详情惰性下载与刷新后下载可用", async () => {
   const taskId = "competitor-20260801-legacy-ui";
   const bundleId = "bundle-0000000000000001";
   const artifactId = "artifact-0000000000000001";
-  const root = `/controlled/outputs/competitor-insight/xiaohongshu/${taskId}`;
+  const root = "/controlled/outputs/competitor-insight/xiaohongshu/legacy-export";
   const reportPath = `${root}/legacy-report.md`;
   const task = {
     ...persistedCompetitorTask("completed", 100, {
@@ -1033,6 +1033,21 @@ test("v1 legacy 快照保留成果卡并首次预览下载成功", async () => {
     "http://127.0.0.1:8768/health",
     `http://127.0.0.1:8768/project-bundles/${bundleId}/download`,
   ]);
+
+  await user.click(screen.getByRole("button", {name: "成果文件"}));
+  await waitFor(() => assert.equal(
+    requests.filter((url) => url.includes("/project-records")).length,
+    1,
+  ));
+  const refreshedCard = screen.getByRole("article", {name: "v1 历史成果包 成果包"});
+  const downloadsBeforeRefreshClick = clickedDownloadAnchors.length;
+  await user.click(within(refreshedCard).getByRole("button", {name: "下载成果包"}));
+  await waitFor(() => assert.equal(clickedDownloadAnchors.length, downloadsBeforeRefreshClick + 1));
+  assert.equal(clickedDownloadAnchors.at(-1)?.download, "legacy-bundle.zip");
+  assert.equal(
+    requests.filter((url) => url.endsWith(`/project-bundles/${bundleId}/download`)).length,
+    2,
+  );
 });
 
 test("竞品成果包统一清理 title subject source 及所有无障碍名称中的敏感片段", async () => {

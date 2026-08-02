@@ -540,7 +540,7 @@ class ProjectRecordTests(unittest.TestCase):
             / "outputs"
             / "competitor-insight"
             / "xiaohongshu"
-            / "competitor-legacy-a1"
+            / "legacy-export"
         )
         output.mkdir(parents=True)
         report = output / "历史报告.md"

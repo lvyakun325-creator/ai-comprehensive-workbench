@@ -142,13 +142,13 @@ case = ProjectRecordTests("test_v1_completed_task_migrates_to_one_legacy_bundle_
 case.setUp()
 try:
     case.write_v1_store_with_three_artifacts()
-    initial = project_records.read_records("competitor-insight")
-    bundle_id = initial["bundles"][0]["id"]
+    migrated = project_records.read_records("competitor-insight")
+    bundle_id = migrated["bundles"][0]["id"]
     project_records.bundle_archive(bundle_id)
     materialized = project_records.read_records("competitor-insight")
     Path(materialized["bundles"][0]["primaryReportPath"]).unlink()
     missing = project_records.read_records("competitor-insight")
-    print(json.dumps({"materialized": materialized, "missing": missing}))
+    print(json.dumps({"migrated": migrated, "materialized": materialized, "missing": missing}))
 finally:
     case.tearDown()
 `;
@@ -240,20 +240,28 @@ test("filters Task5 materialized and refreshed-missing legacy snapshots without 
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
   const snapshots = task5LegacyStateSnapshots();
+  const migrated = snapshots.migrated;
   const materialized = snapshots.materialized;
   const missing = snapshots.missing;
+  assert.equal(migrated.tasks[0].id, "competitor-legacy-a1");
+  assert.equal(path.basename(migrated.bundles[0].rootDirectory), "legacy-export");
+  assert.notEqual(path.basename(migrated.bundles[0].rootDirectory), migrated.tasks[0].id);
+  assert.equal(migrated.bundles[0].status, "legacy");
   assert.equal(materialized.bundles[0].status, "legacy");
   assert.ok(["manifestSha256", "archiveSha256", "memberIdentitySha256"].every(
     (field) => /^[0-9a-f]{64}$/u.test(materialized.bundles[0][field]),
   ));
   assert.equal(missing.bundles[0].status, "missing");
 
-  for (const body of [materialized, missing]) {
+  for (const body of [migrated, materialized, missing]) {
     globalThis.fetch = withRecordsHealth(async () => jsonResponse({ok: true, ...body}));
     const snapshot = await loadCompetitorProjectRecords();
     assert.equal(snapshot.tasks.length, 1);
     assert.equal(snapshot.results.length, 4);
     assert.equal(snapshot.bundles.length, 1);
+    assert.equal(snapshot.tasks[0].id, body.tasks[0].id);
+    assert.deepEqual(snapshot.results.map((item) => item.id), body.artifacts.map((item) => item.id));
+    assert.equal(snapshot.bundles[0].id, body.bundles[0].id);
     assert.equal(snapshot.bundles[0].status, body.bundles[0].status);
   }
 });
@@ -323,9 +331,14 @@ test("rejects legacy bundles with broken task artifact or controlled-path relati
     {name: "manifest", bundle: {...LEGACY_BUNDLE_FIXTURE, manifestPath: `${LEGACY_ROOT}/not-the-bundle.json`}},
     {name: "archive", bundle: {...LEGACY_BUNDLE_FIXTURE, archivePath: `${LEGACY_ROOT}/not-the-bundle.zip`}},
     {name: "artifact ids", bundle: {...LEGACY_BUNDLE_FIXTURE, artifactIds: ["artifact-0000000000000002"]}},
+    {
+      name: "artifact escape",
+      bundle: {...LEGACY_BUNDLE_FIXTURE, primaryReportPath: `${LEGACY_ROOT}-evil/report.md`},
+      artifacts: [{...LEGACY_ARTIFACT_FIXTURE, absolutePath: `${LEGACY_ROOT}-evil/report.md`}],
+    },
   ];
-  for (const {name, bundle} of cases) {
-    globalThis.fetch = withRecordsHealth(async () => jsonResponse({ok: true, tasks: [task], artifacts: [LEGACY_ARTIFACT_FIXTURE], bundles: [bundle]}));
+  for (const {name, bundle, artifacts = [LEGACY_ARTIFACT_FIXTURE]} of cases) {
+    globalThis.fetch = withRecordsHealth(async () => jsonResponse({ok: true, tasks: [task], artifacts, bundles: [bundle]}));
     await assert.rejects(
       loadCompetitorProjectRecords(),
       (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
@@ -343,6 +356,37 @@ test("rejects legacy bundles with broken task artifact or controlled-path relati
     (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
     "broken legacy task bundle reverse relation",
   );
+});
+
+test("rejects legacy roots outside a clean exact platform child boundary", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const task = {...TASK_FIXTURE, inputKind: "unknown", category: null};
+  const invalidRoots = [
+    "/controlled/outputs/competitor-insight/xiaohongshu",
+    "/controlled/outputs/competitor-insight/xiaohongshu-evil/legacy-export",
+    "/controlled/outputs/competitor-insight/xiaohongshu/legacy/../export",
+    "/controlled/outputs/competitor-insight/xiaohongshu/legacy\\export",
+    "outputs/competitor-insight/xiaohongshu/legacy-export",
+  ];
+  for (const root of invalidRoots) {
+    const artifact = {...LEGACY_ARTIFACT_FIXTURE, absolutePath: `${root}/report.md`};
+    const bundle = {
+      ...LEGACY_BUNDLE_FIXTURE,
+      rootDirectory: root,
+      primaryReportPath: artifact.absolutePath,
+      manifestPath: `${root}/${LEGACY_BUNDLE_FIXTURE.id}.manifest.json`,
+      archivePath: `${root}/${LEGACY_BUNDLE_FIXTURE.id}.zip`,
+    };
+    globalThis.fetch = withRecordsHealth(async () => jsonResponse({
+      ok: true, tasks: [task], artifacts: [artifact], bundles: [bundle],
+    }));
+    await assert.rejects(
+      loadCompetitorProjectRecords(),
+      (error) => error instanceof CompetitorProjectRecordsClientError && error.code === "INVALID_BRIDGE_RESPONSE",
+      `invalid legacy root ${root}`,
+    );
+  }
 });
 
 test("finalizes loads reveals and safely downloads a bundle by id", async (context) => {
