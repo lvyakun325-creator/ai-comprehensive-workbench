@@ -4,12 +4,15 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import socket
 import sys
 from tempfile import TemporaryDirectory
 import time
 import unittest
 from unittest.mock import patch
 import zipfile
+
+from openpyxl import Workbook
 
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1]
@@ -370,6 +373,84 @@ class ProjectRecordTests(unittest.TestCase):
                 {"outputDir": str(allowed), "explicitPaths": [str(linked)]},
             )
 
+    def test_registration_rejects_sensitive_json_markdown_and_xlsx_content(self) -> None:
+        sentinel = "XHS-PROJECT-SENTINEL"
+        writers = {
+            "json": lambda path: path.write_text(
+                json.dumps({"url": f"https://www.xiaohongshu.com/explore/1?xsec_token={sentinel}"}),
+                encoding="utf-8",
+            ),
+            "md": lambda path: path.write_text(
+                f"链接：https://www.xiaohongshu.com/explore/1?xsec_token={sentinel}",
+                encoding="utf-8",
+            ),
+            "xlsx": self._write_sensitive_workbook,
+        }
+        for index, (suffix, writer) in enumerate(writers.items(), start=1):
+            with self.subTest(suffix=suffix):
+                task_id = f"competitor-20260801-sensitive-{index}"
+                self.create_task(id=task_id)
+                output = self.bundle_task_directory(task_id)
+                output.mkdir(parents=True)
+                dirty = output / f"dirty.{suffix}"
+                writer(dirty)
+                with self.assertRaisesRegex(ValueError, "sensitive_artifact_content"):
+                    project_records.register_artifacts(
+                        task_id,
+                        {"outputDir": str(output), "explicitPaths": [str(dirty)]},
+                    )
+
+    def _write_sensitive_workbook(self, path: Path) -> None:
+        workbook = Workbook()
+        workbook.active.append([
+            "url",
+            "https://www.xiaohongshu.com/explore/1?xsec_token=XHS-PROJECT-SENTINEL",
+        ])
+        workbook.save(path)
+        workbook.close()
+
+    def test_finalize_rechecks_sensitive_content_and_safe_zip_has_no_sentinel(self) -> None:
+        sentinel = "XHS-PROJECT-SENTINEL"
+        output = self.prepare_bundle_task()
+        report = output / "竞品报告.md"
+        report.write_text(
+            f"https://www.xiaohongshu.com/explore/1?xsec_token={sentinel}",
+            encoding="utf-8",
+        )
+        store = json.loads(self.store_path.read_text("utf-8"))
+        artifact = next(
+            item for item in store["artifacts"]
+            if Path(item["absolutePath"]).resolve() == report.resolve()
+        )
+        dirty_bytes = report.read_bytes()
+        artifact["sizeBytes"] = len(dirty_bytes)
+        artifact["contentSha256"] = hashlib.sha256(dirty_bytes).hexdigest()
+        self.store_path.write_text(json.dumps(store), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "sensitive_artifact_content"):
+            project_records.finalize_bundle(
+                "competitor-20260801-a1", self.bundle_payload(output),
+            )
+
+        report.write_text("# 安全竞品报告", encoding="utf-8")
+        store = json.loads(self.store_path.read_text("utf-8"))
+        artifact = next(
+            item for item in store["artifacts"]
+            if Path(item["absolutePath"]).resolve() == report.resolve()
+        )
+        safe_bytes = report.read_bytes()
+        artifact["sizeBytes"] = len(safe_bytes)
+        artifact["contentSha256"] = hashlib.sha256(safe_bytes).hexdigest()
+        self.store_path.write_text(json.dumps(store), encoding="utf-8")
+        snapshot = project_records.finalize_bundle(
+            "competitor-20260801-a1", self.bundle_payload(output),
+        )
+        bundle = snapshot["bundles"][0]
+        combined = Path(bundle["manifestPath"]).read_bytes()
+        with zipfile.ZipFile(BytesIO(project_records.bundle_archive(bundle["id"]))) as archive:
+            combined += b"".join(archive.read(name) for name in archive.namelist())
+        self.assertNotIn(sentinel.encode(), combined)
+
     def test_read_records_marks_deleted_files_missing_without_deleting_history(self) -> None:
         self.create_task()
         output = (
@@ -485,9 +566,29 @@ class ProjectRecordTests(unittest.TestCase):
             "completedAt": "2026-08-01T00:01:00.000Z",
             "stoppedAt": None,
             "errorSummary": None,
-            "artifactIds": ["artifact-0003f28cb71571c7", "artifact-0007e5196e2ae38e", "artifact-000bd7a625405555"],
+            "artifactIds": [
+                "artifact-0000000000000000",
+                "artifact-0003f28cb71571c7",
+                "artifact-0007e5196e2ae38e",
+                "artifact-000bd7a625405555",
+            ],
         }
-        artifacts = [
+        artifacts = [{
+            "id": "artifact-0000000000000000",
+            "agentId": "competitor-insight",
+            "taskId": task["id"],
+            "kind": "output-directory",
+            "name": output.name,
+            "filename": output.name,
+            "absolutePath": str(output),
+            "sizeBytes": 0,
+            "createdAt": task["createdAt"],
+            "completedAt": task["completedAt"],
+            "previewable": False,
+            "exists": True,
+            "isDirectory": True,
+            "markdown": None,
+        }, *[
             {
                 "id": f"artifact-{index * 1111111111111111:016x}",
                 "agentId": "competitor-insight",
@@ -507,7 +608,7 @@ class ProjectRecordTests(unittest.TestCase):
             for index, (path, kind) in enumerate(
                 ((report, "markdown"), (data, "json"), (sheet, "excel")), start=1
             )
-        ]
+        ]]
         self.store_path.parent.mkdir(parents=True)
         self.store_path.write_text(json.dumps({"schemaVersion": 1, "tasks": [task], "artifacts": artifacts}), "utf-8")
         return [report, data, sheet]
@@ -627,7 +728,7 @@ class ProjectRecordTests(unittest.TestCase):
         )
         bundle_id = snapshot["bundles"][0]["id"]
 
-        with zipfile.ZipFile(project_records.bundle_archive(bundle_id)) as archive:
+        with zipfile.ZipFile(BytesIO(project_records.bundle_archive(bundle_id))) as archive:
             names = set(archive.namelist())
 
         self.assertIn("竞品报告.md", names)
@@ -648,7 +749,8 @@ class ProjectRecordTests(unittest.TestCase):
         original_paths[1].unlink()
         refreshed = project_records.read_records("competitor-insight")
 
-        self.assertTrue(archive.is_file())
+        self.assertTrue(archive.startswith(b"PK"))
+        self.assertTrue(Path(bundle["archivePath"]).is_file())
         self.assertEqual(refreshed["bundles"][0]["status"], "missing")
         self.assertEqual(refreshed["bundles"][0]["id"], bundle_id)
 
@@ -839,9 +941,11 @@ class ProjectRecordTests(unittest.TestCase):
         Path(bundle["archivePath"]).write_bytes(stream.getvalue())
 
         calls: list[list[str]] = []
-        with self.assertRaisesRegex(ValueError, "bundle_missing"):
-            project_records.reveal_bundle(bundle["id"], runner=lambda argv, **_: calls.append(argv))
-        self.assertEqual(calls, [])
+        revealed = project_records.reveal_bundle(
+            bundle["id"], runner=lambda argv, **_: calls.append(argv)
+        )
+        self.assertEqual(revealed["bundleId"], bundle["id"])
+        self.assertEqual(calls, [["open", "--", str(output.resolve())]])
         with self.assertRaisesRegex(ValueError, "bundle_missing"):
             project_records.bundle_archive(bundle["id"])
 
@@ -944,7 +1048,7 @@ class ProjectRecordTests(unittest.TestCase):
             self.assertEqual(worker.exitcode, 0)
         outcomes = [results.get(timeout=2) for _ in workers]
 
-        self.assertEqual({status for status, _ in outcomes}, {"ok"})
+        self.assertEqual({status for status, _ in outcomes}, {"ok"}, outcomes)
         self.assertEqual(len({bundle_id for _, bundle_id in outcomes}), 1)
         persisted = project_records.read_records("competitor-insight")
         self.assertEqual(len(persisted["bundles"]), 1)
@@ -973,7 +1077,7 @@ class ProjectRecordTests(unittest.TestCase):
             self.assertEqual(worker.exitcode, 0)
 
         outcomes = [results.get(timeout=2) for _ in workers]
-        self.assertEqual({status for status, _ in outcomes}, {"ok"})
+        self.assertEqual({status for status, _ in outcomes}, {"ok"}, outcomes)
         persisted = project_records.read_records("competitor-insight")
         self.assertEqual(len(persisted["bundles"]), 2)
         self.assertEqual({task["status"] for task in persisted["tasks"]}, {"completed"})
@@ -1021,7 +1125,7 @@ class ProjectRecordTests(unittest.TestCase):
         original_store = self.store_path.read_bytes()
 
         with patch.object(
-            project_records, "_store_mutex_port", side_effect=OSError("unavailable")
+            project_records, "_store_mutex_path", side_effect=OSError("unavailable")
         ):
             try:
                 project_records.update_task(
@@ -1184,6 +1288,76 @@ class ProjectRecordTests(unittest.TestCase):
             self.assertEqual(len(list(output.glob("bundle-*.manifest.json"))), 1)
             self.assertEqual(len(list(output.glob("bundle-*.zip"))), 1)
             self.assertEqual(list(output.glob(".bundle-*")), [])
+
+    def test_bundle_archive_returns_an_immutable_verified_snapshot(self) -> None:
+        output = self.prepare_bundle_task()
+        snapshot = project_records.finalize_bundle(
+            "competitor-20260801-a1", self.bundle_payload(output)
+        )
+        bundle = snapshot["bundles"][0]
+
+        archive_snapshot = project_records.bundle_archive(bundle["id"])
+        archive_path = Path(bundle["archivePath"])
+        original_path = archive_path.with_suffix(".original")
+        archive_path.rename(original_path)
+        outside = self.project_root / "outside.zip"
+        outside.write_bytes(b"outside-sentinel")
+        archive_path.symlink_to(outside)
+
+        self.assertIsInstance(archive_snapshot, bytes)
+        with zipfile.ZipFile(BytesIO(archive_snapshot)) as archive:
+            self.assertIn("竞品报告.md", archive.namelist())
+        self.assertNotIn(b"outside-sentinel", archive_snapshot)
+
+    def test_large_multi_file_archive_survives_finalize_detail_download_and_reveal(self) -> None:
+        output = self.prepare_bundle_task()
+        first = output / "large-a.json"
+        second = output / "large-b.json"
+        first.write_bytes(os.urandom(17 * 1024 * 1024))
+        second.write_bytes(os.urandom(17 * 1024 * 1024))
+        project_records.register_artifacts(
+            "competitor-20260801-a1",
+            {"outputDir": str(output), "explicitPaths": [str(first), str(second)]},
+        )
+        payload = self.bundle_payload(output)
+        payload["explicitPaths"] = [
+            str(output / "竞品报告.md"), str(first), str(second),
+        ]
+
+        snapshot = project_records.finalize_bundle("competitor-20260801-a1", payload)
+        bundle = snapshot["bundles"][0]
+        archive_snapshot = project_records.bundle_archive(bundle["id"])
+        revealed: list[list[str]] = []
+        project_records.reveal_bundle(
+            bundle["id"], runner=lambda argv, **_: revealed.append(argv)
+        )
+
+        self.assertGreater(len(archive_snapshot), 32 * 1024 * 1024)
+        with zipfile.ZipFile(BytesIO(archive_snapshot)) as archive:
+            self.assertEqual(
+                {"large-a.json", "large-b.json"}.intersection(archive.namelist()),
+                {"large-a.json", "large-b.json"},
+            )
+        self.assertEqual(revealed, [["open", "--", str(output.resolve())]])
+
+    def test_unrelated_tcp_listener_does_not_block_the_store(self) -> None:
+        self.create_task()
+        digest = hashlib.sha256(
+            b"project-records-kernel-mutex\0"
+            + os.fsencode(str(self.project_root.resolve()))
+        ).digest()
+        legacy_port = 49_152 + int.from_bytes(digest[:2], "big") % 16_384
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", legacy_port))
+        try:
+            with patch.object(project_records, "_STORE_MUTEX_TIMEOUT_SECONDS", 0.05):
+                task = project_records.update_task(
+                    "competitor-20260801-a1", {"progress": 20}
+                )
+        finally:
+            listener.close()
+
+        self.assertEqual(task["progress"], 20)
 
 
 if __name__ == "__main__":

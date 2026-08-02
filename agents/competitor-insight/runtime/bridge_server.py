@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 import json
 import re
 from typing import cast
@@ -17,6 +18,7 @@ HOST = "127.0.0.1"
 PORT = 8768
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_BUNDLE_DETAIL_RESPONSE_BYTES = 4 * 1024 * 1024
 ALLOWED_ORIGINS = {
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -89,6 +91,8 @@ _ERRORS = {
     "artifact_scan_failed": (500, "ARTIFACT_SCAN_FAILED", "成果目录扫描失败。"),
     "too_many_artifacts": (413, "TOO_MANY_ARTIFACTS", "本次成果文件数量超过上限。"),
     "record_store_damaged": (503, "RECORD_STORE_DAMAGED", "本地任务记录需要修复。"),
+    "record_store_locked": (503, "RECORD_STORE_LOCKED", "本地任务记录正忙，请稍后重试。"),
+    "sensitive_artifact_content": (400, "SENSITIVE_ARTIFACT_CONTENT", "成果文件包含不应保存的请求凭据。"),
     "reveal_failed": (500, "REVEAL_FAILED", "无法在访达中显示该成果。"),
 }
 
@@ -269,7 +273,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 if download_match:
                     archive = project_records.bundle_archive(bundle_id)
                     self._send_binary(
-                        archive.read_bytes(),
+                        archive,
                         filename=f"{bundle_id}.zip",
                         origin=cast(str, self._origin()),
                     )
@@ -279,20 +283,32 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 primary_path = bundle.get("primaryReportPath")
                 markdown: str | None = None
                 previewable = False
+                markdown_candidate: str | None = None
                 if isinstance(primary_path, str):
                     archive = project_records.bundle_archive(bundle_id)
-                    with zipfile.ZipFile(archive) as package:
+                    with zipfile.ZipFile(BytesIO(archive)) as package:
                         manifest = json.loads(package.read("bundle-manifest.json"))
                         primary = manifest.get("primaryReport") if isinstance(manifest, dict) else None
                         if isinstance(primary, str):
                             info = package.getinfo(primary)
                             if info.file_size <= self.max_response_bytes:
-                                markdown = package.read(primary).decode("utf-8")
-                                previewable = True
+                                markdown_candidate = package.read(primary).decode("utf-8")
                 task = next((item for item in snapshot["tasks"] if item.get("id") == bundle.get("taskId")), None)
                 artifacts = [item for item in snapshot["artifacts"] if item.get("taskId") == bundle.get("taskId")]
                 if task is None:
                     raise ValueError("record_store_damaged")
+                if markdown_candidate is not None:
+                    candidate_payload = {
+                        "ok": True, "bundle": bundle, "task": task,
+                        "artifacts": artifacts, "markdown": markdown_candidate,
+                        "previewable": True,
+                    }
+                    encoded = json.dumps(
+                        candidate_payload, ensure_ascii=False, separators=(",", ":"),
+                    ).encode("utf-8")
+                    if len(encoded) <= MAX_BUNDLE_DETAIL_RESPONSE_BYTES:
+                        markdown = markdown_candidate
+                        previewable = True
                 self._send_json(200, {"ok": True, "bundle": bundle, "task": task, "artifacts": artifacts, "markdown": markdown, "previewable": previewable}, origin=self._origin())
                 return
             except ValueError as error:

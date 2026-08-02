@@ -614,11 +614,11 @@ class ServiceTests(unittest.TestCase):
                 )
 
     def test_all_four_artifact_variants_validate_and_assemble_from_their_task_session(self) -> None:
-        for platform_id, input_kind, evidence_id in (
-            ("douyin", "account", "DY-E0001"),
-            ("xiaohongshu", "account", "XHS-E0001"),
-            ("douyin", "content", "DY-E0001"),
-            ("xiaohongshu", "content", "XHS-E0001"),
+        for platform_id, input_kind, evidence_id, expected_label in (
+            ("douyin", "account", "DY-E0001", "抖音账号分析报告"),
+            ("xiaohongshu", "account", "XHS-E0001", "小红书账号分析报告"),
+            ("douyin", "content", "DY-E0001", "抖音单作品分析报告"),
+            ("xiaohongshu", "content", "XHS-E0001", "小红书单篇笔记分析报告"),
         ):
             with self.subTest(platform_id=platform_id, input_kind=input_kind):
                 request = self._artifact_variant_request(platform_id, input_kind)
@@ -636,6 +636,35 @@ class ServiceTests(unittest.TestCase):
                 )
                 self.assertEqual(validated["stage"], "section_validated")
                 self.assertEqual(artifact["stage"], "report_ready")
+                self.assertIn(expected_label, Path(str(artifact["reportPath"])).name)
+
+    def test_xhs_request_token_never_reaches_evidence_session_or_report(self) -> None:
+        sentinel = "XHS-PROJECT-SENTINEL"
+        request = self._artifact_variant_request("xiaohongshu", "content")
+        source_path = Path(str(request["dataPath"]))
+        payload = json.loads(source_path.read_text(encoding="utf-8"))
+        payload["data"]["note"]["url"] = (
+            "https://www.xiaohongshu.com/explore/1"
+            f"?xsec_token={sentinel}&xsec_source=pc_user"
+        )
+        source_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+        ready = service.analyze_artifacts(request)
+        artifact = service.assemble(
+            str(ready["evidenceId"]),
+            [valid_content_batch("XHS-E0001")],
+            str(request["outputDir"]),
+        )
+        output_dir = Path(str(request["outputDir"]))
+        persisted = [
+            path for path in output_dir.glob("*.json")
+            if path != source_path
+        ] + [Path(str(artifact["reportPath"]))]
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in persisted)
+
+        self.assertGreaterEqual(len(persisted), 3)
+        self.assertNotIn(sentinel, combined)
+        self.assertNotIn("xsec_token", combined.casefold())
 
     def test_partial_anonymous_content_from_both_platforms_validates_and_assembles_without_invention(self) -> None:
         """Would fail if strict session integrity rejects source-reader-valid missing author/content fields."""

@@ -8,6 +8,7 @@ from io import BytesIO
 from pathlib import Path
 import stat
 from typing import BinaryIO, Callable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from metrics import parse_metric, parse_publish_time
 from workbook_reader import validate_workbook_source
@@ -16,6 +17,15 @@ from workbook_reader import validate_workbook_source
 MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_XLSX_BYTES = 50 * 1024 * 1024
 _METRICS = ("likes", "comments", "collects", "shares")
+_SENSITIVE_URL_QUERY_PARTS = (
+    "token",
+    "sign",
+    "signature",
+    "verify",
+    "trace",
+    "source",
+    "utm_",
+)
 
 
 def _open_source(path: Path, suffix: str, maximum: int) -> BinaryIO:
@@ -95,6 +105,27 @@ def _text(value: object) -> str:
     return str(value).strip() if value is not None else ""
 
 
+def sanitize_public_url(value: object) -> str:
+    """Remove request-scoped credentials and tracking data before persistence."""
+    candidate = _text(value)
+    if not candidate:
+        return ""
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return candidate
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
+        return candidate
+    safe_query = [
+        (key, item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        if not any(part in key.casefold() for part in _SENSITIVE_URL_QUERY_PARTS)
+    ]
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(safe_query), "")
+    )
+
+
 def _metric(item: dict[str, object], paths: tuple[tuple[str, ...], ...]) -> tuple[int, bool, list[str]]:
     warnings: list[str] = []
     seen_nonempty = False
@@ -144,7 +175,7 @@ def _normalized_item(raw: dict[str, object], row: int, platform_id: str) -> tupl
         warnings.append(f"missing_publishedAt:row={row}")
     warnings.extend(f"{warning}:row={row}" for warning in time_warnings)
     url_found, raw_url = _first(raw, "url", "share_url", "link")
-    result["url"] = _text(raw_url) if url_found else ""
+    result["url"] = sanitize_public_url(raw_url) if url_found else ""
     if not result["url"]:
         missing.append("url")
         warnings.append(f"missing_url:row={row}")

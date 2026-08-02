@@ -469,6 +469,61 @@ class BridgeServerTests(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(json.loads(body)["error"], "NOT_FOUND")
 
+    def test_bundle_detail_hides_markdown_when_full_json_encoding_exceeds_client_cap(self) -> None:
+        payload = {
+            **self.task_payload(),
+            "id": "competitor-20260801-http-json-cap",
+            "inputKind": "account",
+        }
+        self.assertEqual(self._json_request("POST", "/project-tasks", payload)[0], 200)
+        self.assertEqual(
+            self._json_request(
+                "PATCH",
+                f"/project-tasks/{payload['id']}",
+                {"inputKind": "account", "category": "xhs-account"},
+            )[0],
+            200,
+        )
+        output = (
+            self.project_root / "outputs" / "competitor-insight"
+            / "xiaohongshu" / payload["id"]
+        )
+        output.mkdir(parents=True)
+        report = output / "escaped.md"
+        report.write_text("\\" * (2 * 1024 * 1024), encoding="utf-8")
+        self.assertEqual(
+            self._json_request(
+                "POST",
+                f"/project-tasks/{payload['id']}/artifacts",
+                {"outputDir": str(output), "explicitPaths": [str(report)]},
+            )[0],
+            200,
+        )
+        status, _headers, body = self._json_request(
+            "POST",
+            f"/project-tasks/{payload['id']}/bundle",
+            {
+                "platformId": "xiaohongshu", "inputKind": "account",
+                "category": "xhs-account", "outputDir": str(output),
+                "primaryReportPath": str(report), "explicitPaths": [str(report)],
+                "subjectName": "测试账号", "itemCount": 1,
+            },
+        )
+        self.assertEqual(status, 200)
+        bundle_id = json.loads(body)["bundles"][0]["id"]
+
+        status, _headers, body = self._request(
+            "GET",
+            f"/project-bundles/{bundle_id}",
+            headers={"Origin": "http://localhost:3000"},
+        )
+
+        detail = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertLessEqual(len(body), 4 * 1024 * 1024)
+        self.assertIsNone(detail["markdown"])
+        self.assertFalse(detail["previewable"])
+
     def test_rejects_oversized_request_before_parsing_json(self) -> None:
         self.handler_class.max_body_bytes = 64
         status, _headers, body = self._request(
@@ -536,6 +591,22 @@ class BridgeServerTests(unittest.TestCase):
         self.assertNotIn(secret_path, decoded)
         self.assertNotIn("Traceback", decoded)
         self.assertEqual(json.loads(body)["error"], "PATH_NOT_ALLOWED")
+
+    def test_record_store_contention_is_a_retryable_service_error(self) -> None:
+        with patch.object(
+            project_records,
+            "read_records",
+            side_effect=ValueError("record_store_locked"),
+        ):
+            status, _headers, body = self._request(
+                "GET",
+                "/project-records?agentId=competitor-insight",
+                headers={"Origin": "http://localhost:3000"},
+            )
+
+        payload = json.loads(body)
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"], "RECORD_STORE_LOCKED")
 
     def test_missing_secure_nofollow_has_stable_safe_http_error(self) -> None:
         douyin_root = (

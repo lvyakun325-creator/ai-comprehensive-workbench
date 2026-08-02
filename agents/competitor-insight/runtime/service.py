@@ -20,7 +20,7 @@ from analytics import calculate_metrics, rank_works
 from evidence_bundle import build_evidence_bundle, canonical_evidence_input
 from report_renderer import assemble_report, validate_final_report
 from section_validator import validate_section_batch
-from source_reader import read_scrape_source
+from source_reader import read_scrape_source, sanitize_public_url
 from workbook_reader import read_account_workbook
 
 
@@ -1166,7 +1166,9 @@ def _validate_item(
             datetime.fromisoformat(published_at)
         except ValueError:
             _invalid_bundle()
-    _bounded_text(item["url"], 4_096)
+    url = _bounded_text(item["url"], 4_096)
+    if url and sanitize_public_url(url) != url:
+        _invalid_bundle()
     expected_rank_keys = _RANKING_KEYS if input_kind == "account" else set()
     ranks = _closed_object(item["ranks"], expected_rank_keys)
     for rank in ranks.values():
@@ -1544,6 +1546,20 @@ def _safe_nickname(value: object) -> str:
     return nickname[:80] or "未命名账号"
 
 
+def _report_filename_label(bundle: EvidenceBundle) -> str:
+    labels = {
+        ("douyin", "account", "douyin-account"): "抖音账号分析报告",
+        ("douyin", "content", "douyin-content"): "抖音单作品分析报告",
+        ("xiaohongshu", "account", "xhs-account"): "小红书账号分析报告",
+        ("xiaohongshu", "content", "xhs-note"): "小红书单篇笔记分析报告",
+    }
+    key = (bundle.get("platformId"), bundle.get("inputKind"), bundle.get("reportType"))
+    label = labels.get(key)
+    if label is None:
+        raise ValueError("invalid_evidence_bundle")
+    return label
+
+
 def _write_report(filename: str, markdown: str) -> Path:
     reports_fd, reports_root = _open_output_directory()
     try:
@@ -1584,10 +1600,14 @@ def assemble(evidence_id: str, batches: list[object], output_dir: str | None = N
     if validation_errors:
         raise ValueError(f"final_report_validation_failed:{validation_errors[0]}")
 
-    account = bundle.get("account", {})
-    nickname = account.get("nickname") if isinstance(account, dict) else None
+    subject = bundle.get("subject", bundle.get("account", {}))
+    nickname = (
+        subject.get("nickname") or subject.get("accountId")
+        if isinstance(subject, dict)
+        else None
+    )
     filename = (
-        f"{_safe_nickname(nickname)}_抖音账号分析报告_"
+        f"{_safe_nickname(nickname)}_{_report_filename_label(bundle)}_"
         f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
     )
     if output_dir is None:

@@ -58,6 +58,43 @@ class SourceReaderTests(unittest.TestCase):
         self.assertEqual(parsed["items"][0]["likes"], 15000)
         self.assertNotIn("internal_score", json.dumps(parsed, ensure_ascii=False))
 
+    def test_xhs_urls_drop_request_tokens_before_evidence_is_built(self) -> None:
+        sentinel = "XHS-PROJECT-SENTINEL"
+        with TemporaryDirectory() as directory:
+            profile_json = self._write_json(
+                directory,
+                "profile.json",
+                {
+                    "content_type": "profile",
+                    "profile": {"nickname": "测试账号", "user_id": "xhs-user"},
+                    "notes": [{
+                        "note_id": "note-1",
+                        "title": "公开笔记",
+                        "liked_count": 1,
+                        "collected_count": 2,
+                        "comment_count": 3,
+                        "shared_count": 4,
+                        "url": (
+                            "https://www.xiaohongshu.com/explore/note-1"
+                            f"?xsec_token={sentinel}&xsec_source=pc_user&utm_source=share"
+                        ),
+                    }],
+                },
+            )
+            parsed = read_scrape_source("xiaohongshu", "account", profile_json, None)
+            bundle = build_evidence_bundle(
+                parsed,
+                {"platformId": "xiaohongshu", "inputKind": "account"},
+            )
+
+        encoded = json.dumps({"parsed": parsed, "bundle": bundle}, ensure_ascii=False)
+        self.assertEqual(
+            parsed["items"][0]["url"],
+            "https://www.xiaohongshu.com/explore/note-1",
+        )
+        self.assertNotIn(sentinel, encoded)
+        self.assertNotIn("xsec_token", encoded.casefold())
+
     def test_douyin_content_keeps_captured_content_and_has_no_account_rankings(self) -> None:
         """Would fail if a single video gains account rankings or fabricated content fields."""
         with TemporaryDirectory() as directory:
