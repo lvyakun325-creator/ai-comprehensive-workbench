@@ -34,6 +34,7 @@ import {
   usesContentMatrixServerProxy,
 } from "../lib/content-matrix-runtime";
 import { ModelConfigPanel } from "./ModelConfigPanel";
+import { CompetitorModelConfigPanel } from "./CompetitorModelConfigPanel";
 import {
   loadCompetitorProjectRecords,
   type CompetitorProjectSnapshot,
@@ -689,6 +690,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
           onTest={testMatrixConnection}
           preset={matrixConfigPreset}
         />
+      ) : activeTab === "Agent 配置" && isCompetitorInsight ? (
+        <CompetitorModelConfigPanel />
       ) : activeTab === "Agent 配置" ? (
         <ModelConfigPanel
           scope="agent"

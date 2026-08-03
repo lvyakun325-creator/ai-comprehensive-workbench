@@ -222,12 +222,20 @@ test("custom ContentMatrix providers stay browser-direct, disclose CORS and Key 
   )) {
     await user.click(screen.getByRole("button", { name: new RegExp(otherAgent.title) }));
     await user.click(screen.getByRole("button", { name: "Agent 配置" }));
-    assert.ok(
-      screen.getByRole("heading", {
-        name: `${otherAgent.title} · Agent 默认模型`,
-      }),
-    );
-    assert.equal(screen.queryByLabelText("API Key"), null);
+    if (otherAgent.id === "competitor-insight") {
+      assert.ok(screen.getByRole("heading", {
+        name: "竞品洞察 Agent · 独立模型配置",
+      }));
+      assert.ok(screen.getByLabelText("竞品模型 API Key"));
+      assert.equal(screen.queryByRole("radio", {name: /全局模型/u}), null);
+    } else {
+      assert.ok(
+        screen.getByRole("heading", {
+          name: `${otherAgent.title} · Agent 默认模型`,
+        }),
+      );
+      assert.equal(screen.queryByLabelText("API Key"), null);
+    }
     await user.click(screen.getByRole("button", { name: "← 返回 Agent 项目" }));
   }
   await user.click(screen.getByRole("button", { name: "模型配置" }));

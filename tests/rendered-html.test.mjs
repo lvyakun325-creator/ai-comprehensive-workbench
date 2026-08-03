@@ -120,6 +120,10 @@ test("keeps the shell focused on the single chat agent", async () => {
     new URL("../app/components/GlobalModelSettings.tsx", import.meta.url),
     "utf8",
   );
+  const competitorReportRunner = await readFile(
+    new URL("../app/components/CompetitorReportRunner.tsx", import.meta.url),
+    "utf8",
+  );
 
   assert.match(page, /createInitialState/);
   assert.match(page, /navigateTo/);
@@ -146,6 +150,12 @@ test("keeps the shell focused on the single chat agent", async () => {
     agentWorkspace,
     /activeTab === "Agent 配置" \?\s*\(\s*<ModelConfigPanel\s+scope="agent"\s+agentId=\{agent\.id\}\s+agentTitle=\{agent\.title\}\s+onPreview=\{onPreview\}\s*\/>/,
   );
+  assert.match(
+    agentWorkspace,
+    /activeTab === "Agent 配置" && isCompetitorInsight \? \(\s*<CompetitorModelConfigPanel \/>/,
+  );
+  assert.match(competitorReportRunner, /useCompetitorModelSession/);
+  assert.doesNotMatch(competitorReportRunner, /useModelRegistry|getAgentSelectedModelId/);
   const projectTabs = agentWorkspace
     .match(/const PROJECT_TABS = \[([\s\S]*?)\];/)?.[1]
     .match(/"[^"]+"/g)

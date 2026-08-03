@@ -65,11 +65,14 @@ const { ChatTranscript } = await import("../app/components/ChatTranscript");
 const { default: Home } = await import("../app/page");
 const {
   ModelRegistryProvider,
-  useModelRegistry,
 } = await import("../app/components/ModelRegistryProvider");
 const { CompetitorReportRunner } = await import(
   "../app/components/CompetitorReportRunner"
 );
+const {
+  clearCompetitorModelSession,
+  configureCompetitorModelSession,
+} = await import("../app/lib/competitor-model-session-store");
 const originalFetch = globalThis.fetch;
 
 function deferredValue<T>() {
@@ -353,6 +356,7 @@ const lookupFixtureTask = (taskId: string) =>
 
 afterEach(() => {
   cleanup();
+  clearCompetitorModelSession();
   document.body.innerHTML = "";
   document.body.style.overflow = "";
   window.localStorage.clear();
@@ -3101,7 +3105,7 @@ test("saving global settings applies the final default model after all card draf
   });
 });
 
-test("keeps content matrix configuration separate while other Agents select enabled global models", async () => {
+test("竞品洞察提供独立模型配置且不展示全局模型选择", async () => {
   window.localStorage.setItem(
     "ai-workbench:model-registry:v2",
     JSON.stringify([
@@ -3128,6 +3132,15 @@ test("keeps content matrix configuration separate while other Agents select enab
     JSON.stringify({ "openai-gpt-5-6": "revision-agent-config" }),
   );
   const user = userEvent.setup({ document });
+  const modelRequests: Record<string, unknown>[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/models/test-text") {
+      modelRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ok: true});
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
   render(<Home />);
 
   await user.click(screen.getByRole("button", { name: /内容矩阵 Agent/ }));
@@ -3153,11 +3166,25 @@ test("keeps content matrix configuration separate while other Agents select enab
   await user.click(screen.getByRole("button", { name: "← 返回 Agent 项目" }));
   await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
   await user.click(screen.getByRole("button", { name: "Agent 配置" }));
-  assert.equal(
-    (screen.getByRole("radio", { name: /GPT-5\.6 OpenAI/ }) as HTMLInputElement).checked,
-    true,
-  );
-  assert.equal(screen.queryByRole("radio", { name: /Claude/ }), null);
+  assert.ok(screen.getByRole("heading", {name: "竞品洞察 Agent · 独立模型配置"}));
+  assert.match(screen.getByText(/不会读取或回退到全局模型/u).textContent ?? "", /全局模型/u);
+  assert.equal(screen.queryByRole("radio", { name: /GPT-5\.6 OpenAI/ }), null);
+
+  await user.clear(screen.getByLabelText("竞品模型名称"));
+  await user.type(screen.getByLabelText("竞品模型名称"), "gpt-competitor-only");
+  await user.type(screen.getByLabelText("竞品模型 API Key"), "sk-competitor-only");
+  await user.click(screen.getByRole("button", {name: "测试竞品模型"}));
+  await waitFor(() => assert.ok(screen.getByText("连接测试成功，模型可用")));
+  await user.click(screen.getByRole("button", {name: "应用到竞品洞察"}));
+
+  assert.deepEqual(modelRequests, [{
+    config: {
+      apiKey: "sk-competitor-only",
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-competitor-only",
+    },
+  }]);
+  assert.ok(screen.getByText("竞品洞察已使用独立模型：gpt-competitor-only"));
 });
 
 test("聊天会话首次发送后进入独立区域，并在导航后保留当前会话", async () => {
@@ -5325,7 +5352,7 @@ test("凭据修订变化会停止活动请求且聊天 DOM 不出现密钥", asy
   assert.doesNotMatch(document.body.textContent ?? "", new RegExp(newKey));
 });
 
-test("home chat and Agent A and B keep independent model selections", async () => {
+test("home chat、竞品独立模型和其他 Agent 的全局选择彼此隔离", async () => {
   window.localStorage.setItem(
     "ai-workbench:model-registry:v2",
     JSON.stringify([
@@ -5395,12 +5422,8 @@ test("home chat and Agent A and B keep independent model selections", async () =
   await user.click(screen.getByRole("button", { name: "Agent 项目" }));
   await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
   await user.click(screen.getByRole("button", { name: "Agent 配置" }));
-  assert.equal(
-    (screen.getByRole("radio", { name: /GPT-5\.6 OpenAI/ }) as HTMLInputElement)
-      .checked,
-    true,
-  );
-  await user.click(screen.getByRole("radio", { name: /Gemini Pro Google/ }));
+  assert.ok(screen.getByRole("heading", {name: "竞品洞察 Agent · 独立模型配置"}));
+  assert.equal(screen.queryByRole("radio", {name: /GPT-5\.6|Gemini Pro/u}), null);
 
   await user.click(screen.getByRole("button", { name: "← 返回 Agent 项目" }));
   await user.click(screen.getByRole("button", { name: /选题策划 Agent/ }));
@@ -5410,6 +5433,7 @@ test("home chat and Agent A and B keep independent model selections", async () =
       .checked,
     true,
   );
+  await user.click(screen.getByRole("radio", { name: /Gemini Pro Google/ }));
 
   await user.click(screen.getByRole("button", { name: "AI 对话" }));
   assert.ok(
@@ -5419,11 +5443,8 @@ test("home chat and Agent A and B keep independent model selections", async () =
   await user.click(screen.getByRole("button", { name: "Agent 项目" }));
   await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
   await user.click(screen.getByRole("button", { name: "Agent 配置" }));
-  assert.equal(
-    (screen.getByRole("radio", { name: /Gemini Pro Google/ }) as HTMLInputElement)
-      .checked,
-    true,
-  );
+  assert.ok(screen.getByRole("heading", {name: "竞品洞察 Agent · 独立模型配置"}));
+  assert.equal(screen.queryByRole("radio", {name: /Gemini Pro Google/u}), null);
 });
 
 test("content matrix Agent collects intake details before marking diagnostic materials ready", async () => {
@@ -6039,21 +6060,11 @@ type CompetitorReportRequest = {
 };
 
 function installCompetitorReportModel() {
-  installConnectedChatModels([
-    {
-      id: "competitor-report-model",
-      provider: "OpenAI",
-      displayName: "竞品报告模型",
-      modelId: "gpt-competitor-report",
-      baseUrl: "https://api.openai.com/v1",
-      apiKey: "sk-competitor-report-secret",
-      revision: "revision-competitor-report",
-    },
-  ]);
-  window.localStorage.setItem(
-    "ai-workbench:agent-model-selections:v1",
-    JSON.stringify({ "competitor-insight": "competitor-report-model" }),
-  );
+  configureCompetitorModelSession({
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "sk-competitor-report-secret",
+    model: "gpt-competitor-report",
+  }, "revision-competitor-report");
 }
 
 function competitorBatchFixture(
@@ -6745,7 +6756,16 @@ test("竞品洞察报告请求按三批生成校验并只组装一次", async ()
   );
 });
 
-test("模型未配置时任务停在报告阶段且不封装成果包", async () => {
+test("竞品独立模型未配置时即使全局模型已连接也停在报告阶段", async () => {
+  installConnectedChatModels([{
+    id: "global-must-not-run-competitor",
+    provider: "OpenAI",
+    displayName: "全局模型不得用于竞品",
+    modelId: "gpt-global-only",
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "sk-global-must-not-run",
+    revision: "revision-global-must-not-run",
+  }]);
   const calls = await runAccountLinkWithoutModel();
 
   await waitFor(() =>
@@ -6754,6 +6774,7 @@ test("模型未配置时任务停在报告阶段且不封装成果包", async ()
       /证据包已生成，等待配置模型/u,
     ),
   );
+  assert.equal(calls.some((call) => call.url === "/api/agents/competitor-insight"), false);
   assert.equal(calls.some((call) => call.url.endsWith("/bundle")), false);
   assert.ok(screen.getByRole("button", { name: "继续生成报告" }));
 });
@@ -6821,16 +6842,14 @@ test("证据生成前停止会中止请求、写入终态并解锁链接入口",
 });
 
 function CompetitorPanelCredentialHarness() {
-  const registry = useModelRegistry();
   return (
     <>
       <button
-        onClick={() => registry.saveCredential(
-          "competitor-report-model",
-          "sk-revised-before-evidence",
-          false,
-          "revision-before-evidence-new",
-        )}
+        onClick={() => configureCompetitorModelSession({
+          baseUrl: "https://api.openai.com/v1",
+          apiKey: "sk-revised-before-evidence",
+          model: "gpt-competitor-report",
+        }, "revision-before-evidence-new")}
         type="button"
       >
         修改整理阶段模型凭据
@@ -7193,13 +7212,11 @@ test("成果包请求挂起时卸载会忽略迟到 ready 和全部外部回调"
 });
 
 function CompetitorCredentialRevisionHarness() {
-  const registry = useModelRegistry();
   const [analysisRequest, setAnalysisRequest] =
     useState<CompetitorAnalysisRequest | null>(null);
   return (
     <>
       <button
-        disabled={registry.connectedModels.length === 0}
         onClick={() =>
           setAnalysisRequest(ACCOUNT_ANALYSIS_REQUEST)
         }
@@ -7209,12 +7226,11 @@ function CompetitorCredentialRevisionHarness() {
       </button>
       <button
         onClick={() =>
-          registry.saveCredential(
-            "competitor-report-model",
-            "sk-revised-competitor-report",
-            false,
-            "revision-competitor-report-new",
-          )
+          configureCompetitorModelSession({
+            baseUrl: "https://api.openai.com/v1",
+            apiKey: "sk-revised-competitor-report",
+            model: "gpt-competitor-report",
+          }, "revision-competitor-report-new")
         }
         type="button"
       >

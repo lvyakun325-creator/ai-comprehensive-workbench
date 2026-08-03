@@ -22,7 +22,7 @@ import {
   type CompetitorBatchId,
 } from "../lib/competitor-report-runtime";
 import { usesBrowserDirectModelRoute } from "../lib/global-model-runtime";
-import { useModelRegistry } from "./ModelRegistryProvider";
+import { useCompetitorModelSession } from "../lib/competitor-model-session-store";
 
 export type CompetitorAnalysisRequest = {
   requestId: number;
@@ -100,16 +100,11 @@ export function CompetitorReportRunner({
   onStageChange?: (stage: ReportWorkflowStage, message: string) => void;
   retryBlocked?: boolean;
 }) {
-  const {
-    connectedModels,
-    getAgentSelectedModelId,
-    getCredential,
-    getCredentialRevision,
-  } = useModelRegistry();
-  const modelId = getAgentSelectedModelId("competitor-insight");
-  const model = connectedModels.find((item) => item.id === modelId) ?? null;
-  const credential = model ? getCredential(model.id) : null;
-  const credentialRevision = model ? getCredentialRevision(model.id) : "";
+  const competitorModel = useCompetitorModelSession();
+  const model = competitorModel.config;
+  const modelId = model?.model ?? null;
+  const credential = model?.apiKey ?? null;
+  const credentialRevision = competitorModel.revision;
 
   const [stage, setStage] = useState<ReportStage>("idle");
   const [statusMessage, setStatusMessage] = useState("等待链接抓取成果。");
@@ -208,7 +203,6 @@ export function CompetitorReportRunner({
       || !selectedModel
       || !selectedCredential
       || !selectedRevision
-      || selectedModel.connectionStatus !== "connected"
       || run.modelId !== selectedModelId
       || run.credentialRevision !== selectedRevision
     ) {
@@ -234,7 +228,7 @@ export function CompetitorReportRunner({
         const config = {
           baseUrl: selectedModel.baseUrl,
           apiKey: selectedCredential,
-          model: selectedModel.modelId,
+          model: selectedModel.model,
         };
         let validated: Awaited<ReturnType<typeof validateReportBatch>> | null = null;
         for (let attempt = 0; attempt < 2; attempt += 1) {
