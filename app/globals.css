@@ -2060,6 +2060,16 @@ button {
 .competitor-skill-card strong { display: block; margin-top: 15px; color: #2f66f6; font-size: 16px; }
 .competitor-skill-card.planned strong { color: #8290a5; }
 .competitor-skill-card p { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.competitor-transcription-note {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #cfe0ff;
+  border-radius: 10px;
+  background: #f3f7ff;
+  color: #31548d;
+  font-size: 11px;
+  line-height: 1.6;
+}
 .competitor-workflow {
   margin: 16px 0 0;
   padding: 13px;

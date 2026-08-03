@@ -5540,6 +5540,7 @@ test("competitor insight Agent opens its platform-aware collection console", asy
     "page",
   );
   assert.ok(screen.getByRole("heading", { name: "粘贴链接，自动抓取、分析并封装" }));
+  assert.ok(screen.getByText("抖音单视频会自动下载音频并在本机转写，转写文稿随分析报告一起进入成果包。"));
   assert.equal(screen.queryByRole("heading", { name: "企业矩阵基建诊断表" }), null);
   assert.equal(screen.queryByRole("button", { name: "开始矩阵诊断" }), null);
   await user.type(

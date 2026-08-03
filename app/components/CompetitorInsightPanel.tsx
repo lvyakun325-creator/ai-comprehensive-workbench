@@ -503,6 +503,10 @@ export function CompetitorInsightPanel({
         ))}
       </div>
 
+      <p className="competitor-transcription-note">
+        抖音单视频会自动下载音频并在本机转写，转写文稿随分析报告一起进入成果包。
+      </p>
+
       <ol className="competitor-workflow" aria-label="竞品洞察处理流程">
         {WORKFLOW.map((step, index) => (
           <li
