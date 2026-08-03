@@ -674,6 +674,29 @@ class ProjectRecordTests(unittest.TestCase):
         self.assertTrue(all(path.exists() for path in original_paths))
         self.assertEqual(json.loads(self.store_path.read_text("utf-8"))["schemaVersion"], 2)
 
+    def test_v1_failed_task_migrates_with_unknown_classification_and_no_bundle(self) -> None:
+        original_paths = self.write_v1_store_with_three_artifacts()
+        store = json.loads(self.store_path.read_text("utf-8"))
+        task = store["tasks"][0]
+        task.update({
+            "status": "failed",
+            "progress": 10,
+            "currentStep": "平台已识别，等待连接",
+            "completedAt": None,
+            "errorSummary": "历史抓取失败",
+        })
+        self.store_path.write_text(json.dumps(store), "utf-8")
+
+        snapshot = project_records.read_records("competitor-insight")
+
+        migrated = snapshot["tasks"][0]
+        self.assertEqual(migrated["inputKind"], "unknown")
+        self.assertIsNone(migrated["category"])
+        self.assertIsNone(migrated["bundleId"])
+        self.assertEqual(snapshot["bundles"], [])
+        self.assertTrue(all(path.exists() for path in original_paths))
+        self.assertEqual(json.loads(self.store_path.read_text("utf-8"))["schemaVersion"], 2)
+
     def test_task_classification_can_only_resolve_unknown_once(self) -> None:
         self.create_task()
 

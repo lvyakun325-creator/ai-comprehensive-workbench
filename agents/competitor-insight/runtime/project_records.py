@@ -460,6 +460,9 @@ def _migrate_v1(store: dict[str, object]) -> dict[str, object]:
         "bundles": [],
     }
     for task in _tasks(migrated):
+        task["inputKind"] = "unknown"
+        task["category"] = None
+        task["bundleId"] = None
         _append_legacy_bundle(migrated, task)
     _validate_v2_store(migrated)
     return migrated
