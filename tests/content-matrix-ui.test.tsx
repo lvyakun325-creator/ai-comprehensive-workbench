@@ -317,11 +317,18 @@ test("APINebula CODEX preset uses the recommended endpoint and adds a safe actio
     screen.getByRole("button", { name: new RegExp(otherAgent.title) }),
   );
   await user.click(screen.getByRole("button", { name: "Agent 配置" }));
-  assert.equal(
-    screen.queryByRole("option", { name: "APINebula（CODEX）" }),
-    null,
+  assert.ok(screen.getByRole("heading", {
+    name: "竞品洞察 Agent · 独立模型配置",
+  }));
+  const competitorProvider = screen.getByLabelText(
+    "竞品模型服务商",
+  ) as unknown as HTMLSelectElement;
+  assert.deepEqual(
+    Array.from(competitorProvider.options, (option) => option.textContent),
+    ["OpenAI", "APINebula（CODEX）"],
   );
-  assert.equal(screen.queryByLabelText("API Key"), null);
+  assert.ok(screen.getByLabelText("竞品模型 API Key"));
+  assert.equal(screen.queryByRole("radio", {name: /全局模型/u}), null);
 });
 
 test("APINebula probe disclosure follows the effective protocol and exact hostname", async () => {
