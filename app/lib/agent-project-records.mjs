@@ -103,6 +103,27 @@ export function mergeProjectResults(staticResults, dynamicResults) {
   return Array.from(merged.values()).toSorted(newestFirst);
 }
 
+export function isValidProjectBundle(bundle, tasks = PROJECT_TASKS) {
+  const sourceTask = getTaskById(bundle.taskId, tasks);
+  return Boolean(
+    sourceTask
+      && sourceTask.status === "completed"
+      && sourceTask.agentId === bundle.agentId
+      && sourceTask.bundleId === bundle.id
+      && sourceTask.platformId === bundle.platformId
+      && sourceTask.inputKind === bundle.inputKind
+      && sourceTask.category === bundle.category,
+  );
+}
+
+export function mergeProjectBundles(staticBundles, dynamicBundles, tasks = PROJECT_TASKS) {
+  const merged = new Map(staticBundles.map((bundle) => [bundle.id, bundle]));
+  for (const bundle of dynamicBundles) merged.set(bundle.id, bundle);
+  return Array.from(merged.values())
+    .filter((bundle) => isValidProjectBundle(bundle, tasks))
+    .toSorted(newestFirst);
+}
+
 export function getAgentTasks(agentId, status = "all", tasks = PROJECT_TASKS) {
   return tasks.filter(
     (task) =>
@@ -146,5 +167,29 @@ export function getTaskResults(
   return results.filter(
     (result) =>
       result.taskId === taskId && isValidProjectResult(result, tasks),
+  ).toSorted(newestFirst);
+}
+
+export function getAgentBundles(agentId, bundles = [], tasks = PROJECT_TASKS) {
+  return bundles.filter(
+    (bundle) => bundle.agentId === agentId && isValidProjectBundle(bundle, tasks),
+  ).toSorted(newestFirst);
+}
+
+export function getTaskBundle(taskId, bundles = [], tasks = PROJECT_TASKS) {
+  return bundles.find(
+    (bundle) => bundle.taskId === taskId && isValidProjectBundle(bundle, tasks),
+  );
+}
+
+export function getBundleArtifacts(bundleId, bundles = [], artifacts = []) {
+  const bundle = bundles.find((item) => item.id === bundleId);
+  if (!bundle) return [];
+  const allowed = new Set(bundle.artifactIds);
+  return artifacts.filter(
+    (artifact) =>
+      artifact.agentId === bundle.agentId
+      && artifact.taskId === bundle.taskId
+      && allowed.has(artifact.id),
   ).toSorted(newestFirst);
 }

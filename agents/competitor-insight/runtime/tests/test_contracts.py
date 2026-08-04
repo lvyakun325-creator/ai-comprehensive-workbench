@@ -71,6 +71,36 @@ class ContractTests(unittest.TestCase):
                 }
                 for index in range(1, 8)
             ]
+        elif batch_id == "content":
+            batch["claims"] = [
+                self.claim(section)
+                for section in ("content-overview", "content-structure", "interaction", "conversion")
+            ]
+            for claim in batch["claims"]:
+                claim["strength"] = "hypothesis"
+                claim["verificationPlan"] = "补充同类内容样本后核验"
+            batch["topicDirections"] = [
+                {
+                    "title": f"复用方向{label}",
+                    "angle": "生活方式提醒",
+                    "strength": "hypothesis",
+                    "verificationPlan": "补充同类内容样本后核验",
+                    "evidenceIds": evidence_ids,
+                    "complianceNotes": compliance_notes,
+                }
+                for label in ("一", "二", "三")
+            ]
+            batch["filmingTemplates"] = [
+                {
+                    "name": "单内容拍法",
+                    "hook": "先讲观察",
+                    "structure": ["证据", "建议"],
+                    "strength": "hypothesis",
+                    "verificationPlan": "补充画面记录后核验",
+                    "evidenceIds": evidence_ids,
+                    "complianceNotes": compliance_notes,
+                }
+            ]
         return batch
 
     def test_contract_rejects_missing_required_key(self):
@@ -84,6 +114,40 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(result["evidenceId"], "DY-E0001")
 
+    def test_contract_types_bind_content_artifacts_to_trusted_batch_contexts(self):
+        import contracts
+
+        self.assertTrue(hasattr(contracts, "TrustedBatchContext"))
+        self.assertIn("content-overview", str(contracts.SectionClaim.__annotations__["section"]))
+        self.assertIn("content", str(contracts.SectionBatch.__annotations__["batchId"]))
+        self.assertEqual(
+            contracts.TrustedBatchContext.__annotations__["allowedEvidenceIds"],
+            list[str],
+        )
+        self.assertEqual(
+            contracts.ReportArtifact.__annotations__["sections"],
+            list[contracts.ReportSectionBatch],
+        )
+        self.assertEqual(
+            contracts.FinalReportValidationInput.__annotations__["trustedBatchContexts"],
+            list[contracts.TrustedBatchContext],
+        )
+
+    def test_contract_types_expose_content_hypothesis_recommendations(self):
+        import contracts
+
+        self.assertEqual(
+            contracts.ContentSectionClaim.__annotations__["strength"],
+            contracts.Literal["hypothesis"],
+        )
+        for shape in (
+            contracts.ContentTopicDirection,
+            contracts.ContentFilmingTemplate,
+            contracts.ContentConversionItem,
+        ):
+            self.assertEqual(shape.__annotations__["strength"], contracts.Literal["hypothesis"])
+            self.assertEqual(shape.__annotations__["verificationPlan"], str)
+
     def test_section_batch_schema_requires_closed_root_and_valid_evidence(self):
         schema = self.load_section_batch_schema()
 
@@ -94,7 +158,7 @@ class ContractTests(unittest.TestCase):
         )
         self.assertEqual(
             schema["properties"]["batchId"]["enum"],
-            ["strategy", "performance", "execution"],
+            ["strategy", "performance", "execution", "content"],
         )
         self.assertIn("section", schema["$defs"]["claim"]["required"])
         for conditional in schema["$defs"]["claim"]["allOf"]:
@@ -115,7 +179,7 @@ class ContractTests(unittest.TestCase):
     def test_section_batch_schema_accepts_exact_fixed_deliverables(self):
         validator = Draft202012Validator(self.load_section_batch_schema())
 
-        for batch_id in ("strategy", "performance", "execution"):
+        for batch_id in ("strategy", "performance", "execution", "content"):
             with self.subTest(batch_id=batch_id):
                 self.assertEqual(
                     list(validator.iter_errors(self.valid_section_batch(batch_id))),
@@ -157,6 +221,39 @@ class ContractTests(unittest.TestCase):
                 batch = self.valid_section_batch("execution")
                 mutate(batch)
                 self.assertNotEqual(list(validator.iter_errors(batch)), [])
+
+    def test_content_schema_requires_structured_hypotheses_for_all_model_text(self):
+        validator = Draft202012Validator(self.load_section_batch_schema())
+
+        direct_claim = self.valid_section_batch("content")
+        direct_claim["claims"][0]["strength"] = "direct"
+        direct_claim["claims"][0].pop("verificationPlan")
+        text_only_topic = self.valid_section_batch("content")
+        text_only_topic["topicDirections"][0].pop("strength")
+        text_only_topic["topicDirections"][0].pop("verificationPlan")
+        direct_filming = self.valid_section_batch("content")
+        direct_filming["filmingTemplates"][0]["strength"] = "direct"
+        missing_conversion_plan = self.valid_section_batch("content")
+        missing_conversion_plan["conversionItems"] = [
+            {
+                "action": "提供资料入口",
+                "strength": "hypothesis",
+                "evidenceIds": ["DY-E0001"],
+                "complianceNotes": ["不承诺疗效"],
+            }
+        ]
+        overlong_verification = self.valid_section_batch("content")
+        overlong_verification["topicDirections"][0]["verificationPlan"] = "核验" * 501
+
+        for invalid in (
+            direct_claim,
+            text_only_topic,
+            direct_filming,
+            missing_conversion_plan,
+            overlong_verification,
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertNotEqual(list(validator.iter_errors(invalid)), [])
 
 
 if __name__ == "__main__":

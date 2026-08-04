@@ -42,10 +42,14 @@ def _ranked_rows(works: list[dict[str, object]], metric: Callable[[dict[str, obj
     return [_source_row(work) for work in ordered[:limit]]
 
 
-def rank_works(works: list[dict[str, object]], availability: dict[str, bool]) -> dict[str, dict[str, object]]:
+def rank_works(
+    works: list[dict[str, object]], availability: dict[str, bool], *, account: bool = True
+) -> dict[str, dict[str, object]]:
     """Rank works using source-row identifiers and deterministic tie breakers."""
     for work in works:
         _total_interactions(work)
+    if not account:
+        return {}
 
     rankings: dict[str, dict[str, object]] = {
         "overall": {"status": "available", "rows": _ranked_rows(works, _total_interactions, 10)},

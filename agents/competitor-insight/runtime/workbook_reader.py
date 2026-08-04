@@ -2,8 +2,12 @@
 
 from pathlib import Path
 from typing import Any, BinaryIO
+import re
+import zipfile
+from zipfile import BadZipFile
 
 from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
 from metrics import parse_metric, parse_publish_time
 
@@ -50,6 +54,77 @@ _OTHER_PLATFORM_ACCOUNT_KEYS = {
     "xhs_id",
     "xhsid",
 }
+
+MAX_XLSX_MEMBERS = 10_000
+MAX_XLSX_MEMBER_BYTES = 100 * 1024 * 1024
+MAX_XLSX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+MAX_XLSX_COMPRESSION_RATIO = 100
+_REQUIRED_XLSX_MEMBERS = {"[Content_Types].xml", "_rels/.rels", "xl/workbook.xml"}
+
+
+def _normalized_xlsx_member_name(name: str) -> str:
+    normalized = name.replace("\\", "/")
+    trimmed = normalized[:-1] if normalized.endswith("/") else normalized
+    parts = trimmed.split("/")
+    if (
+        not trimmed
+        or normalized.startswith("/")
+        or re.match(r"^[A-Za-z]:", normalized)
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise ValueError("invalid_xlsx_signature")
+    return normalized
+
+
+def _validate_xlsx_archive(source: Path | BinaryIO) -> None:
+    try:
+        if hasattr(source, "seek"):
+            source.seek(0)
+        with zipfile.ZipFile(source) as archive:
+            infos = archive.infolist()
+            if len(infos) > MAX_XLSX_MEMBERS:
+                raise ValueError("xlsx_archive_too_large")
+            members: set[str] = set()
+            total_uncompressed = 0
+            for info in infos:
+                name = _normalized_xlsx_member_name(info.filename)
+                if name in members or info.flag_bits & 0x1:
+                    raise ValueError("invalid_xlsx_signature")
+                members.add(name)
+                if info.is_dir():
+                    continue
+                if info.file_size < 0 or info.compress_size < 0 or info.file_size > MAX_XLSX_MEMBER_BYTES:
+                    raise ValueError("xlsx_archive_too_large")
+                total_uncompressed += info.file_size
+                if total_uncompressed > MAX_XLSX_TOTAL_UNCOMPRESSED_BYTES:
+                    raise ValueError("xlsx_archive_too_large")
+                if info.file_size and (
+                    info.compress_size == 0
+                    or info.file_size / info.compress_size > MAX_XLSX_COMPRESSION_RATIO
+                ):
+                    raise ValueError("xlsx_archive_too_large")
+            if not _REQUIRED_XLSX_MEMBERS.issubset(members) or archive.testzip() is not None:
+                raise ValueError("invalid_xlsx_signature")
+    except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile):
+        raise ValueError("invalid_source_workbook") from None
+
+
+def validate_workbook_source(path: Path | BinaryIO) -> None:
+    """Reject malformed or unreasonably shaped XLSX companion files before use."""
+    _validate_xlsx_archive(path)
+    try:
+        if hasattr(path, "seek"):
+            path.seek(0)
+        workbook = load_workbook(filename=path, read_only=True, data_only=True)
+    except (BadZipFile, InvalidFileException, OSError, ValueError, KeyError) as error:
+        raise ValueError("invalid_source_workbook") from error
+    try:
+        if not workbook.worksheets or len(workbook.worksheets) > 20:
+            raise ValueError("invalid_source_workbook")
+        if any(sheet.max_row > 20_000 or sheet.max_column > 100 for sheet in workbook.worksheets):
+            raise ValueError("invalid_source_workbook")
+    finally:
+        workbook.close()
 
 
 def _normalized_text(value: object) -> str:

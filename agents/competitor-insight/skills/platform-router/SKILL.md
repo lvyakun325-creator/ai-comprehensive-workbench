@@ -17,8 +17,13 @@ description: "识别竞品链接所属平台，并自动调用对应抓取 Skill
 ```bash
 ~/.codex/skills/douyin-scraper/.venv/bin/python \
   ~/.codex/skills/douyin-scraper/main.py "<抖音链接>" \
-  --excel "<当前项目输出目录>"
+  --excel "<当前项目输出目录>" \
+  --transcribe
 ```
+
+   - `--transcribe` 在账号模式下自动忽略，不改变原有主页抓取。
+   - 单作品模式会临时下载视频内容，优先使用本地 `faster-whisper-small` 转写，并把转写文稿写入结构化数据和 Excel。
+   - 网页端默认不持久保存原视频；只有用户明确要求保存视频时才添加 `--save-video`。
 
 3. 小红书域名包括 `xiaohongshu.com`、`xhslink.com`：
    - 自动调用已安装的 `xiaohongshu-scraper`。

@@ -8,12 +8,11 @@ import {
   getTaskResults,
   mergeProjectResults,
   mergeProjectTasks,
-  type ProjectResult,
-  type ProjectTask,
   type TaskStatusFilter,
 } from "../lib/agent-project-records.mjs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentResultFiles } from "./AgentResultFiles";
+import { CompetitorResultBundles } from "./CompetitorResultBundles";
 import { AgentTaskList } from "./AgentTaskList";
 import {
   ContentMatrixConfigPanel,
@@ -35,9 +34,10 @@ import {
   usesContentMatrixServerProxy,
 } from "../lib/content-matrix-runtime";
 import { ModelConfigPanel } from "./ModelConfigPanel";
+import { CompetitorModelConfigPanel } from "./CompetitorModelConfigPanel";
 import {
   loadCompetitorProjectRecords,
-  revealCompetitorArtifact,
+  type CompetitorProjectSnapshot,
 } from "../lib/competitor-project-records-client";
 
 const PROJECT_TABS = [
@@ -50,6 +50,15 @@ const PROJECT_TABS = [
 
 const PROJECT_STATUS = "等待接收本项目任务";
 const APINEBULA_GENERATION_TIMEOUT_MS = 180_000;
+
+function isAbortError(error: unknown): boolean {
+  return Boolean(
+    error
+    && typeof error === "object"
+    && "name" in error
+    && error.name === "AbortError",
+  );
+}
 
 const MATRIX_DIAGNOSIS_FIELDS = [
   ["platform", "主攻平台"],
@@ -138,10 +147,11 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   const [activeTab, setActiveTab] = useState(PROJECT_TABS[0]);
   const [resultTaskId, setResultTaskId] = useState<string | null>(null);
   const [taskFilter, setTaskFilter] = useState<TaskStatusFilter>("all");
-  const [competitorRecords, setCompetitorRecords] = useState<{
-    tasks: readonly ProjectTask[];
-    results: readonly ProjectResult[];
-  }>({tasks: [], results: []});
+  const [competitorRecords, setCompetitorRecords] = useState<CompetitorProjectSnapshot>({
+    tasks: [],
+    bundles: [],
+    results: [],
+  });
   const [matrixDiagnosis, setMatrixDiagnosis] = useState<MatrixDiagnosisValues>({});
   const [matrixSubmitAttempted, setMatrixSubmitAttempted] = useState(false);
   const [matrixReady, setMatrixReady] = useState(false);
@@ -168,6 +178,10 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
   const matrixRunRevision = useRef(0);
   const matrixRunRequest = useRef(0);
   const matrixRunAbortController = useRef<AbortController | null>(null);
+  const competitorMountedRef = useRef(false);
+  const competitorRefreshRevision = useRef(0);
+  const competitorRefreshAbortController = useRef<AbortController | null>(null);
+  const competitorCompletionRevision = useRef(0);
   const isContentMatrix = agent.id === "content-matrix";
   const isCompetitorInsight = agent.id === "competitor-insight";
   const mergedProjectTasks = useMemo(
@@ -179,25 +193,66 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
     [competitorRecords.results],
   );
   const refreshCompetitorRecords = useCallback(async () => {
-    const snapshot = await loadCompetitorProjectRecords();
-    setCompetitorRecords(snapshot);
-    return snapshot;
+    const revision = competitorRefreshRevision.current + 1;
+    competitorRefreshRevision.current = revision;
+    competitorRefreshAbortController.current?.abort();
+    const controller = new AbortController();
+    competitorRefreshAbortController.current = controller;
+    const requestIsCurrent = () => (
+      competitorMountedRef.current
+      && !controller.signal.aborted
+      && competitorRefreshRevision.current === revision
+      && competitorRefreshAbortController.current === controller
+    );
+    try {
+      const snapshot = await loadCompetitorProjectRecords(controller.signal);
+      if (!requestIsCurrent()) return null;
+      setCompetitorRecords(snapshot);
+      return snapshot;
+    } catch (error) {
+      if (isAbortError(error) || !requestIsCurrent()) return null;
+      throw error;
+    } finally {
+      if (competitorRefreshAbortController.current === controller) {
+        competitorRefreshAbortController.current = null;
+      }
+    }
   }, []);
   const showRecordLoadError = useCallback(() => {
     onPreview("无法读取本地竞品任务记录，请确认 8768 服务已启动");
   }, [onPreview]);
-  const openCompletedCompetitorTask = useCallback(async (taskId: string) => {
+  const openCompletedCompetitorTask = useCallback(async (
+    taskId: string,
+    bundleId: string,
+  ) => {
+    const completionRevision = competitorCompletionRevision.current + 1;
+    competitorCompletionRevision.current = completionRevision;
+    const callbackIsCurrent = () => (
+      competitorMountedRef.current
+      && competitorCompletionRevision.current === completionRevision
+    );
     try {
       const snapshot = await refreshCompetitorRecords();
+      if (!snapshot || !callbackIsCurrent()) return;
       const task = snapshot.tasks.find((item) => item.id === taskId);
-      const hasArtifacts = snapshot.results.some((item) => item.taskId === taskId);
-      if (!task || task.status !== "completed" || !hasArtifacts) {
+      const bundle = snapshot.bundles.find((item) => (
+        item.id === bundleId && item.taskId === taskId
+      ));
+      if (
+        task?.status !== "completed"
+        || task.bundleId !== bundleId
+        || bundle?.status !== "ready"
+        || !bundle.primaryArtifactId
+      ) {
+        if (!callbackIsCurrent()) return;
         onPreview("抓取已完成，但成果记录尚未就绪，请稍后刷新");
         return;
       }
+      if (!callbackIsCurrent()) return;
       setResultTaskId(taskId);
       setActiveTab("成果文件");
     } catch {
+      if (!callbackIsCurrent()) return;
       showRecordLoadError();
     }
   }, [onPreview, refreshCompetitorRecords, showRecordLoadError]);
@@ -213,10 +268,17 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
     matrixSubmitAttempted && !matrixDiagnosis[key]?.trim()
   );
 
-  useEffect(
-    () => () => matrixRunAbortController.current?.abort(),
-    [],
-  );
+  useEffect(() => {
+    competitorMountedRef.current = true;
+    return () => {
+      competitorMountedRef.current = false;
+      competitorCompletionRevision.current += 1;
+      competitorRefreshRevision.current += 1;
+      competitorRefreshAbortController.current?.abort();
+      competitorRefreshAbortController.current = null;
+      matrixRunAbortController.current?.abort();
+    };
+  }, []);
 
   const abortActiveMatrixRun = () => {
     matrixRunAbortController.current?.abort();
@@ -598,17 +660,23 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
           }}
         />
       ) : activeTab === "成果文件" ? (
-        <AgentResultFiles
-          agentId={agent.id}
-          getAgentResults={(agentId) =>
-            getAgentResults(agentId, mergedProjectResults)}
-          getTaskById={(taskId) => getTaskById(taskId, mergedProjectTasks)}
-          initialTaskId={resultTaskId}
-          onPreview={onPreview}
-          onRevealArtifact={isCompetitorInsight
-            ? revealCompetitorArtifact
-            : undefined}
-        />
+        isCompetitorInsight ? (
+          <CompetitorResultBundles
+            artifacts={competitorRecords.results}
+            bundles={competitorRecords.bundles}
+            initialTaskId={resultTaskId}
+            onPreview={onPreview}
+          />
+        ) : (
+          <AgentResultFiles
+            agentId={agent.id}
+            getAgentResults={(agentId) =>
+              getAgentResults(agentId, mergedProjectResults)}
+            getTaskById={(taskId) => getTaskById(taskId, mergedProjectTasks)}
+            initialTaskId={resultTaskId}
+            onPreview={onPreview}
+          />
+        )
       ) : activeTab === "Agent 配置" && isContentMatrix ? (
         <ContentMatrixConfigPanel
           activeConfig={matrixActiveConfig}
@@ -622,6 +690,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
           onTest={testMatrixConnection}
           preset={matrixConfigPreset}
         />
+      ) : activeTab === "Agent 配置" && isCompetitorInsight ? (
+        <CompetitorModelConfigPanel />
       ) : activeTab === "Agent 配置" ? (
         <ModelConfigPanel
           scope="agent"
@@ -633,8 +703,8 @@ export function AgentWorkspace({ agent, onBack, onPreview }: AgentWorkspaceProps
         <CompetitorInsightPanel
           mode="run"
           onPreview={onPreview}
-          onTaskCompleted={(taskId) => {
-            void openCompletedCompetitorTask(taskId);
+          onTaskCompleted={(taskId, bundleId) => {
+            void openCompletedCompetitorTask(taskId, bundleId);
           }}
         />
       ) : isContentMatrix && activeTab === "Agent 对话" ? (

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, test } from "node:test";
 import { JSDOM } from "jsdom";
 import type {
+  ProjectBundle,
   ProjectResult,
   ProjectTask,
   TaskStatusFilter,
@@ -11,6 +12,7 @@ import type {
   ChatSession,
   ChatSessionHistoryItem,
 } from "../app/lib/chat-session-store.mjs";
+import type { CompetitorAnalysisRequest } from "../app/components/CompetitorReportRunner";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost/",
@@ -43,12 +45,15 @@ Object.assign(navigator, {
   clipboard: { writeText: async (value: string) => value },
 });
 
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { default: userEvent } = await import("@testing-library/user-event");
 const { within } = await import("@testing-library/dom");
 const { StrictMode, useState } = await import("react");
 const { AGENT_PROJECTS } = await import("../app/lib/agent-catalog.mjs");
 const { AgentResultFiles } = await import("../app/components/AgentResultFiles");
+const { CompetitorResultBundles } = await import(
+  "../app/components/CompetitorResultBundles"
+);
 const { AgentTaskList } = await import("../app/components/AgentTaskList");
 const { CompetitorInsightPanel } = await import(
   "../app/components/CompetitorInsightPanel"
@@ -60,14 +65,14 @@ const { ChatTranscript } = await import("../app/components/ChatTranscript");
 const { default: Home } = await import("../app/page");
 const {
   ModelRegistryProvider,
-  useModelRegistry,
 } = await import("../app/components/ModelRegistryProvider");
 const { CompetitorReportRunner } = await import(
   "../app/components/CompetitorReportRunner"
 );
-const { analyzeReportUpload } = await import(
-  "../app/lib/competitor-report-client"
-);
+const {
+  clearCompetitorModelSession,
+  configureCompetitorModelSession,
+} = await import("../app/lib/competitor-model-session-store");
 const originalFetch = globalThis.fetch;
 
 function deferredValue<T>() {
@@ -351,6 +356,7 @@ const lookupFixtureTask = (taskId: string) =>
 
 afterEach(() => {
   cleanup();
+  clearCompetitorModelSession();
   document.body.innerHTML = "";
   document.body.style.overflow = "";
   window.localStorage.clear();
@@ -750,87 +756,639 @@ test("竞品任务卡展示平台、Skill 与清理后的项目链接", () => {
   assert.doesNotMatch(link.getAttribute("href") ?? "", /token|source/iu);
 });
 
-test("竞品成果按任务聚焦并通过成果 ID 在访达显示", async () => {
-  const user = userEvent.setup({document});
-  const task: ProjectTask = {
-    ...taskStateFixtures[2],
-    id: "competitor-20260801-result-a1",
+function competitorBundleUiFixture(
+  overrides: Partial<ProjectBundle> = {},
+) {
+  const taskId = "competitor-20260801-ui-a1";
+  const bundleId = "bundle-00000000000000a1";
+  const artifact: ProjectResult = {
+    id: "artifact-00000000000000a1",
     agentId: "competitor-insight",
-    title: "小红书作品抓取",
+    taskId,
+    filename: "current-report.md",
+    completedAt: "2026-08-01T02:02:00.000Z",
+    sizeBytes: 512,
+    markdown: null,
+    kind: "markdown",
+    absolutePath: `/controlled/${taskId}/current-report.md`,
+    exists: true,
+    isDirectory: false,
+    previewable: true,
   };
-  const otherTask: ProjectTask = {
-    ...task,
-    id: "competitor-20260801-result-b2",
-    title: "抖音作品抓取",
+  const bundle: ProjectBundle = {
+    id: bundleId,
+    agentId: "competitor-insight",
+    taskId,
+    platformId: "xiaohongshu",
+    platformLabel: "小红书",
+    inputKind: "content",
+    category: "xhs-note",
+    title: "小红书笔记分析成果包",
+    subjectName: "测试作者",
+    sourceUrl: "https://www.xiaohongshu.com/explore/test-note?token=hidden",
+    status: "ready",
+    primaryArtifactId: artifact.id,
+    manifestPath: `/controlled/${taskId}/${bundleId}.manifest.json`,
+    archivePath: `/controlled/${taskId}/${bundleId}.zip`,
+    rootDirectory: `/controlled/${taskId}`,
+    artifactIds: [artifact.id],
+    itemCount: 1,
+    createdAt: "2026-08-01T02:01:00.000Z",
+    completedAt: "2026-08-01T02:02:00.000Z",
+    ...overrides,
   };
-  const results: ProjectResult[] = [
-    {
-      id: "artifact-0000000000000021",
-      agentId: "competitor-insight",
-      taskId: task.id,
-      filename: "result.xlsx",
-      completedAt: "2026-08-01T05:00:00.000Z",
-      sizeBytes: 2048,
+  return {artifact, bundle};
+}
+
+function renderCompetitorBundleFixture(
+  overrides: Partial<ProjectBundle> = {},
+  onPreview: (message: string) => void = () => undefined,
+) {
+  const fixture = competitorBundleUiFixture(overrides);
+  return {
+    ...fixture,
+    view: render(
+      <CompetitorResultBundles
+        artifacts={[fixture.artifact]}
+        bundles={[fixture.bundle]}
+        onPreview={onPreview}
+      />,
+    ),
+  };
+}
+
+test("竞品成果每任务一张成果包卡片并支持分类与默认折叠", async () => {
+  const snapshot = competitorWorkspaceSnapshot();
+  globalThis.fetch = withCompetitorHealth(async (input, init) => {
+    const url = String(input);
+    if (url.includes("/project-records") && (init?.method ?? "GET") === "GET") {
+      return Response.json(snapshot);
+    }
+    throw new Error(`unexpected request: ${url}`);
+  });
+  const user = userEvent.setup({document});
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+  await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+  await user.click(screen.getByRole("button", {name: "成果文件"}));
+
+  await waitFor(() => {
+    assert.equal(
+      screen.getAllByRole("article", {name: /成果包/}).length,
+      2,
+    );
+  });
+  assert.ok(screen.getByRole("heading", {name: "小红书笔记分析成果包"}));
+  assert.ok(screen.getByRole("heading", {name: "历史抖音账号成果包"}));
+  assert.ok(screen.getByRole("button", {name: "小红书笔记"}));
+  assert.ok(screen.getByRole("button", {name: "抖音账号"}));
+  assert.ok(screen.getByText("current-report.md"));
+  assert.equal(screen.queryByText("原始数据.xlsx"), null);
+  assert.doesNotMatch(document.body.textContent ?? "", /query-secret|token=/u);
+  const sourceLink = screen.getByRole("link", {name: "查看来源链接：测试作者"});
+  assert.equal(sourceLink.getAttribute("href"), "https://www.xiaohongshu.com/explore/test-note");
+
+  const currentBundleCard = screen.getByRole("article", {
+    name: "小红书笔记分析成果包 成果包",
+  });
+  await user.click(within(currentBundleCard).getByRole("button", {
+    name: "展开明细",
+  }));
+  assert.ok(screen.getByText("原始数据.xlsx"));
+  assert.ok(screen.getByText("structured-data.json"));
+
+  await user.click(screen.getByRole("button", {name: "小红书笔记"}));
+  assert.ok(screen.getByRole("heading", {name: "小红书笔记分析成果包"}));
+  assert.equal(screen.queryByRole("heading", {name: "历史抖音账号成果包"}), null);
+  await user.click(screen.getByRole("button", {name: "全部成果"}));
+  assert.ok(screen.getByRole("heading", {name: "历史抖音账号成果包"}));
+});
+
+test("竞品成果包只在点击后预览下载和按 bundleId 定位", async () => {
+  const snapshot = competitorWorkspaceSnapshot();
+  const currentBundle = snapshot.bundles[0];
+  const currentTask = snapshot.tasks[0];
+  const currentArtifacts = snapshot.artifacts.filter(
+    (artifact) => artifact.taskId === currentTask.id,
+  );
+  const requests: Array<{url: string; method: string}> = [];
+  globalThis.fetch = withCompetitorHealth(async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    requests.push({url, method});
+    if (url.includes("/project-records") && method === "GET") {
+      return Response.json(snapshot);
+    }
+    if (url.endsWith(`/project-bundles/${currentBundle.id}`) && method === "GET") {
+      return Response.json({
+        ok: true,
+        bundle: currentBundle,
+        task: currentTask,
+        artifacts: currentArtifacts,
+        markdown: "# 本次竞品分析\n\n按需加载的报告正文。",
+        previewable: true,
+      });
+    }
+    if (url.endsWith(`/project-bundles/${currentBundle.id}/download`) && method === "GET") {
+      const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+      return new Response(bytes, {
+        status: 200,
+        headers: {
+          "content-disposition": 'attachment; filename="current-bundle.zip"',
+          "content-length": String(bytes.byteLength),
+          "content-type": "application/zip",
+        },
+      });
+    }
+    if (url.endsWith(`/project-bundles/${currentBundle.id}/reveal`) && method === "POST") {
+      return Response.json({ok: true, bundleId: currentBundle.id});
+    }
+    throw new Error(`unexpected request: ${method} ${url}`);
+  });
+  const user = userEvent.setup({document});
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+  await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+  await user.click(screen.getByRole("button", {name: "成果文件"}));
+  await screen.findByRole("heading", {name: "小红书笔记分析成果包"});
+  assert.equal(requests.some(({url}) => url.includes("/project-bundles/")), false);
+
+  const currentBundleCard = screen.getByRole("article", {
+    name: "小红书笔记分析成果包 成果包",
+  });
+  await user.click(within(currentBundleCard).getByRole("button", {name: "查看分析报告"}));
+  assert.ok(await screen.findByRole("region", {name: "小红书笔记分析成果包报告预览"}));
+  assert.match(document.body.textContent ?? "", /按需加载的报告正文/u);
+  assert.equal(
+    requests.filter(({url, method}) => url.endsWith(`/project-bundles/${currentBundle.id}`) && method === "GET").length,
+    1,
+  );
+
+  await user.click(within(currentBundleCard).getByRole("button", {name: "下载成果包"}));
+  await waitFor(() => assert.equal(clickedDownloadAnchors.length, 1));
+  assert.equal(clickedDownloadAnchors[0].download, "current-bundle.zip");
+  assert.equal(createdMarkdownBlobs.at(-1)?.blob.type, "application/zip");
+  assert.deepEqual(revokedMarkdownUrls, [createdMarkdownBlobs.at(-1)?.url]);
+
+  await user.click(within(currentBundleCard).getByRole("button", {name: "在访达中显示"}));
+  await waitFor(() => {
+    assert.equal(
+      requests.filter(({url, method}) => url.endsWith(`/project-bundles/${currentBundle.id}/reveal`) && method === "POST").length,
+      1,
+    );
+  });
+  assert.match(screen.getByRole("status", {name: "成果包操作状态"}).textContent ?? "", /已在访达中显示/u);
+});
+
+test("v1 legacy 快照保留成果卡且详情惰性下载与刷新后下载可用", async () => {
+  const taskId = "competitor-20260801-legacy-ui";
+  const bundleId = "bundle-0000000000000001";
+  const artifactId = "artifact-0000000000000001";
+  const root = "/controlled/outputs/competitor-insight/xiaohongshu/legacy-export";
+  const reportPath = `${root}/legacy-report.md`;
+  const task = {
+    ...persistedCompetitorTask("completed", 100, {
+      inputKind: "unknown",
+      category: null,
+      bundleId,
+    }, taskId),
+    title: "v1 历史成果包",
+    artifactIds: [artifactId],
+  };
+  const artifact = {
+    id: artifactId,
+    agentId: "competitor-insight",
+    taskId,
+    kind: "markdown",
+    filename: "legacy-report.md",
+    absolutePath: reportPath,
+    sizeBytes: 128,
+    completedAt: task.completedAt,
+    previewable: true,
+    exists: true,
+    isDirectory: false,
+    markdown: null,
+  };
+  const bundle = {
+    id: bundleId,
+    agentId: "competitor-insight",
+    taskId,
+    platformId: "xiaohongshu",
+    inputKind: "unknown",
+    category: null,
+    subjectName: task.title,
+    itemCount: 0,
+    status: "legacy",
+    rootDirectory: root,
+    primaryReportPath: reportPath,
+    manifestPath: `${root}/${bundleId}.manifest.json`,
+    archivePath: `${root}/${bundleId}.zip`,
+    artifactIds: [artifactId],
+    manifestSha256: null,
+    archiveSha256: null,
+    memberIdentitySha256: null,
+    createdAt: task.completedAt,
+    updatedAt: task.updatedAt,
+  };
+  const snapshot = {ok: true, tasks: [task], artifacts: [artifact], bundles: [bundle]};
+  const requests: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
+    if (url.includes("/project-records")) return Response.json(snapshot);
+    if (url.endsWith(`/project-bundles/${bundleId}`)) {
+      return Response.json({
+        ok: true,
+        bundle,
+        task,
+        artifacts: [artifact],
+        markdown: "# v1 历史报告\n\n首次按需物化成功。",
+        previewable: true,
+      });
+    }
+    if (url.endsWith(`/project-bundles/${bundleId}/download`)) {
+      const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+      return new Response(bytes, {headers: {
+        "content-disposition": 'attachment; filename="legacy-bundle.zip"',
+        "content-length": String(bytes.byteLength),
+        "content-type": "application/zip",
+      }});
+    }
+    throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+  }) as typeof fetch;
+  const user = userEvent.setup({document});
+  render(<Home />);
+  await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+  await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+  await user.click(screen.getByRole("button", {name: "成果文件"}));
+  const card = await screen.findByRole("article", {name: "v1 历史成果包 成果包"});
+  requests.length = 0;
+
+  await user.click(within(card).getByRole("button", {name: "查看分析报告"}));
+  assert.match((await screen.findByRole("region", {name: "v1 历史成果包报告预览"})).textContent ?? "", /首次按需物化成功/u);
+  await user.click(within(card).getByRole("button", {name: "下载成果包"}));
+  await waitFor(() => assert.equal(clickedDownloadAnchors.at(-1)?.download, "legacy-bundle.zip"));
+  assert.deepEqual(requests, [
+    "http://127.0.0.1:8768/health",
+    `http://127.0.0.1:8768/project-bundles/${bundleId}`,
+    "http://127.0.0.1:8768/health",
+    `http://127.0.0.1:8768/project-bundles/${bundleId}/download`,
+  ]);
+
+  await user.click(screen.getByRole("button", {name: "成果文件"}));
+  await waitFor(() => assert.equal(
+    requests.filter((url) => url.includes("/project-records")).length,
+    1,
+  ));
+  const refreshedCard = screen.getByRole("article", {name: "v1 历史成果包 成果包"});
+  const downloadsBeforeRefreshClick = clickedDownloadAnchors.length;
+  await user.click(within(refreshedCard).getByRole("button", {name: "下载成果包"}));
+  await waitFor(() => assert.equal(clickedDownloadAnchors.length, downloadsBeforeRefreshClick + 1));
+  assert.equal(clickedDownloadAnchors.at(-1)?.download, "legacy-bundle.zip");
+  assert.equal(
+    requests.filter((url) => url.endsWith(`/project-bundles/${bundleId}/download`)).length,
+    2,
+  );
+});
+
+test("竞品成果包统一清理 title subject source 及所有无障碍名称中的敏感片段", async () => {
+  const snapshot = competitorWorkspaceSnapshot();
+  snapshot.tasks[0].title = "竞品 https://title-user:title-pass@example.com/item?token=title-secret#title-fragment credential=title-credential";
+  snapshot.tasks[0].sourceUrl = "https://www.xiaohongshu.com/explore/test-note?token=source-secret#source-fragment";
+  snapshot.bundles[0].subjectName = "作者 https://subject-user:subject-pass@example.com/profile?cookie=subject-secret#subject-fragment cookie=subject-cookie";
+  const currentBundle = snapshot.bundles[0];
+  const currentTask = snapshot.tasks[0];
+  const currentArtifacts = snapshot.artifacts.filter((artifact) => artifact.taskId === currentTask.id);
+  globalThis.fetch = withCompetitorHealth(async (input, init) => {
+    const url = String(input);
+    if (url.includes("/project-records")) return Response.json(snapshot);
+    if (url.endsWith(`/project-bundles/${currentBundle.id}`)) {
+      return Response.json({
+        ok: true,
+        bundle: currentBundle,
+        task: currentTask,
+        artifacts: currentArtifacts,
+        markdown: "# 安全报告",
+        previewable: true,
+      });
+    }
+    if (url.endsWith(`/project-bundles/${currentBundle.id}/reveal`) && init?.method === "POST") {
+      return Response.json({ok: false, error: "INTERNAL_ERROR", debug: "status-secret"}, {status: 500});
+    }
+    throw new Error(`unexpected request: ${url}`);
+  });
+  const user = userEvent.setup({document});
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+  await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+  await user.click(screen.getByRole("button", {name: "成果文件"}));
+  const article = await screen.findByRole("article", {name: /竞品 https:\/\/example\.com\/item.*成果包/u});
+  const sourceLink = within(article).getByRole("link", {name: /查看来源链接/u});
+  assert.equal(sourceLink.getAttribute("href"), "https://www.xiaohongshu.com/explore/test-note");
+  assert.doesNotMatch(document.body.innerHTML, /title-secret|title-pass|title-credential|subject-secret|subject-pass|subject-cookie|source-secret|status-secret/u);
+
+  await user.click(within(article).getByRole("button", {name: "查看分析报告"}));
+  assert.ok(await screen.findByRole("region", {name: /竞品 https:\/\/example\.com\/item.*报告预览/u}));
+  await user.click(within(article).getByRole("button", {name: "在访达中显示"}));
+  await waitFor(() => assert.match(screen.getByRole("status", {name: "成果包操作状态"}).textContent ?? "", /无法/u));
+  assert.doesNotMatch(document.body.innerHTML, /title-secret|title-pass|title-credential|subject-secret|subject-pass|subject-cookie|source-secret|status-secret/u);
+});
+
+test("竞品合法 URL 括号查询与片段不进入 DOM aria 或状态", async () => {
+  renderCompetitorBundleFixture({
+    title: "竞品 https://example.com/item?token=(query-secret)#fragment-secret",
+  });
+  const article = screen.getByRole("article", {
+    name: "竞品 https://example.com/item 成果包",
+  });
+
+  assert.ok(screen.getByRole("heading", {
+    name: "竞品 https://example.com/item",
+  }));
+  assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
+
+  await userEvent.setup({document}).click(
+    within(article).getByRole("button", {name: "展开明细"}),
+  );
+  assert.equal(
+    screen.getByRole("status", {name: "成果包界面状态"}).textContent,
+    "竞品 https://example.com/item明细已展开",
+  );
+  assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
+});
+
+test("竞品 URL 查询中的 ASCII 逗号不会将密钥后缀泄露到 DOM aria 或状态", async () => {
+  renderCompetitorBundleFixture({
+    title: "逗号 https://example.com/item?token=first,query-secret#fragment-secret",
+  });
+  const article = screen.getByRole("article", {
+    name: "逗号 https://example.com/item 成果包",
+  });
+
+  assert.ok(screen.getByRole("heading", {name: "逗号 https://example.com/item"}));
+  assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
+  await userEvent.setup({document}).click(
+    within(article).getByRole("button", {name: "展开明细"}),
+  );
+  assert.equal(
+    screen.getByRole("status", {name: "成果包界面状态"}).textContent,
+    "逗号 https://example.com/item明细已展开",
+  );
+  assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
+});
+
+test("竞品 URL 查询中的 ASCII 分号不会将密钥后缀泄露到 DOM aria 或状态", async () => {
+  renderCompetitorBundleFixture({
+    title: "分号 https://example.com/item?token=first;query-secret#fragment-secret",
+  });
+  const article = screen.getByRole("article", {
+    name: "分号 https://example.com/item 成果包",
+  });
+
+  assert.ok(screen.getByRole("heading", {name: "分号 https://example.com/item"}));
+  assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
+  await userEvent.setup({document}).click(
+    within(article).getByRole("button", {name: "展开明细"}),
+  );
+  assert.equal(
+    screen.getByRole("status", {name: "成果包界面状态"}).textContent,
+    "分号 https://example.com/item明细已展开",
+  );
+  assert.doesNotMatch(document.body.innerHTML, /query-secret|fragment-secret/u);
+});
+
+test("竞品 Authorization Bearer 凭据完整隐藏且保留后续正常中文", () => {
+  renderCompetitorBundleFixture({
+    subjectName: "作者 authorization: Bearer auth-secret，后续正常中文",
+  });
+
+  assert.ok(screen.getByText("作者 [敏感信息已隐藏]，后续正常中文"));
+  assert.ok(screen.getByRole("link", {
+    name: "查看来源链接：作者 [敏感信息已隐藏]，后续正常中文",
+  }));
+  assert.doesNotMatch(document.body.innerHTML, /auth-secret/u);
+});
+
+test("竞品普通中文标题与主体原样展示", async () => {
+  renderCompetitorBundleFixture({
+    title: "普通中文标题",
+    subjectName: "普通中文作者",
+  });
+  const article = screen.getByRole("article", {name: "普通中文标题 成果包"});
+
+  assert.ok(screen.getByRole("heading", {name: "普通中文标题"}));
+  assert.ok(within(article).getByText("普通中文作者"));
+  await userEvent.setup({document}).click(
+    within(article).getByRole("button", {name: "展开明细"}),
+  );
+  assert.equal(
+    screen.getByRole("status", {name: "成果包界面状态"}).textContent,
+    "普通中文标题明细已展开",
+  );
+});
+
+test("竞品成果包三类动作使用稳定名称并同步阻止同一渲染内重复激活", async () => {
+  const snapshot = competitorWorkspaceSnapshot();
+  const detail = deferredValue<Response>();
+  const download = deferredValue<Response>();
+  const reveal = deferredValue<Response>();
+  const requests: string[] = [];
+  globalThis.fetch = withCompetitorHealth(async (input) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.endsWith("/download")) return download.promise;
+    if (url.endsWith("/reveal")) return reveal.promise;
+    return detail.promise;
+  });
+  const {bundle} = renderCompetitorBundleFixture();
+  const article = screen.getByRole("article", {name: `${bundle.title} 成果包`});
+  const reportButton = within(article).getByRole("button", {name: "查看分析报告"});
+
+  act(() => {
+    reportButton.dispatchEvent(new dom.window.MouseEvent("click", {bubbles: true}));
+    reportButton.dispatchEvent(new dom.window.MouseEvent("click", {bubbles: true}));
+  });
+  await waitFor(() => {
+    assert.equal(requests.filter((url) => url.endsWith(`/${bundle.id}`)).length, 1);
+  });
+  assert.equal(within(article).getByRole("button", {name: "查看分析报告"}).getAttribute("aria-busy"), "true");
+  detail.resolve(Response.json({
+    ok: true,
+    bundle: snapshot.bundles[0],
+    task: snapshot.tasks[0],
+    artifacts: snapshot.artifacts.filter((artifact) => artifact.taskId === snapshot.tasks[0].id),
+    markdown: "# 报告",
+    previewable: true,
+  }));
+  await screen.findByRole("region", {name: `${bundle.title}报告预览`});
+
+  const downloadButton = within(article).getByRole("button", {name: "下载成果包"});
+  act(() => {
+    downloadButton.dispatchEvent(new dom.window.MouseEvent("click", {bubbles: true}));
+    downloadButton.dispatchEvent(new dom.window.MouseEvent("click", {bubbles: true}));
+  });
+  await waitFor(() => {
+    assert.equal(requests.filter((url) => url.endsWith("/download")).length, 1);
+  });
+  const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+  download.resolve(new Response(bytes, {headers: {
+    "content-disposition": 'attachment; filename="bundle.zip"',
+    "content-length": String(bytes.byteLength),
+    "content-type": "application/zip",
+  }}));
+  await waitFor(() => assert.equal(clickedDownloadAnchors.length, 1));
+
+  const revealButton = within(article).getByRole("button", {name: "在访达中显示"});
+  act(() => {
+    revealButton.dispatchEvent(new dom.window.MouseEvent("click", {bubbles: true}));
+    revealButton.dispatchEvent(new dom.window.MouseEvent("click", {bubbles: true}));
+  });
+  await waitFor(() => {
+    assert.equal(requests.filter((url) => url.endsWith("/reveal")).length, 1);
+  });
+  reveal.resolve(Response.json({ok: true, bundleId: bundle.id}));
+  await waitFor(() => assert.match(screen.getByRole("status", {name: "成果包操作状态"}).textContent ?? "", /已在访达/u));
+
+  const detailButton = within(article).getByRole("button", {name: "展开明细"});
+  await userEvent.setup({document}).click(detailButton);
+  assert.equal(within(article).getByRole("button", {name: "展开明细"}).getAttribute("aria-expanded"), "true");
+  assert.match(screen.getByRole("status", {name: "成果包界面状态"}).textContent ?? "", /明细已展开/u);
+});
+
+test("竞品成果包安全收敛超过 2 MiB 的不可预览响应和三类动作错误", async () => {
+  const snapshot = competitorWorkspaceSnapshot();
+  const messages: string[] = [];
+  globalThis.fetch = withCompetitorHealth(async (input) => {
+    const url = String(input);
+    if (url.endsWith("/download") || url.endsWith("/reveal")) {
+      return Response.json({ok: false, error: "INTERNAL_ERROR", debug: "bridge-secret"}, {status: 500});
+    }
+    return Response.json({
+      ok: true,
+      bundle: snapshot.bundles[0],
+      task: snapshot.tasks[0],
+      artifacts: snapshot.artifacts.filter((artifact) => artifact.taskId === snapshot.tasks[0].id),
       markdown: null,
-      kind: "excel",
-      absolutePath: "/controlled/result.xlsx",
-      exists: true,
-      isDirectory: false,
-    },
-    {
-      id: "artifact-0000000000000022",
-      agentId: "competitor-insight",
-      taskId: task.id,
-      filename: "result.json",
-      completedAt: "2026-08-01T05:00:00.000Z",
-      sizeBytes: 128,
-      markdown: null,
-      kind: "json",
-      absolutePath: "/controlled/result.json",
-      exists: false,
-      isDirectory: false,
-    },
-    {
-      id: "artifact-0000000000000023",
-      agentId: "competitor-insight",
-      taskId: otherTask.id,
-      filename: "other.xlsx",
-      completedAt: "2026-08-01T04:00:00.000Z",
-      sizeBytes: 512,
-      markdown: null,
-      kind: "excel",
-      absolutePath: "/controlled/other.xlsx",
-      exists: true,
-      isDirectory: false,
-    },
-  ];
-  const revealed: string[] = [];
+      previewable: false,
+    });
+  });
+  const {bundle} = renderCompetitorBundleFixture({}, (message) => messages.push(message));
+  const article = screen.getByRole("article", {name: `${bundle.title} 成果包`});
+
+  await userEvent.setup({document}).click(within(article).getByRole("button", {name: "查看分析报告"}));
+  assert.ok(await screen.findByRole("region", {name: `${bundle.title}报告预览`}));
+  assert.match(screen.getByRole("status", {name: "成果包操作状态"}).textContent ?? "", /暂时无法预览/u);
+  await userEvent.setup({document}).click(within(article).getByRole("button", {name: "下载成果包"}));
+  await waitFor(() => assert.match(messages.at(-1) ?? "", /下载失败/u));
+  await userEvent.setup({document}).click(within(article).getByRole("button", {name: "在访达中显示"}));
+  await waitFor(() => assert.match(messages.at(-1) ?? "", /无法在访达/u));
+  assert.doesNotMatch(`${document.body.innerHTML}${messages.join(" ")}`, /bridge-secret/u);
+});
+
+test("竞品成果包卸载时取消三类动作并忽略所有迟到副作用", async () => {
+  const snapshot = competitorWorkspaceSnapshot();
+  const pending = new Map<string, ReturnType<typeof deferredValue<Response>>>();
+  const signals = new Map<string, AbortSignal | null>();
+  const messages: string[] = [];
+  globalThis.fetch = withCompetitorHealth((input, init) => {
+    const url = String(input);
+    const kind = url.endsWith("/download") ? "download" : url.endsWith("/reveal") ? "reveal" : "detail";
+    const deferred = deferredValue<Response>();
+    pending.set(kind, deferred);
+    signals.set(kind, init?.signal ?? null);
+    return deferred.promise;
+  });
+  const {bundle, view} = renderCompetitorBundleFixture({}, (message) => messages.push(message));
+  const article = screen.getByRole("article", {name: `${bundle.title} 成果包`});
+  act(() => {
+    for (const name of ["查看分析报告", "下载成果包", "在访达中显示"]) {
+      within(article).getByRole("button", {name}).dispatchEvent(
+        new dom.window.MouseEvent("click", {bubbles: true}),
+      );
+    }
+  });
+  await waitFor(() => {
+    assert.deepEqual([...pending.keys()].sort(), ["detail", "download", "reveal"]);
+  });
+  view.unmount();
+  for (const signal of signals.values()) assertSignalAborted(signal);
+
+  const raw = snapshot.bundles[0];
+  const rawTask = snapshot.tasks[0];
+  const rawArtifacts = snapshot.artifacts.filter((artifact) => artifact.taskId === rawTask.id);
+  const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+  await act(async () => {
+    pending.get("detail")?.resolve(Response.json({ok: true, bundle: raw, task: rawTask, artifacts: rawArtifacts, markdown: "# 迟到", previewable: true}));
+    pending.get("download")?.resolve(new Response(bytes, {headers: {"content-length": "4", "content-type": "application/zip"}}));
+    pending.get("reveal")?.resolve(Response.json({ok: true, bundleId: bundle.id}));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+  assert.deepEqual(messages, []);
+  assert.equal(clickedDownloadAnchors.length, 0);
+  assert.equal(createdMarkdownBlobs.length, 0);
+});
+
+test("竞品成果包下载在 URL 或 anchor 异常时仍释放资源并解锁", async () => {
+  const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
+  globalThis.fetch = withCompetitorHealth(async () => new Response(bytes, {headers: {
+    "content-length": String(bytes.byteLength),
+    "content-type": "application/zip",
+  }}));
+  const {bundle} = renderCompetitorBundleFixture();
+  const article = screen.getByRole("article", {name: `${bundle.title} 成果包`});
+  const originalCreateObjectUrl = URL.createObjectURL;
+  try {
+    Object.defineProperty(URL, "createObjectURL", {configurable: true, value: () => { throw new Error("create failed"); }});
+    await userEvent.setup({document}).click(within(article).getByRole("button", {name: "下载成果包"}));
+    await waitFor(() => assert.equal((within(article).getByRole("button", {name: "下载成果包"}) as HTMLButtonElement).disabled, false));
+  } finally {
+    Object.defineProperty(URL, "createObjectURL", {configurable: true, value: originalCreateObjectUrl});
+  }
+
+  const originalClick = dom.window.HTMLAnchorElement.prototype.click;
+  try {
+    dom.window.HTMLAnchorElement.prototype.click = function clickWithFailure() {
+      clickedDownloadAnchors.push(this);
+      throw new Error("click failed");
+    };
+    await userEvent.setup({document}).click(within(article).getByRole("button", {name: "下载成果包"}));
+    await waitFor(() => assert.equal(revokedMarkdownUrls.length, 1));
+    assert.equal(clickedDownloadAnchors.at(-1)?.isConnected, false);
+    assert.equal((within(article).getByRole("button", {name: "下载成果包"}) as HTMLButtonElement).disabled, false);
+  } finally {
+    dom.window.HTMLAnchorElement.prototype.click = originalClick;
+  }
+});
+
+test("竞品成果包区分总空、分类空和聚焦不可用", async () => {
+  const user = userEvent.setup({document});
+  const empty = render(
+    <CompetitorResultBundles artifacts={[]} bundles={[]} onPreview={() => undefined} />,
+  );
+  assert.ok(screen.getByText("暂无竞品成果包"));
+  empty.unmount();
+
+  const fixture = competitorBundleUiFixture();
+  const filtered = render(
+    <CompetitorResultBundles artifacts={[fixture.artifact]} bundles={[fixture.bundle]} onPreview={() => undefined} />,
+  );
+  await user.click(screen.getByRole("button", {name: "抖音作品"}));
+  assert.ok(screen.getByText("当前分类暂无成果包"));
+  filtered.unmount();
 
   render(
-    <AgentResultFiles
-      agentId="competitor-insight"
-      getAgentResults={() => results}
-      getTaskById={(taskId) => taskId === task.id ? task : taskId === otherTask.id ? otherTask : undefined}
-      initialTaskId={task.id}
+    <CompetitorResultBundles
+      artifacts={[fixture.artifact]}
+      bundles={[fixture.bundle]}
+      initialTaskId="competitor-20260801-missing-focus"
       onPreview={() => undefined}
-      onRevealArtifact={async (artifactId) => {
-        revealed.push(artifactId);
-      }}
     />,
   );
-
-  assert.ok(screen.getByRole("heading", {name: "成果文件"}));
-  assert.ok(screen.getByText("result.xlsx"));
-  assert.equal(screen.queryByText("other.xlsx"), null);
-  await user.click(screen.getByRole("button", {name: "在访达中显示result.xlsx"}));
-  assert.deepEqual(revealed, ["artifact-0000000000000021"]);
-  assert.equal(
-    (screen.getByRole("button", {name: "result.json 文件已不存在"}) as HTMLButtonElement).disabled,
-    true,
-  );
-
-  await user.click(screen.getByRole("button", {name: "查看全部成果"}));
-  assert.ok(screen.getByText("other.xlsx"));
+  assert.ok(screen.getByText("本次成果暂不可用，请查看全部成果或稍后刷新"));
 });
 
 test("five project tabs connect task history to its Markdown result and preserve the filter", async () => {
@@ -2547,7 +3105,7 @@ test("saving global settings applies the final default model after all card draf
   });
 });
 
-test("keeps content matrix configuration separate while other Agents select enabled global models", async () => {
+test("竞品洞察提供独立模型配置且不展示全局模型选择", async () => {
   window.localStorage.setItem(
     "ai-workbench:model-registry:v2",
     JSON.stringify([
@@ -2574,6 +3132,15 @@ test("keeps content matrix configuration separate while other Agents select enab
     JSON.stringify({ "openai-gpt-5-6": "revision-agent-config" }),
   );
   const user = userEvent.setup({ document });
+  const modelRequests: Record<string, unknown>[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "/api/models/test-text") {
+      modelRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({ok: true});
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
   render(<Home />);
 
   await user.click(screen.getByRole("button", { name: /内容矩阵 Agent/ }));
@@ -2599,11 +3166,25 @@ test("keeps content matrix configuration separate while other Agents select enab
   await user.click(screen.getByRole("button", { name: "← 返回 Agent 项目" }));
   await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
   await user.click(screen.getByRole("button", { name: "Agent 配置" }));
-  assert.equal(
-    (screen.getByRole("radio", { name: /GPT-5\.6 OpenAI/ }) as HTMLInputElement).checked,
-    true,
-  );
-  assert.equal(screen.queryByRole("radio", { name: /Claude/ }), null);
+  assert.ok(screen.getByRole("heading", {name: "竞品洞察 Agent · 独立模型配置"}));
+  assert.match(screen.getByText(/不会读取或回退到全局模型/u).textContent ?? "", /全局模型/u);
+  assert.equal(screen.queryByRole("radio", { name: /GPT-5\.6 OpenAI/ }), null);
+
+  await user.clear(screen.getByLabelText("竞品模型名称"));
+  await user.type(screen.getByLabelText("竞品模型名称"), "gpt-competitor-only");
+  await user.type(screen.getByLabelText("竞品模型 API Key"), "sk-competitor-only");
+  await user.click(screen.getByRole("button", {name: "测试竞品模型"}));
+  await waitFor(() => assert.ok(screen.getByText("连接测试成功，模型可用")));
+  await user.click(screen.getByRole("button", {name: "应用到竞品洞察"}));
+
+  assert.deepEqual(modelRequests, [{
+    config: {
+      apiKey: "sk-competitor-only",
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-competitor-only",
+    },
+  }]);
+  assert.ok(screen.getByText("竞品洞察已使用独立模型：gpt-competitor-only"));
 });
 
 test("聊天会话首次发送后进入独立区域，并在导航后保留当前会话", async () => {
@@ -4771,7 +5352,7 @@ test("凭据修订变化会停止活动请求且聊天 DOM 不出现密钥", asy
   assert.doesNotMatch(document.body.textContent ?? "", new RegExp(newKey));
 });
 
-test("home chat and Agent A and B keep independent model selections", async () => {
+test("home chat、竞品独立模型和其他 Agent 的全局选择彼此隔离", async () => {
   window.localStorage.setItem(
     "ai-workbench:model-registry:v2",
     JSON.stringify([
@@ -4841,12 +5422,8 @@ test("home chat and Agent A and B keep independent model selections", async () =
   await user.click(screen.getByRole("button", { name: "Agent 项目" }));
   await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
   await user.click(screen.getByRole("button", { name: "Agent 配置" }));
-  assert.equal(
-    (screen.getByRole("radio", { name: /GPT-5\.6 OpenAI/ }) as HTMLInputElement)
-      .checked,
-    true,
-  );
-  await user.click(screen.getByRole("radio", { name: /Gemini Pro Google/ }));
+  assert.ok(screen.getByRole("heading", {name: "竞品洞察 Agent · 独立模型配置"}));
+  assert.equal(screen.queryByRole("radio", {name: /GPT-5\.6|Gemini Pro/u}), null);
 
   await user.click(screen.getByRole("button", { name: "← 返回 Agent 项目" }));
   await user.click(screen.getByRole("button", { name: /选题策划 Agent/ }));
@@ -4856,6 +5433,7 @@ test("home chat and Agent A and B keep independent model selections", async () =
       .checked,
     true,
   );
+  await user.click(screen.getByRole("radio", { name: /Gemini Pro Google/ }));
 
   await user.click(screen.getByRole("button", { name: "AI 对话" }));
   assert.ok(
@@ -4865,11 +5443,8 @@ test("home chat and Agent A and B keep independent model selections", async () =
   await user.click(screen.getByRole("button", { name: "Agent 项目" }));
   await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
   await user.click(screen.getByRole("button", { name: "Agent 配置" }));
-  assert.equal(
-    (screen.getByRole("radio", { name: /Gemini Pro Google/ }) as HTMLInputElement)
-      .checked,
-    true,
-  );
+  assert.ok(screen.getByRole("heading", {name: "竞品洞察 Agent · 独立模型配置"}));
+  assert.equal(screen.queryByRole("radio", {name: /Gemini Pro Google/u}), null);
 });
 
 test("content matrix Agent collects intake details before marking diagnostic materials ready", async () => {
@@ -4966,23 +5541,6 @@ test("video account intake requires private assets before it can become ready", 
 });
 
 test("competitor insight Agent opens its platform-aware collection console", async () => {
-  const requestedUrls: string[] = [];
-  globalThis.fetch = (async () => new Response(JSON.stringify({
-    ok: true,
-    inputType: "作品链接",
-    excelPath: "/tmp/competitor-insight/douyin/work.xlsx",
-    outputDir: "/tmp/competitor-insight/douyin",
-  }), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  })) as typeof fetch;
-  const successfulFetch = globalThis.fetch;
-  globalThis.fetch = (async (input, init) => {
-    requestedUrls.push(String(input));
-    const recordResponse = competitorRecordTestResponse(String(input), init);
-    if (recordResponse) return recordResponse;
-    return successfulFetch(input, init);
-  }) as typeof fetch;
   const user = userEvent.setup({ document });
   render(<Home />);
 
@@ -4996,13 +5554,14 @@ test("competitor insight Agent opens its platform-aware collection console", asy
     screen.getByText("xiaohongshu-scraper").closest("article")?.textContent ?? "",
     /已接入/,
   );
-  await user.click(screen.getByRole("button", { name: "开始竞品采集" }));
+  await user.click(screen.getByRole("button", { name: "开始竞品分析" }));
 
   assert.equal(
     screen.getByRole("button", { name: "Agent 对话" }).getAttribute("aria-current"),
     "page",
   );
-  assert.ok(screen.getByRole("heading", { name: "粘贴链接，自动选择抓取 Skill" }));
+  assert.ok(screen.getByRole("heading", { name: "粘贴链接，自动抓取、分析并封装" }));
+  assert.ok(screen.getByText("抖音单视频会自动下载音频并在本机转写，转写文稿随分析报告一起进入成果包。"));
   assert.equal(screen.queryByRole("heading", { name: "企业矩阵基建诊断表" }), null);
   assert.equal(screen.queryByRole("button", { name: "开始矩阵诊断" }), null);
   await user.type(
@@ -5013,39 +5572,31 @@ test("competitor insight Agent opens its platform-aware collection console", asy
     screen.getByRole("status", { name: "竞品平台识别状态" }).textContent ?? "",
     /已识别抖音/,
   );
-  await user.click(screen.getByRole("button", { name: "抓取并分析" }));
-  await waitFor(() => {
-    assert.match(screen.getByRole("alert").textContent ?? "", /抓取完成/);
-  });
-  assert.ok(requestedUrls.includes("http://127.0.0.1:8765/scrape"));
-
   await user.clear(screen.getByLabelText("竞品主页或作品链接"));
   await user.type(
     screen.getByLabelText("竞品主页或作品链接"),
     "https://www.xiaohongshu.com/explore/test-note",
   );
-  await user.click(screen.getByRole("button", { name: "抓取并分析" }));
-  await waitFor(() => {
-    assert.ok(requestedUrls.includes("http://127.0.0.1:8766/scrape"));
-  });
+  assert.match(
+    screen.getByRole("status", {name: "竞品平台识别状态"}).textContent ?? "",
+    /已识别小红书/,
+  );
 });
 
-test("竞品抓取显示真实四阶段进度并先确认本地服务健康", async () => {
+test("竞品抓取显示真实五阶段进度并先确认本地服务健康", async () => {
   const scrapePending = deferredValue<Response>();
   const requestedUrls: string[] = [];
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
     requestedUrls.push(url);
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
     const recordResponse = competitorRecordTestResponse(url, init);
     if (recordResponse) return recordResponse;
-    if (url === "http://127.0.0.1:8766/health") {
-      return new Response(JSON.stringify({ ok: true, status: "ready" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }
     if (url === "http://127.0.0.1:8766/scrape") {
       return scrapePending.promise;
+    }
+    if (url.endsWith("/analyze-artifacts")) {
+      return Response.json(contentEvidenceReadyFixture());
     }
     throw new Error(`unexpected request: ${url}`);
   }) as typeof fetch;
@@ -5053,7 +5604,7 @@ test("竞品抓取显示真实四阶段进度并先确认本地服务健康", as
   render(<Home />);
 
   await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
-  await user.click(screen.getByRole("button", { name: "开始竞品采集" }));
+  await user.click(screen.getByRole("button", { name: "开始竞品分析" }));
   await user.type(
     screen.getByLabelText("竞品主页或作品链接"),
     "https://www.xiaohongshu.com/explore/test-note",
@@ -5068,27 +5619,27 @@ test("竞品抓取显示真实四阶段进度并先确认本地服务健康", as
       "http://127.0.0.1:8766/scrape",
     ]);
   });
-  assert.equal(requestedUrls[0], "http://127.0.0.1:8768/project-tasks");
-  assert.match(
-    screen.getByRole("status", { name: "竞品抓取进度" }).textContent ?? "",
-    /第 3\/4 步.*正在抓取平台数据/,
+  assert.equal(
+    requestedUrls.find((url) => !url.endsWith("/health")),
+    "http://127.0.0.1:8768/project-tasks",
   );
-  assert.ok(screen.getByRole("listitem", { name: "抓取平台数据（进行中）" }));
+  assert.match(
+    screen.getByRole("status", { name: "竞品分析进度" }).textContent ?? "",
+    /第 2\/5 步.*本地抓取 Skill/,
+  );
+  assert.ok(screen.getByRole("listitem", { name: "调用抓取 Skill（进行中）" }));
 
-  scrapePending.resolve(new Response(JSON.stringify({
-    ok: true,
-    outputDir: "/tmp/competitor-insight/xiaohongshu",
-  }), {
+  scrapePending.resolve(new Response(JSON.stringify(scrapeReadyFixture("xiaohongshu", "content")), {
     status: 200,
     headers: { "content-type": "application/json" },
   }));
   await waitFor(() => {
     assert.match(
-      screen.getByRole("status", { name: "竞品抓取进度" }).textContent ?? "",
-      /第 4\/4 步.*抓取结果已保存/,
+      screen.getByRole("status", { name: "竞品分析进度" }).textContent ?? "",
+      /第 4\/5 步.*证据包已生成，等待配置模型/,
     );
   });
-  assert.ok(screen.getByRole("listitem", { name: "保存抓取结果（已完成）" }));
+  assert.ok(screen.getByRole("listitem", { name: "生成洞察报告（进行中）" }));
 });
 
 test("竞品抓取把浏览器无法访问本机服务与抓取失败分开提示", async () => {
@@ -5096,6 +5647,9 @@ test("竞品抓取把浏览器无法访问本机服务与抓取失败分开提�
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
     requestedUrls.push(url);
+    if (url === "http://127.0.0.1:8768/health") {
+      return competitorHealthResponse(url);
+    }
     const recordResponse = competitorRecordTestResponse(url, init);
     if (recordResponse) return recordResponse;
     throw new TypeError("Failed to fetch");
@@ -5104,7 +5658,7 @@ test("竞品抓取把浏览器无法访问本机服务与抓取失败分开提�
   render(<Home />);
 
   await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
-  await user.click(screen.getByRole("button", { name: "开始竞品采集" }));
+  await user.click(screen.getByRole("button", { name: "开始竞品分析" }));
   await user.type(
     screen.getByLabelText("竞品主页或作品链接"),
     "https://www.xiaohongshu.com/explore/test-note",
@@ -5114,7 +5668,7 @@ test("竞品抓取把浏览器无法访问本机服务与抓取失败分开提�
   await waitFor(() => {
     assert.match(
       screen.getByRole("alert").textContent ?? "",
-      /浏览器未能访问本机采集服务.*本地网络访问/,
+      /本地抓取服务未就绪/,
     );
   });
   assert.deepEqual(
@@ -5122,33 +5676,302 @@ test("竞品抓取把浏览器无法访问本机服务与抓取失败分开提�
     ["http://127.0.0.1:8766/health"],
   );
   assert.match(
-    screen.getByRole("status", { name: "竞品抓取进度" }).textContent ?? "",
-    /第 2\/4 步.*连接失败/,
+    screen.getByRole("status", { name: "竞品分析进度" }).textContent ?? "",
+    /第 2\/5 步.*本地抓取服务未就绪/,
   );
 });
 
 const persistedCompetitorTask = (
-  status: "waiting" | "running" | "completed" | "failed" = "waiting",
+  status: "waiting" | "running" | "completed" | "failed" | "stopped" = "waiting",
   progress = status === "completed" ? 100 : 10,
-): ProjectTask => ({
-  id: "competitor-20260801-ui-a1",
+  classification: {
+    inputKind?: "unknown" | "account" | "content";
+    category?: "douyin-account" | "douyin-content" | "xhs-account" | "xhs-note" | null;
+    bundleId?: string | null;
+  } = {},
+  taskId = "competitor-20260801-ui-a1",
+): ProjectTask => {
+  const platformId = classification.category?.startsWith("douyin")
+    ? "douyin"
+    : "xiaohongshu";
+  return ({
+  id: taskId,
   agentId: "competitor-insight",
   title: "小红书作品抓取",
-  platformId: "xiaohongshu",
-  platformLabel: "小红书",
-  skillId: "xiaohongshu-scraper",
-  sourceUrl: "https://www.xiaohongshu.com/explore/test-note",
+  platformId,
+  platformLabel: platformId === "douyin" ? "抖音" : "小红书",
+  skillId: platformId === "douyin" ? "douyin-scraper" : "xiaohongshu-scraper",
+  sourceUrl: platformId === "douyin"
+    ? "https://www.douyin.com/user/MS4wLjABAAAA-test"
+    : "https://www.xiaohongshu.com/explore/test-note",
   status,
   progress,
-  currentStep: status === "completed" ? "成果已登记" : "平台已识别，等待连接",
+  currentStep: status === "completed"
+    ? "成果已登记"
+    : status === "stopped"
+      ? "用户已停止报告生成"
+      : "平台已识别，等待连接",
   model: "xiaohongshu-scraper",
   createdAt: "2026-08-01T01:00:00.000Z",
   updatedAt: "2026-08-01T01:01:00.000Z",
   completedAt: status === "completed" ? "2026-08-01T01:01:00.000Z" : null,
-  stoppedAt: null,
+  stoppedAt: status === "stopped" ? "2026-08-01T01:01:00.000Z" : null,
   errorSummary: status === "failed" ? "抓取失败" : null,
   artifactIds: status === "completed" ? ["artifact-0000000000000001"] : [],
-});
+  inputKind: classification.inputKind ?? "unknown",
+  category: classification.category ?? null,
+  bundleId: classification.bundleId ?? null,
+  });
+};
+
+function competitorHealthResponse(url: string): Response {
+  if (url.includes(":8768/")) {
+    return Response.json({
+      ok: true,
+      stage: "healthy",
+      service: "competitor-insight-report",
+    });
+  }
+  const platformId = url.includes(":8766/") ? "xiaohongshu" : "douyin";
+  return Response.json({
+    ok: true,
+    status: "ready",
+    service: platformId === "douyin" ? "douyin-scraper" : "xiaohongshu-scraper",
+    outputDir: `/controlled/outputs/competitor-insight/${platformId}`,
+  });
+}
+
+function withCompetitorHealth(
+  handler: (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ) => Response | Promise<Response>,
+): typeof fetch {
+  return (async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
+    return handler(input, init);
+  }) as typeof fetch;
+}
+
+function scrapeReadyFixture(
+  platformId: "douyin" | "xiaohongshu",
+  inputKind: "account" | "content",
+  taskId = "competitor-20260801-ui-a1",
+) {
+  const outputDir = `/controlled/outputs/competitor-insight/${platformId}/${taskId}`;
+  const dataPath = `${outputDir}/structured-data.json`;
+  const excelPath = inputKind === "account" ? `${outputDir}/account.xlsx` : null;
+  const markdownPath = inputKind === "content" ? `${outputDir}/content.md` : null;
+  return {
+    platformId,
+    skillId: platformId === "douyin" ? "douyin-scraper" : "xiaohongshu-scraper",
+    inputKind,
+    category: platformId === "douyin"
+      ? inputKind === "account" ? "douyin-account" : "douyin-content"
+      : inputKind === "account" ? "xhs-account" : "xhs-note",
+    outputDir,
+    dataPath,
+    excelPath,
+    markdownPath,
+    imageDirectory: null,
+    explicitPaths: [dataPath, ...[excelPath, markdownPath].filter((path): path is string => Boolean(path))],
+    subjectName: inputKind === "account" ? "测试账号" : "测试作者",
+    itemCount: 1,
+  } as const;
+}
+
+function readyBundleSnapshot(
+  platformId: "douyin" | "xiaohongshu",
+  inputKind: "account" | "content",
+  outputDir: string,
+  reportPath: string,
+  taskId = "competitor-20260801-ui-a1",
+) {
+  const category = platformId === "douyin"
+    ? inputKind === "account" ? "douyin-account" : "douyin-content"
+    : inputKind === "account" ? "xhs-account" : "xhs-note";
+  const bundleId = "bundle-0000000000000001";
+  const artifact = {
+    id: "artifact-0000000000000001",
+    agentId: "competitor-insight",
+    taskId,
+    kind: "markdown",
+    filename: reportPath.split("/").at(-1) ?? "report.md",
+    absolutePath: reportPath,
+    sizeBytes: 128,
+    completedAt: "2026-08-01T01:02:00.000Z",
+    previewable: true,
+    exists: true,
+    isDirectory: false,
+    markdown: null,
+  };
+  const task = persistedCompetitorTask("completed", 100, {
+    inputKind,
+    category,
+    bundleId,
+  }, taskId);
+  return {
+    ok: true,
+    tasks: [task],
+    artifacts: [artifact],
+    bundles: [{
+      id: bundleId,
+      agentId: "competitor-insight",
+      taskId: task.id,
+      platformId,
+      inputKind,
+      category,
+      subjectName: inputKind === "account" ? "测试账号" : "测试作者",
+      itemCount: 1,
+      status: "ready",
+      rootDirectory: outputDir,
+      primaryReportPath: reportPath,
+      manifestPath: `${outputDir}/${bundleId}.manifest.json`,
+      archivePath: `${outputDir}/${bundleId}.zip`,
+      artifactIds: [artifact.id],
+      createdAt: "2026-08-01T01:01:00.000Z",
+      updatedAt: "2026-08-01T01:02:00.000Z",
+    }],
+  };
+}
+
+function competitorWorkspaceSnapshot(
+  currentBundleId = "bundle-00000000000000a1",
+) {
+  const currentTaskId = "competitor-20260801-ui-a1";
+  const historyTaskId = "competitor-20260801-bundle-history";
+  const currentRoot = `/controlled/outputs/competitor-insight/xiaohongshu/${currentTaskId}`;
+  const historyRoot = `/controlled/outputs/competitor-insight/douyin/${historyTaskId}`;
+  const tasks = [
+    {
+      ...persistedCompetitorTask("completed", 100, {
+        inputKind: "content",
+        category: "xhs-note",
+        bundleId: currentBundleId,
+      }),
+      id: currentTaskId,
+      title: "小红书笔记分析成果包",
+      sourceUrl: "https://www.xiaohongshu.com/explore/test-note?token=query-secret&source=private",
+      artifactIds: [
+        "artifact-00000000000000a1",
+        "artifact-00000000000000a2",
+        "artifact-00000000000000a3",
+      ],
+    },
+    {
+      ...persistedCompetitorTask("completed", 100, {
+        inputKind: "account",
+        category: "douyin-account",
+        bundleId: "bundle-00000000000000b1",
+      }),
+      id: historyTaskId,
+      title: "历史抖音账号成果包",
+      platformId: "douyin",
+      platformLabel: "抖音",
+      skillId: "douyin-scraper",
+      sourceUrl: "https://www.douyin.com/user/history?token=history-secret",
+      model: "douyin-scraper",
+      artifactIds: ["artifact-00000000000000b1"],
+    },
+  ];
+  const artifacts = [
+    {
+      id: "artifact-00000000000000a1", agentId: "competitor-insight",
+      taskId: currentTaskId, kind: "markdown", filename: "current-report.md",
+      absolutePath: `${currentRoot}/current-report.md`, sizeBytes: 512,
+      completedAt: "2026-08-01T02:02:00.000Z", previewable: true,
+      exists: true, isDirectory: false, markdown: null,
+    },
+    {
+      id: "artifact-00000000000000a2", agentId: "competitor-insight",
+      taskId: currentTaskId, kind: "excel", filename: "原始数据.xlsx",
+      absolutePath: `${currentRoot}/原始数据.xlsx`, sizeBytes: 2048,
+      completedAt: "2026-08-01T02:02:00.000Z", previewable: false,
+      exists: true, isDirectory: false, markdown: null,
+    },
+    {
+      id: "artifact-00000000000000a3", agentId: "competitor-insight",
+      taskId: currentTaskId, kind: "json", filename: "structured-data.json",
+      absolutePath: `${currentRoot}/structured-data.json`, sizeBytes: 1024,
+      completedAt: "2026-08-01T02:02:00.000Z", previewable: false,
+      exists: true, isDirectory: false, markdown: null,
+    },
+    {
+      id: "artifact-00000000000000b1", agentId: "competitor-insight",
+      taskId: historyTaskId, kind: "markdown", filename: "history-report.md",
+      absolutePath: `${historyRoot}/history-report.md`, sizeBytes: 256,
+      completedAt: "2026-08-01T01:02:00.000Z", previewable: true,
+      exists: true, isDirectory: false, markdown: null,
+    },
+  ];
+  return {
+    ok: true,
+    tasks,
+    artifacts,
+    bundles: [
+      {
+        id: currentBundleId, agentId: "competitor-insight", taskId: currentTaskId,
+        platformId: "xiaohongshu", inputKind: "content", category: "xhs-note",
+        subjectName: "测试作者", itemCount: 1, status: "ready",
+        rootDirectory: currentRoot, primaryReportPath: `${currentRoot}/current-report.md`,
+        manifestPath: `${currentRoot}/${currentBundleId}.manifest.json`,
+        archivePath: `${currentRoot}/${currentBundleId}.zip`,
+        artifactIds: artifacts.slice(0, 3).map((artifact) => artifact.id),
+        createdAt: "2026-08-01T02:01:00.000Z", updatedAt: "2026-08-01T02:02:00.000Z",
+      },
+      {
+        id: "bundle-00000000000000b1", agentId: "competitor-insight", taskId: historyTaskId,
+        platformId: "douyin", inputKind: "account", category: "douyin-account",
+        subjectName: "历史账号", itemCount: 12, status: "ready",
+        rootDirectory: historyRoot, primaryReportPath: `${historyRoot}/history-report.md`,
+        manifestPath: `${historyRoot}/bundle-00000000000000b1.manifest.json`,
+        archivePath: `${historyRoot}/bundle-00000000000000b1.zip`,
+        artifactIds: ["artifact-00000000000000b1"],
+        createdAt: "2026-08-01T01:01:00.000Z", updatedAt: "2026-08-01T01:02:00.000Z",
+      },
+    ],
+  };
+}
+
+function installCompletedWorkspaceFlow(
+  finalizedSnapshot: ReturnType<typeof competitorWorkspaceSnapshot>,
+  refreshedSnapshot = finalizedSnapshot,
+) {
+  const scrape = scrapeReadyFixture("xiaohongshu", "content", finalizedSnapshot.tasks[0].id);
+  const report = {
+    ...reportReadyFixture(),
+    filename: "current-report.md",
+    reportPath: finalizedSnapshot.artifacts[0].absolutePath,
+  };
+  let recordLoads = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    if (url.includes("/project-records") && (init?.method ?? "GET") === "GET") {
+      recordLoads += 1;
+      return Response.json(refreshedSnapshot);
+    }
+    const recordResponse = competitorRecordTestResponse(url, init);
+    if (recordResponse) return recordResponse;
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
+    if (url.endsWith("/scrape")) return Response.json(scrape);
+    if (url.endsWith("/analyze-artifacts")) return Response.json(contentEvidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      return Response.json({ok: true, batch: competitorBatchFixture("content")});
+    }
+    if (url.endsWith("/validate-section")) {
+      return Response.json({
+        ok: true, stage: "section_validated", evidenceId: "fedcba9876543210",
+        batchId: "content", batch: body.batch,
+      });
+    }
+    if (url.endsWith("/assemble-report")) return Response.json(report);
+    if (url.endsWith("/bundle")) return Response.json(finalizedSnapshot);
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  return {getRecordLoads: () => recordLoads};
+}
 
 function competitorRecordTestResponse(
   url: string,
@@ -5164,9 +5987,16 @@ function competitorRecordTestResponse(
     && method === "PATCH"
   ) {
     const status = (body.status ?? "running") as "running" | "completed" | "failed";
+    const inputKind = body.inputKind === "account" || body.inputKind === "content"
+      ? body.inputKind
+      : "unknown";
+    const category = typeof body.category === "string" ? body.category : null;
     return Response.json({
       ok: true,
-      task: persistedCompetitorTask(status, Number(body.progress ?? 10)),
+      task: persistedCompetitorTask(status, Number(body.progress ?? 10), {
+        inputKind,
+        category: category as "douyin-account" | "douyin-content" | "xhs-account" | "xhs-note" | null,
+      }),
     });
   }
   if (url.endsWith("/artifacts") && method === "POST") {
@@ -5178,77 +6008,6 @@ function competitorRecordTestResponse(
   }
   return null;
 }
-
-test("小红书抓取先创建持久任务，登记成果后通知工作区跳转", async () => {
-  const calls: Array<{url: string; method: string; body: Record<string, unknown> | null}> = [];
-  const completedTaskIds: string[] = [];
-  globalThis.fetch = (async (input, init) => {
-    const url = String(input);
-    const method = init?.method ?? "GET";
-    const body = init?.body ? JSON.parse(String(init.body)) : null;
-    calls.push({url, method, body});
-    if (url.endsWith("/project-tasks") && method === "POST") {
-      return Response.json({ok: true, task: persistedCompetitorTask()});
-    }
-    if (url.includes("/project-tasks/competitor-20260801-ui-a1") && method === "PATCH") {
-      const nextStatus = body?.status as "running" | "completed" | "failed";
-      return Response.json({
-        ok: true,
-        task: persistedCompetitorTask(nextStatus, Number(body?.progress ?? 10)),
-      });
-    }
-    if (url.endsWith("/health")) return Response.json({ok: true, status: "ready"});
-    if (url.endsWith("/scrape")) {
-      return Response.json({
-        ok: true,
-        outputDir: "/controlled/outputs/competitor-insight/xiaohongshu/run-a",
-      });
-    }
-    if (url.endsWith("/artifacts")) {
-      return Response.json({
-        ok: true,
-        tasks: [persistedCompetitorTask("running", 90)],
-        artifacts: [],
-      });
-    }
-    throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
-  const user = userEvent.setup({document});
-  render(
-    <ModelRegistryProvider>
-      <CompetitorInsightPanel
-        mode="run"
-        onPreview={() => undefined}
-        onTaskCompleted={(taskId) => completedTaskIds.push(taskId)}
-      />
-    </ModelRegistryProvider>,
-  );
-
-  await user.type(
-    screen.getByLabelText("竞品主页或作品链接"),
-    "https://www.xiaohongshu.com/explore/test-note?xsec_token=secret",
-  );
-  await user.click(screen.getByRole("button", {name: "抓取并分析"}));
-
-  await waitFor(() => {
-    assert.deepEqual(completedTaskIds, ["competitor-20260801-ui-a1"]);
-  });
-  assert.equal(calls[0].url, "http://127.0.0.1:8768/project-tasks");
-  assert.equal(calls[0].body?.sourceUrl, "https://www.xiaohongshu.com/explore/test-note?xsec_token=secret");
-  assert.deepEqual(
-    calls.map(({url, method}) => `${method} ${new URL(url).pathname}`),
-    [
-      "POST /project-tasks",
-      "PATCH /project-tasks/competitor-20260801-ui-a1",
-      "GET /health",
-      "PATCH /project-tasks/competitor-20260801-ui-a1",
-      "POST /scrape",
-      "PATCH /project-tasks/competitor-20260801-ui-a1",
-      "POST /project-tasks/competitor-20260801-ui-a1/artifacts",
-      "PATCH /project-tasks/competitor-20260801-ui-a1",
-    ],
-  );
-});
 
 test("抓取失败会更新持久任务且不会通知成果跳转", async () => {
   const patches: Record<string, unknown>[] = [];
@@ -5265,7 +6024,7 @@ test("抓取失败会更新持久任务且不会通知成果跳转", async () =>
       const nextStatus = body.status as "running" | "failed";
       return Response.json({ok: true, task: persistedCompetitorTask(nextStatus)});
     }
-    if (url.endsWith("/health")) return Response.json({ok: true});
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
     if (url.endsWith("/scrape")) {
       return Response.json({ok: false, message: "平台采集失败"}, {status: 502});
     }
@@ -5288,69 +6047,10 @@ test("抓取失败会更新持久任务且不会通知成果跳转", async () =>
   );
   await user.click(screen.getByRole("button", {name: "抓取并分析"}));
 
-  await waitFor(() => assert.match(screen.getByRole("alert").textContent ?? "", /平台采集失败/));
+  await waitFor(() => assert.match(screen.getByRole("alert").textContent ?? "", /抓取任务未完成/));
   assert.deepEqual(completedTaskIds, []);
   assert.equal(patches.at(-1)?.status, "failed");
-  assert.equal(patches.at(-1)?.errorSummary, "平台采集失败");
-});
-
-test("抓取成功后工作区自动切换成果文件并聚焦本次任务", async () => {
-  const artifact = {
-    id: "artifact-0000000000000001",
-    agentId: "competitor-insight",
-    taskId: "competitor-20260801-ui-a1",
-    kind: "excel",
-    name: "本次抓取结果.xlsx",
-    filename: "本次抓取结果.xlsx",
-    absolutePath: "/controlled/outputs/competitor-insight/xiaohongshu/本次抓取结果.xlsx",
-    sizeBytes: 2048,
-    createdAt: "2026-08-01T01:01:00.000Z",
-    completedAt: "2026-08-01T01:01:00.000Z",
-    previewable: false,
-    exists: true,
-    isDirectory: false,
-    markdown: null,
-  };
-  globalThis.fetch = (async (input, init) => {
-    const url = String(input);
-    if (url.includes("/project-records?")) {
-      return Response.json({
-        ok: true,
-        tasks: [persistedCompetitorTask("completed", 100)],
-        artifacts: [artifact],
-      });
-    }
-    const recordResponse = competitorRecordTestResponse(url, init);
-    if (recordResponse) return recordResponse;
-    if (url.endsWith("/health")) return Response.json({ok: true, status: "ready"});
-    if (url.endsWith("/scrape")) {
-      return Response.json({
-        ok: true,
-        outputDir: "/controlled/outputs/competitor-insight/xiaohongshu/run-a",
-      });
-    }
-    throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
-  const user = userEvent.setup({document});
-  render(<Home />);
-
-  await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
-  await user.click(screen.getByRole("button", {name: "开始竞品采集"}));
-  await user.type(
-    screen.getByLabelText("竞品主页或作品链接"),
-    "https://www.xiaohongshu.com/explore/test-note",
-  );
-  await user.click(screen.getByRole("button", {name: "抓取并分析"}));
-
-  await waitFor(() => {
-    assert.equal(
-      screen.getByRole("button", {name: "成果文件"}).getAttribute("aria-current"),
-      "page",
-    );
-  });
-  assert.ok(screen.getByRole("heading", {name: "成果文件"}));
-  assert.ok(screen.getByText("本次抓取结果.xlsx"));
-  assert.equal(screen.queryByText("OTC竞品内容机会盘点.md"), null);
+  assert.equal(patches.at(-1)?.errorSummary, "抓取任务未完成，请检查链接后重试。");
 });
 
 type CompetitorReportRequest = {
@@ -5360,25 +6060,15 @@ type CompetitorReportRequest = {
 };
 
 function installCompetitorReportModel() {
-  installConnectedChatModels([
-    {
-      id: "competitor-report-model",
-      provider: "OpenAI",
-      displayName: "竞品报告模型",
-      modelId: "gpt-competitor-report",
-      baseUrl: "https://api.openai.com/v1",
-      apiKey: "sk-competitor-report-secret",
-      revision: "revision-competitor-report",
-    },
-  ]);
-  window.localStorage.setItem(
-    "ai-workbench:agent-model-selections:v1",
-    JSON.stringify({ "competitor-insight": "competitor-report-model" }),
-  );
+  configureCompetitorModelSession({
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "sk-competitor-report-secret",
+    model: "gpt-competitor-report",
+  }, "revision-competitor-report");
 }
 
 function competitorBatchFixture(
-  batchId: "strategy" | "performance" | "execution",
+  batchId: "strategy" | "performance" | "execution" | "content",
 ) {
   const empty = {
     claims: [],
@@ -5387,6 +6077,39 @@ function competitorBatchFixture(
     conversionItems: [],
     executionDays: [],
   };
+  if (batchId === "content") {
+    return {
+      batchId,
+      claims: ["content-overview", "content-structure", "interaction", "conversion"].map((section) => ({
+        section,
+        statement: "仅基于当前公开作品的待验证判断",
+        strength: "hypothesis",
+        evidenceIds: ["XHS-E0001"],
+        rationale: "公开证据有限",
+        verificationPlan: "补充样本后人工复核",
+        complianceNotes: ["不承诺疗效"],
+      })),
+      topicDirections: Array.from({ length: 3 }, (_, index) => ({
+        title: `内容选题 ${index + 1}`,
+        angle: "公开证据角度",
+        evidenceIds: ["XHS-E0001"],
+        complianceNotes: ["人工复核"],
+        strength: "hypothesis",
+        verificationPlan: "扩大样本验证",
+      })),
+      filmingTemplates: [{
+        name: "内容拍法",
+        hook: "公开数据开场",
+        structure: ["证据", "判断", "边界"],
+        evidenceIds: ["XHS-E0001"],
+        complianceNotes: ["人工复核"],
+        strength: "hypothesis",
+        verificationPlan: "小流量测试",
+      }],
+      conversionItems: [],
+      executionDays: [],
+    };
+  }
   if (batchId !== "execution") return { batchId, ...empty };
   return {
     batchId,
@@ -5414,7 +6137,9 @@ function competitorBatchFixture(
   };
 }
 
-function evidenceReadyFixture() {
+function evidenceReadyFixture(
+  outputDir = "/controlled/outputs/competitor-insight/douyin/competitor-20260801-ui-a1",
+) {
   const evidence = [{
     evidenceId: "DY-E0001",
     title: "第一条作品",
@@ -5430,6 +6155,12 @@ function evidenceReadyFixture() {
     ok: true,
     stage: "evidence_ready",
     evidenceId: "0123456789abcdef",
+    platformId: "douyin",
+    inputKind: "account",
+    reportType: "douyin-account",
+    outputDir,
+    subjectName: "测试账号",
+    itemCount: 1,
     account: {
       nickname: "测试账号",
       followers: 100,
@@ -5441,6 +6172,8 @@ function evidenceReadyFixture() {
     },
     batchInputs: {
       strategy: {
+        batchId: "strategy",
+        allowedEvidenceIds: ["DY-E0001"],
         account: {
           nickname: "测试账号",
           followers: 100,
@@ -5451,6 +6184,8 @@ function evidenceReadyFixture() {
         evidence,
       },
       performance: {
+        batchId: "performance",
+        allowedEvidenceIds: ["DY-E0001"],
         availability: { comments: true, collects: true, shares: true },
         metrics: {
           workCount: 1,
@@ -5474,6 +6209,8 @@ function evidenceReadyFixture() {
         evidence,
       },
       execution: {
+        batchId: "execution",
+        allowedEvidenceIds: ["DY-E0001"],
         availability: { comments: true, collects: true, shares: true },
         rankings: {
           overall: ranking,
@@ -5482,6 +6219,40 @@ function evidenceReadyFixture() {
           comment: ranking,
         },
         evidence,
+      },
+    },
+  };
+}
+
+function contentEvidenceReadyFixture() {
+  return {
+    ok: true,
+    stage: "evidence_ready",
+    evidenceId: "fedcba9876543210",
+    platformId: "xiaohongshu",
+    inputKind: "content",
+    reportType: "xhs-note",
+    outputDir: "/controlled/outputs/competitor-insight/xiaohongshu/competitor-20260801-ui-a1",
+    subjectName: "测试作者",
+    itemCount: 1,
+    account: { nickname: "测试作者" },
+    completeness: { missingFields: [], warnings: ["单篇样本仅供趋势参考"] },
+    batchInputs: {
+      content: {
+        batchId: "content",
+        allowedEvidenceIds: ["XHS-E0001"],
+        author: { nickname: "测试作者" },
+        content: { title: "公开作品", body: "已抓取文本", transcript: "" },
+        evidence: [{
+          evidenceId: "XHS-E0001",
+          title: "公开作品",
+          likes: 1,
+          comments: 1,
+          collects: 1,
+          shares: 1,
+          totalInteractions: 4,
+          publishedAt: "2026-07-01",
+        }],
       },
     },
   };
@@ -5499,75 +6270,127 @@ function reportReadyFixture() {
   };
 }
 
+const ACCOUNT_ANALYSIS_REQUEST: CompetitorAnalysisRequest = {
+  requestId: 1,
+  taskId: "competitor-20260801-ui-a1",
+  platformId: "douyin",
+  inputKind: "account",
+  outputDir: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-ui-a1",
+  dataPath: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-ui-a1/structured-data.json",
+  excelPath: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-ui-a1/account.xlsx",
+};
+
+function CompetitorAnalysisRequestHarness({
+  onStopped,
+}: {
+  onStopped?: (message: string) => Promise<boolean>;
+} = {}) {
+  const [analysisRequest, setAnalysisRequest] =
+    useState<CompetitorAnalysisRequest | null>(null);
+  const [completedReportPath, setCompletedReportPath] = useState("");
+  return (
+    <>
+      <button
+        onClick={() => setAnalysisRequest(ACCOUNT_ANALYSIS_REQUEST)}
+        type="button"
+      >
+        开始报告控制器测试
+      </button>
+      {completedReportPath ? <output aria-label="报告控制器完成">{completedReportPath}</output> : null}
+      <CompetitorReportRunner
+        analysisRequest={analysisRequest}
+        onCompleted={(report) => setCompletedReportPath(report.reportPath)}
+        onStopped={onStopped}
+      />
+    </>
+  );
+}
+
+async function openCompetitorAnalysisRequestRunner(
+  onStopped?: (message: string) => Promise<boolean>,
+) {
+  const user = userEvent.setup({document});
+  render(
+    <ModelRegistryProvider>
+      <CompetitorAnalysisRequestHarness onStopped={onStopped} />
+    </ModelRegistryProvider>,
+  );
+  await user.click(screen.getByRole("button", {name: "开始报告控制器测试"}));
+  return user;
+}
+
 async function openCompetitorReportRunner() {
   const user = userEvent.setup({ document });
   render(<Home />);
   await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
-  await user.click(screen.getByRole("button", { name: "开始竞品采集" }));
+  await user.click(screen.getByRole("button", { name: "开始竞品分析" }));
   return user;
 }
 
-test("竞品洞察报告显示双入口且拒绝非 xlsx 文件而不请求服务", async () => {
-  let requestCount = 0;
-  globalThis.fetch = (async () => {
-    requestCount += 1;
-    return Response.json({ ok: true });
+async function runAccountLinkWithoutModel() {
+  const calls: CompetitorReportRequest[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({url, init, body});
+    const recordResponse = competitorRecordTestResponse(url, init);
+    if (recordResponse) return recordResponse;
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
+    if (url.endsWith("/scrape")) {
+      return Response.json(scrapeReadyFixture("douyin", "account"));
+    }
+    if (url.endsWith("/analyze-artifacts")) {
+      return Response.json(evidenceReadyFixture());
+    }
+    throw new Error(`unexpected request: ${url}`);
   }) as typeof fetch;
+  const user = await openCompetitorReportRunner();
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://www.douyin.com/user/MS4wLjABAAAA-test",
+  );
+  await user.click(screen.getByRole("button", {name: "抓取并分析"}));
+  return calls;
+}
+
+test("竞品洞察只有链接入口且完整显示五阶段", async () => {
   await openCompetitorReportRunner();
 
+  assert.equal(screen.queryByLabelText("选择已有 Excel 文件"), null);
+  assert.equal(screen.queryByText("分析已有 Excel"), null);
   assert.ok(screen.getByRole("button", { name: "抓取并分析" }));
-  assert.ok(screen.getByText("分析已有 Excel"));
-  const input = screen.getByLabelText("选择已有 Excel 文件");
-  fireEvent.change(input, {
-    target: { files: [new File(["not xlsx"], "account.csv", { type: "text/csv" })] },
-  });
-
-  assert.match(screen.getByRole("alert").textContent ?? "", /仅支持 \.xlsx/);
-  assert.equal(requestCount, 0);
-
-  const oversized = new File(["small fixture"], "oversized.xlsx");
-  Object.defineProperty(oversized, "size", {
-    configurable: true,
-    value: 50 * 1024 * 1024 + 1,
-  });
-  fireEvent.change(input, { target: { files: [oversized] } });
-  assert.match(screen.getByRole("alert").textContent ?? "", /50 MB/);
-  assert.equal(requestCount, 0);
-});
-
-test("竞品洞察报告客户端跨编码分块仍无损上传 Excel", async () => {
-  const bytes = new Uint8Array(256 * 1024 + 11);
-  for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = index % 251;
-  }
-  let encoded = "";
-  globalThis.fetch = (async (_input, init) => {
-    assert.equal(init?.credentials, "omit");
-    assert.equal(
-      new Headers(init?.headers).get("content-type"),
-      "application/json",
-    );
-    const body = JSON.parse(String(init?.body)) as {
-      filename: string;
-      contentBase64: string;
-    };
-    assert.equal(body.filename, "chunk-boundary.xlsx");
-    encoded = body.contentBase64;
-    return Response.json(evidenceReadyFixture());
-  }) as typeof fetch;
-
-  await analyzeReportUpload(
-    new File([bytes], "chunk-boundary.xlsx"),
-    new AbortController().signal,
+  const workflow = screen.getByRole("list", {name: "竞品洞察处理流程"});
+  assert.equal(
+    within(workflow).getAllByRole("listitem")
+      .filter((item) => /[（(]/u.test(item.getAttribute("aria-label") ?? "")).length,
+    5,
   );
-
   assert.deepEqual(
-    new Uint8Array(Buffer.from(encoded, "base64")),
-    bytes,
+    within(workflow).getAllByRole("listitem").map((item) => item.textContent?.replace(/^\d/u, "")),
+    ["识别平台", "调用抓取 Skill", "整理账号数据", "生成洞察报告", "整理成果包"],
+  );
+  assert.doesNotMatch(document.body.textContent ?? "", /第二入口|50 MB/u);
+
+  const styles = readFileSync(
+    new URL("../app/globals.css", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    styles,
+    /\.competitor-workflow\s*\{[^}]*grid-template-columns:\s*repeat\(5,\s*minmax\(0,\s*1fr\)\)/u,
+  );
+  assert.match(
+    styles,
+    /\.competitor-workflow li\s*\{[^}]*min-width:\s*0;[^}]*overflow-wrap:\s*anywhere;/u,
+  );
+  const narrowStyles = styles.slice(styles.indexOf("@media (max-width: 720px)"));
+  assert.match(
+    narrowStyles,
+    /\.competitor-workflow,[^}]*\{\s*grid-template-columns:\s*1fr;/u,
   );
 });
 
-test("竞品洞察抓取并分析仅对抖音账号 Excel 自动生成证据包", async () => {
+test("竞品洞察抓取并分析使用权威链接类型生成证据包", async () => {
   const requests: CompetitorReportRequest[] = [];
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
@@ -5576,19 +6399,12 @@ test("竞品洞察抓取并分析仅对抖音账号 Excel 自动生成证据包"
     const recordResponse = competitorRecordTestResponse(url, init);
     if (recordResponse) return recordResponse;
     if (url.endsWith("/health")) {
-      return Response.json({ ok: true, status: "ready" });
+      return competitorHealthResponse(url);
     }
     if (url.endsWith("/scrape")) {
-      return Response.json({
-        ok: true,
-        platform: "douyin",
-        skillId: "douyin-scraper",
-        inputType: "账号链接/账号标识",
-        excelPath: "/controlled/douyin/account.xlsx",
-        outputDir: "/controlled/douyin",
-      });
+      return Response.json(scrapeReadyFixture("douyin", "account"));
     }
-    if (url.endsWith("/analyze-path")) {
+    if (url.endsWith("/analyze-artifacts")) {
       return Response.json(evidenceReadyFixture());
     }
     throw new Error(`unexpected request: ${url}`);
@@ -5607,63 +6423,281 @@ test("竞品洞察抓取并分析仅对抖音账号 Excel 自动生成证据包"
   assert.deepEqual(
     requests
       .map(({ url }) => url)
-      .filter((url) => url.includes(":8765/") || url.endsWith("/analyze-path")),
+      .filter((url) => url.includes(":8765/") || url.endsWith("/analyze-artifacts")),
     [
       "http://127.0.0.1:8765/health",
       "http://127.0.0.1:8765/scrape",
-      "http://127.0.0.1:8768/analyze-path",
+      "http://127.0.0.1:8768/analyze-artifacts",
     ],
   );
-  const analyzePathRequest = requests.find(({url}) => url.endsWith("/analyze-path"));
-  assert.deepEqual(analyzePathRequest?.body, {
-    path: "/controlled/douyin/account.xlsx",
+  const analyzeRequest = requests.find(({url}) => url.endsWith("/analyze-artifacts"));
+  assert.deepEqual(analyzeRequest?.body, {
+    taskId: ACCOUNT_ANALYSIS_REQUEST.taskId,
+    platformId: ACCOUNT_ANALYSIS_REQUEST.platformId,
+    inputKind: ACCOUNT_ANALYSIS_REQUEST.inputKind,
+    outputDir: ACCOUNT_ANALYSIS_REQUEST.outputDir,
+    dataPath: ACCOUNT_ANALYSIS_REQUEST.dataPath,
+    excelPath: ACCOUNT_ANALYSIS_REQUEST.excelPath,
   });
-  assert.equal(analyzePathRequest?.init?.credentials, "omit");
+  assert.equal(analyzeRequest?.init?.credentials, "omit");
   assert.match(document.body.textContent ?? "", /证据包已生成/);
 });
 
-test("竞品洞察抓取并分析对抖音作品只保留单作品完成提示", async () => {
-  const requestedUrls: string[] = [];
-  globalThis.fetch = (async (input, init) => {
-    const url = String(input);
-    requestedUrls.push(url);
-    const recordResponse = competitorRecordTestResponse(url, init);
-    if (recordResponse) return recordResponse;
-    return Response.json({
-      ok: true,
-      platform: "douyin",
-      skillId: "douyin-scraper",
-      inputType: "作品链接",
-      excelPath: "/controlled/douyin/work.xlsx",
-      outputDir: "/controlled/douyin",
-    });
-  }) as typeof fetch;
-  const user = await openCompetitorReportRunner();
-
-  await user.type(
-    screen.getByLabelText("竞品主页或作品链接"),
-    "https://www.douyin.com/video/123",
-  );
-  await user.click(screen.getByRole("button", { name: "抓取并分析" }));
-
-  await waitFor(() =>
-    assert.match(screen.getByRole("alert").textContent ?? "", /单作品抓取完成/),
-  );
-  assert.deepEqual(requestedUrls.filter((url) => url.includes(":8765/")), [
-    "http://127.0.0.1:8765/health",
-    "http://127.0.0.1:8765/scrape",
-  ]);
-});
-
-test("竞品洞察报告上传后按三批生成校验并只组装一次", async () => {
+test("竞品洞察作品链接只生成 content 批次并在 ready 后回调", async () => {
   installCompetitorReportModel();
-  const requests: CompetitorReportRequest[] = [];
+  const calls: CompetitorReportRequest[] = [];
+  const completed: Array<[string, string]> = [];
+  const scrape = scrapeReadyFixture("xiaohongshu", "content");
+  const report = {
+    ...reportReadyFixture(),
+    filename: "content-report.md",
+    reportPath: `${scrape.outputDir}/content-report.md`,
+  };
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
     const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({url, init, body});
+    const recordResponse = competitorRecordTestResponse(url, init);
+    if (recordResponse) return recordResponse;
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
+    if (url.endsWith("/scrape")) return Response.json(scrape);
+    if (url.endsWith("/analyze-artifacts")) return Response.json(contentEvidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      assert.equal(body?.batchId, "content");
+      return Response.json({ok: true, batch: competitorBatchFixture("content")});
+    }
+    if (url.endsWith("/validate-section")) {
+      return Response.json({
+        ok: true,
+        stage: "section_validated",
+        evidenceId: "fedcba9876543210",
+        batchId: "content",
+        batch: body?.batch,
+      });
+    }
+    if (url.endsWith("/assemble-report")) return Response.json(report);
+    if (url.endsWith("/bundle")) {
+      return Response.json(readyBundleSnapshot("xiaohongshu", "content", scrape.outputDir, report.reportPath));
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const user = userEvent.setup({document});
+  render(
+    <ModelRegistryProvider>
+      <CompetitorInsightPanel
+        mode="run"
+        onPreview={() => undefined}
+        onTaskCompleted={(taskId, bundleId) => completed.push([taskId, bundleId])}
+      />
+    </ModelRegistryProvider>,
+  );
+
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://www.xiaohongshu.com/explore/test-note",
+  );
+  await user.click(screen.getByRole("button", { name: "抓取并分析" }));
+
+  await waitFor(() => assert.deepEqual(completed, [[
+    "competitor-20260801-ui-a1",
+    "bundle-0000000000000001",
+  ]]));
+  assert.equal(calls.filter((call) => call.url === "/api/agents/competitor-insight").length, 1);
+  assert.deepEqual(
+    calls
+      .filter((call) => !call.url.includes(":8768/health"))
+      .map((call) => `${call.init?.method ?? "GET"} ${new URL(call.url, "http://localhost").pathname}`),
+    [
+      "POST /project-tasks",
+      "GET /health",
+      "POST /scrape",
+      "PATCH /project-tasks/competitor-20260801-ui-a1",
+      "POST /analyze-artifacts",
+      "POST /api/agents/competitor-insight",
+      "POST /validate-section",
+      "POST /assemble-report",
+      "POST /project-tasks/competitor-20260801-ui-a1/artifacts",
+      "POST /project-tasks/competitor-20260801-ui-a1/bundle",
+    ],
+  );
+  const authoritative = calls.find((call) => call.init?.method === "PATCH");
+  assert.equal(authoritative?.body?.inputKind, "content");
+  assert.equal(authoritative?.body?.category, "xhs-note");
+  assert.ok(screen.getByRole("listitem", {name: "整理成果包（已完成）"}));
+});
+
+test("竞品任务完成后只聚焦回调匹配的 ready 成果包并可查看全部", async () => {
+  installCompetitorReportModel();
+  const snapshot = competitorWorkspaceSnapshot();
+  installCompletedWorkspaceFlow(snapshot);
+  const user = userEvent.setup({document});
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+  await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+  await user.click(screen.getByRole("button", {name: "开始竞品分析"}));
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://www.xiaohongshu.com/explore/test-note",
+  );
+  await user.click(screen.getByRole("button", {name: "抓取并分析"}));
+
+  assert.ok(await screen.findByRole("status", {name: "正在查看本次成果"}));
+  assert.ok(screen.getByRole("heading", {name: "小红书笔记分析成果包"}));
+  assert.equal(screen.queryByRole("heading", {name: "历史抖音账号成果包"}), null);
+  await user.click(screen.getByRole("button", {name: "查看全部成果"}));
+  assert.ok(screen.getByRole("heading", {name: "历史抖音账号成果包"}));
+});
+
+test("竞品完成回调 bundleId 与刷新快照不匹配时不会误切成果页", async () => {
+  installCompetitorReportModel();
+  const finalizedSnapshot = competitorWorkspaceSnapshot();
+  const refreshedSnapshot = competitorWorkspaceSnapshot("bundle-00000000000000c1");
+  const flow = installCompletedWorkspaceFlow(finalizedSnapshot, refreshedSnapshot);
+  const user = userEvent.setup({document});
+  render(<Home />);
+
+  await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+  await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+  await user.click(screen.getByRole("button", {name: "开始竞品分析"}));
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://www.xiaohongshu.com/explore/test-note",
+  );
+  await user.click(screen.getByRole("button", {name: "抓取并分析"}));
+
+  await waitFor(() => assert.equal(flow.getRecordLoads(), 1));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(
+    screen.getByRole("button", {name: "Agent 对话"}).getAttribute("aria-current"),
+    "page",
+  );
+  assert.equal(screen.queryByRole("heading", {name: "成果包"}), null);
+});
+
+test("竞品完成回调对未完成、缺包、missing、legacy 和无主报告都不切成果页", async () => {
+  const cases = ["未完成", "缺包", "missing", "legacy", "无主报告"] as const;
+  for (const scenario of cases) {
+    cleanup();
+    document.body.innerHTML = "";
+    window.localStorage.clear();
+    installCompetitorReportModel();
+    const finalized = competitorWorkspaceSnapshot();
+    const refreshed = competitorWorkspaceSnapshot();
+    if (scenario === "未完成") {
+      Object.assign(refreshed.tasks[0], {
+        status: "running",
+        progress: 90,
+        completedAt: null,
+        bundleId: null,
+        artifactIds: [],
+      });
+      refreshed.artifacts.splice(0);
+      refreshed.bundles.splice(0);
+    } else if (scenario === "缺包") {
+      refreshed.bundles.splice(0);
+    } else if (scenario === "missing" || scenario === "legacy") {
+      refreshed.bundles[0].status = scenario;
+    } else {
+      (refreshed.bundles[0] as unknown as {
+        primaryReportPath: string | null;
+      }).primaryReportPath = null;
+    }
+    const flow = installCompletedWorkspaceFlow(finalized, refreshed);
+    const user = userEvent.setup({document});
+    render(<Home />);
+    await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+    await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+    await user.click(screen.getByRole("button", {name: "开始竞品分析"}));
+    await user.type(
+      screen.getByLabelText("竞品主页或作品链接"),
+      "https://www.xiaohongshu.com/explore/test-note",
+    );
+    await user.click(screen.getByRole("button", {name: "抓取并分析"}));
+    await waitFor(() => assert.equal(flow.getRecordLoads(), 1));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      screen.getByRole("button", {name: "Agent 对话"}).getAttribute("aria-current"),
+      "page",
+      scenario,
+    );
+    assert.equal(screen.queryByRole("heading", {name: "成果包"}), null, scenario);
+  }
+});
+
+test("竞品 Workspace 只提交最新 refresh 并忽略迟到旧快照", async () => {
+  const oldSnapshot = competitorWorkspaceSnapshot();
+  oldSnapshot.tasks[0].title = "旧快照成果包";
+  const newSnapshot = competitorWorkspaceSnapshot();
+  newSnapshot.tasks[0].title = "最新快照成果包";
+  const first = deferredValue<Response>();
+  const second = deferredValue<Response>();
+  const signals: Array<AbortSignal | null> = [];
+  let requestCount = 0;
+  globalThis.fetch = withCompetitorHealth((input, init) => {
+    const url = String(input);
+    if (!url.includes("/project-records")) throw new Error(`unexpected request: ${url}`);
+    requestCount += 1;
+    signals.push(init?.signal ?? null);
+    return requestCount === 1 ? first.promise : second.promise;
+  });
+  const user = userEvent.setup({document});
+  render(<Home />);
+  await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+  await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+  await user.click(screen.getByRole("button", {name: "任务列表"}));
+  await user.click(screen.getByRole("button", {name: "成果文件"}));
+  assert.equal(requestCount, 2);
+
+  second.resolve(Response.json(newSnapshot));
+  assert.ok(await screen.findByRole("heading", {name: "最新快照成果包"}));
+  first.resolve(Response.json(oldSnapshot));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(screen.getByRole("heading", {name: "最新快照成果包"}));
+  assert.equal(screen.queryByRole("heading", {name: "旧快照成果包"}), null);
+  assertSignalAborted(signals[0]);
+  assertSignalNotAborted(signals[1]);
+});
+
+test("竞品 Workspace 卸载会取消 refresh 且迟到失败不提示或切页", async () => {
+  const pending = deferredValue<Response>();
+  let refreshSignal: AbortSignal | null = null;
+  globalThis.fetch = withCompetitorHealth((input, init) => {
+    const url = String(input);
+    if (!url.includes("/project-records")) throw new Error(`unexpected request: ${url}`);
+    refreshSignal = init?.signal ?? null;
+    return pending.promise;
+  });
+  const user = userEvent.setup({document});
+  render(<Home />);
+  await user.click(screen.getByRole("button", {name: "Agent 项目"}));
+  await user.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+  await user.click(screen.getByRole("button", {name: "成果文件"}));
+  assertSignalNotAborted(refreshSignal);
+  await user.click(screen.getByRole("button", {name: "← 返回 Agent 项目"}));
+  assertSignalAborted(refreshSignal);
+  pending.reject(new Error("late-refresh-secret"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.ok(screen.getByRole("region", {name: "9 个独立 Agent 项目"}));
+  assert.doesNotMatch(document.body.textContent ?? "", /无法读取本地竞品任务记录|late-refresh-secret/u);
+});
+
+test("竞品洞察报告请求按三批生成校验并只组装一次", async () => {
+  installCompetitorReportModel();
+  const requests: CompetitorReportRequest[] = [];
+  globalThis.fetch = withCompetitorHealth(async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
     requests.push({ url, init, body });
-    if (url.endsWith("/analyze-upload")) {
-      assert.deepEqual(Object.keys(body ?? {}).sort(), ["contentBase64", "filename"]);
+    if (url.endsWith("/analyze-artifacts")) {
+      assert.deepEqual(body, {
+        taskId: ACCOUNT_ANALYSIS_REQUEST.taskId,
+        platformId: ACCOUNT_ANALYSIS_REQUEST.platformId,
+        inputKind: ACCOUNT_ANALYSIS_REQUEST.inputKind,
+        outputDir: ACCOUNT_ANALYSIS_REQUEST.outputDir,
+        dataPath: ACCOUNT_ANALYSIS_REQUEST.dataPath,
+        excelPath: ACCOUNT_ANALYSIS_REQUEST.excelPath,
+      });
       return Response.json(evidenceReadyFixture());
     }
     if (url === "/api/agents/competitor-insight") {
@@ -5687,31 +6721,20 @@ test("竞品洞察报告上传后按三批生成校验并只组装一次", async
       return Response.json(reportReadyFixture());
     }
     throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
-  await openCompetitorReportRunner();
-
-  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
-    target: {
-      files: [
-        new File(
-          [new Uint8Array([0x50, 0x4b, 0x03, 0x04])],
-          "account.xlsx",
-        ),
-      ],
-    },
   });
+  await openCompetitorAnalysisRequestRunner();
 
   await waitFor(() =>
-    assert.ok(screen.getByRole("heading", { name: "Markdown 报告预览" })),
+    assert.ok(screen.getByRole("status", { name: "报告控制器完成" })),
   );
   assert.deepEqual(
-    requests.map(({ url }) =>
+    requests.filter(({url}) => !url.endsWith("/health")).map(({ url }) =>
       url === "/api/agents/competitor-insight"
         ? "model"
         : url.replace("http://127.0.0.1:8768", ""),
     ),
     [
-      "/analyze-upload",
+      "/analyze-artifacts",
       "model",
       "/validate-section",
       "model",
@@ -5725,330 +6748,477 @@ test("竞品洞察报告上传后按三批生成校验并只组装一次", async
     requests.filter(({ url }) => url.endsWith("/assemble-report")).length,
     1,
   );
-  assert.match(
-    screen.getByRole("region", { name: "Markdown 报告预览" }).textContent ?? "",
-    /同一次组装响应的 Markdown/,
-  );
-  assert.equal(
-    screen.getByRole("link", { name: "下载 Markdown" }).getAttribute("href"),
-    "blob:test-1",
-  );
+  assert.equal(screen.queryByRole("region", {name: "Markdown 报告预览"}), null);
+  assert.equal(screen.queryByRole("link", {name: "下载 Markdown"}), null);
   assert.doesNotMatch(
     document.body.textContent ?? "",
     /sk-competitor-report-secret/,
   );
-
-  const originalWriteText = navigator.clipboard.writeText;
-  Object.assign(navigator.clipboard, {
-    writeText: async () => {
-      throw new Error("clipboard denied");
-    },
-  });
-  try {
-    await userEvent.setup({ document }).click(
-      screen.getByRole("button", { name: "复制报告路径" }),
-    );
-    assert.match(document.body.textContent ?? "", /复制失败，请手动选择报告路径/);
-  } finally {
-    Object.assign(navigator.clipboard, { writeText: originalWriteText });
-  }
-  cleanup();
-  assert.deepEqual(revokedMarkdownUrls, ["blob:test-1"]);
 });
 
-test("竞品洞察报告未配置 Agent 模型时停在证据包已生成", async () => {
-  const requests: string[] = [];
-  globalThis.fetch = (async (input) => {
-    const url = String(input);
-    requests.push(url);
-    if (url.endsWith("/analyze-upload")) {
-      return Response.json(evidenceReadyFixture());
-    }
-    throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
-  await openCompetitorReportRunner();
-  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
-    target: { files: [new File(["PK fixture"], "account.xlsx")] },
-  });
+test("竞品独立模型未配置时即使全局模型已连接也停在报告阶段", async () => {
+  installConnectedChatModels([{
+    id: "global-must-not-run-competitor",
+    provider: "OpenAI",
+    displayName: "全局模型不得用于竞品",
+    modelId: "gpt-global-only",
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "sk-global-must-not-run",
+    revision: "revision-global-must-not-run",
+  }]);
+  const calls = await runAccountLinkWithoutModel();
 
   await waitFor(() =>
     assert.match(
-      screen.getByRole("status", { name: "竞品报告生成状态" }).textContent ?? "",
-      /证据包已生成[\s\S]*选择已连接/u,
+      screen.getByRole("status", { name: "竞品分析进度" }).textContent ?? "",
+      /证据包已生成，等待配置模型/u,
     ),
   );
-  assert.deepEqual(requests, ["http://127.0.0.1:8768/analyze-upload"]);
+  assert.equal(calls.some((call) => call.url === "/api/agents/competitor-insight"), false);
+  assert.equal(calls.some((call) => call.url.endsWith("/bundle")), false);
   assert.ok(screen.getByRole("button", { name: "继续生成报告" }));
 });
 
-test("竞品报告证据已就绪时显式标记已完成与当前阶段", async () => {
-  globalThis.fetch = (async (input) => {
-    if (String(input).endsWith("/analyze-upload")) {
-      return Response.json(evidenceReadyFixture());
-    }
-    throw new Error(`unexpected request: ${String(input)}`);
-  }) as typeof fetch;
-  await openCompetitorReportRunner();
-
-  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
-    target: { files: [new File(["PK fixture"], "account.xlsx")] },
-  });
-
-  await screen.findByRole("button", { name: "继续生成报告" });
-  const stages = screen.getByRole("list", { name: "竞品报告五阶段" });
-  assert.equal(
-    within(stages).getByRole("listitem", { name: "读取 Excel（已完成）" })
-      .className,
-    "completed",
-  );
-  assert.equal(
-    within(stages).getByRole("listitem", { name: "计算证据（已完成）" })
-      .className,
-    "completed",
-  );
-  assert.equal(
-    within(stages).getByRole("listitem", { name: "生成三批（当前）" })
-      .getAttribute("aria-current"),
-    "step",
-  );
-});
-
-test("空或不完整的 batchInputs 在模型请求前失败关闭", async () => {
+test("证据生成前停止会中止请求、写入终态并解锁链接入口", async () => {
   installCompetitorReportModel();
-  let modelCalls = 0;
-  globalThis.fetch = (async (input) => {
-    const url = String(input);
-    if (url.endsWith("/analyze-upload")) {
-      const fixture = evidenceReadyFixture();
-      return Response.json({
-        ...fixture,
-        batchInputs: { strategy: fixture.batchInputs.strategy },
-      });
-    }
-    modelCalls += 1;
-    return Response.json({ ok: true, batch: competitorBatchFixture("strategy") });
-  }) as typeof fetch;
-  await openCompetitorReportRunner();
-
-  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
-    target: { files: [new File(["PK fixture"], "account.xlsx")] },
-  });
-
-  await waitFor(() =>
-    assert.match(screen.getByRole("alert").textContent ?? "", /无效响应/),
-  );
-  assert.equal(modelCalls, 0);
-  assert.equal(screen.queryByRole("button", { name: /继续|重试/ }), null);
-});
-
-test("批内排名引用外部证据时在模型请求前失败关闭", async () => {
-  installCompetitorReportModel();
-  let modelCalls = 0;
-  globalThis.fetch = (async (input) => {
-    const url = String(input);
-    if (url.endsWith("/analyze-upload")) {
-      const fixture = evidenceReadyFixture();
-      fixture.batchInputs.strategy.rankings.overall = {
-        status: "available",
-        evidenceIds: ["DY-E9999"],
-      };
-      return Response.json(fixture);
-    }
-    modelCalls += 1;
-    return Response.json({ ok: true, batch: competitorBatchFixture("strategy") });
-  }) as typeof fetch;
-  await openCompetitorReportRunner();
-
-  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
-    target: { files: [new File(["PK fixture"], "account.xlsx")] },
-  });
-
-  await waitFor(() =>
-    assert.match(screen.getByRole("alert").textContent ?? "", /无效响应/),
-  );
-  assert.equal(modelCalls, 0);
-  assert.equal(screen.queryByRole("button", { name: /继续|重试/ }), null);
-});
-
-test("新选文件校验失败会隔离旧证据和旧报告", async () => {
-  installCompetitorReportModel();
-  let assembleCount = 0;
-  let directBatchIndex = 0;
+  const patches: Record<string, unknown>[] = [];
+  let analyzeSignal: AbortSignal | null = null;
+  let createCount = 0;
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
-    const body = init?.body ? JSON.parse(String(init.body)) : null;
-    if (url.endsWith("/analyze-upload")) {
-      return Response.json(evidenceReadyFixture());
+    const method = init?.method ?? "GET";
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    if (url.endsWith("/project-tasks") && method === "POST") {
+      createCount += 1;
+      return Response.json({ok: true, task: persistedCompetitorTask()});
     }
-    if (url === "/api/agents/competitor-insight") {
-      const batchId = body?.batchId as "strategy" | "performance" | "execution";
-      return Response.json({ ok: true, batch: competitorBatchFixture(batchId) });
+    if (url.includes("/project-tasks/competitor-20260801-ui-a1") && method === "PATCH") {
+      patches.push(body);
+      const status = body.status as "running" | "failed";
+      return Response.json({ok: true, task: persistedCompetitorTask(status)});
     }
-    if (url === "https://api.openai.com/v1/chat/completions") {
-      const batchId = ["strategy", "performance", "execution"]
-        [directBatchIndex++] as "strategy" | "performance" | "execution";
-      return Response.json({
-        choices: [{ message: { role: "assistant", content: JSON.stringify(competitorBatchFixture(batchId)) } }],
-      });
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
+    if (url.endsWith("/scrape")) {
+      return Response.json(scrapeReadyFixture("douyin", "account"));
     }
-    if (url.endsWith("/validate-section")) {
-      return Response.json({
-        ok: true,
-        stage: "section_validated",
-        evidenceId: "0123456789abcdef",
-        batchId: body?.batch.batchId,
-        batch: body?.batch,
-      });
-    }
-    if (url.endsWith("/assemble-report")) {
-      assembleCount += 1;
-      return Response.json(reportReadyFixture());
-    }
-    throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
-  await openCompetitorReportRunner();
-  const input = screen.getByLabelText("选择已有 Excel 文件");
-  fireEvent.change(input, {
-    target: { files: [new File(["PK fixture"], "account.xlsx")] },
-  });
-  await screen.findByRole("heading", { name: "Markdown 报告预览" });
-
-  fireEvent.change(input, {
-    target: { files: [new File(["invalid"], "new-account.csv")] },
-  });
-
-  assert.match(screen.getByRole("alert").textContent ?? "", /仅支持 \.xlsx/);
-  assert.equal(screen.queryByRole("region", { name: "Markdown 报告预览" }), null);
-  assert.equal(screen.queryByLabelText("证据包完整性摘要"), null);
-  assert.equal(screen.queryByRole("button", { name: /继续|重试/ }), null);
-  assert.equal(assembleCount, 1);
-});
-
-test("新选超限 Excel 会清理旧证据且不暴露重试", async () => {
-  let requestCount = 0;
-  globalThis.fetch = (async (input) => {
-    requestCount += 1;
-    if (String(input).endsWith("/analyze-upload")) {
-      return Response.json(evidenceReadyFixture());
-    }
-    throw new Error(`unexpected request: ${String(input)}`);
-  }) as typeof fetch;
-  await openCompetitorReportRunner();
-  const input = screen.getByLabelText("选择已有 Excel 文件");
-  fireEvent.change(input, {
-    target: { files: [new File(["PK fixture"], "account.xlsx")] },
-  });
-  await screen.findByRole("button", { name: "继续生成报告" });
-
-  const oversized = new File(["small fixture"], "replacement.xlsx");
-  Object.defineProperty(oversized, "size", {
-    configurable: true,
-    value: 50 * 1024 * 1024 + 1,
-  });
-  fireEvent.change(input, { target: { files: [oversized] } });
-
-  assert.match(screen.getByRole("alert").textContent ?? "", /50 MB/);
-  assert.equal(screen.queryByLabelText("证据包完整性摘要"), null);
-  assert.equal(screen.queryByRole("button", { name: /继续|重试/ }), null);
-  assert.equal(requestCount, 1);
-});
-
-test("StrictMode 与报告替换始终撤销旧 URL 并下载当前 Markdown", async () => {
-  installCompetitorReportModel();
-  let reportNumber = 0;
-  let directBatchIndex = 0;
-  globalThis.fetch = (async (input, init) => {
-    const url = String(input);
-    const body = init?.body ? JSON.parse(String(init.body)) : null;
-    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
-    if (url === "/api/agents/competitor-insight") {
-      const batchId = body?.batchId as "strategy" | "performance" | "execution";
-      return Response.json({ ok: true, batch: competitorBatchFixture(batchId) });
-    }
-    if (url === "https://api.openai.com/v1/chat/completions") {
-      const batchId = ["strategy", "performance", "execution"]
-        [directBatchIndex++ % 3] as "strategy" | "performance" | "execution";
-      return Response.json({
-        choices: [{ message: { role: "assistant", content: JSON.stringify(competitorBatchFixture(batchId)) } }],
-      });
-    }
-    if (url.endsWith("/validate-section")) {
-      return Response.json({
-        ok: true,
-        stage: "section_validated",
-        evidenceId: "0123456789abcdef",
-        batchId: body?.batch.batchId,
-        batch: body?.batch,
-      });
-    }
-    if (url.endsWith("/assemble-report")) {
-      reportNumber += 1;
-      return Response.json({
-        ...reportReadyFixture(),
-        filename: `report-${reportNumber}.md`,
-        reportPath: `/controlled/report-${reportNumber}.md`,
-        markdown: `# 当前报告 ${reportNumber}`,
+    if (url.endsWith("/analyze-artifacts")) {
+      analyzeSignal = init?.signal ?? null;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("aborted", "AbortError")),
+          {once: true},
+        );
       });
     }
     throw new Error(`unexpected request: ${url}`);
   }) as typeof fetch;
-  const user = userEvent.setup({ document });
-  render(<StrictMode><Home /></StrictMode>);
-  await user.click(screen.getByRole("button", { name: /竞品洞察 Agent/ }));
-  await user.click(screen.getByRole("button", { name: "开始竞品采集" }));
-  const input = screen.getByLabelText("选择已有 Excel 文件");
-
-  fireEvent.change(input, {
-    target: { files: [new File(["PK first"], "first.xlsx")] },
-  });
-  await screen.findByText("# 当前报告 1");
-  const firstCurrentUrl = screen.getByRole("link", { name: "下载 Markdown" })
-    .getAttribute("href");
-  assert.ok(firstCurrentUrl);
-  assert.deepEqual(
-    createdMarkdownBlobs.slice(0, -1).map(({ url }) => url),
-    revokedMarkdownUrls,
+  const user = userEvent.setup({document});
+  render(
+    <ModelRegistryProvider>
+      <CompetitorInsightPanel mode="run" onPreview={() => undefined} />
+    </ModelRegistryProvider>,
   );
 
-  fireEvent.change(input, {
-    target: { files: [new File(["PK second"], "second.xlsx")] },
+  const source = screen.getByLabelText("竞品主页或作品链接") as HTMLTextAreaElement;
+  await user.type(source, "https://www.douyin.com/user/MS4wLjABAAAA-test");
+  await user.click(screen.getByRole("button", {name: "抓取并分析"}));
+  await waitFor(() => assertSignalNotAborted(analyzeSignal));
+  await user.click(screen.getByRole("button", {name: "停止生成"}));
+
+  await waitFor(() => {
+    assertSignalAborted(analyzeSignal);
+    assert.equal(source.disabled, false);
+    assert.equal((screen.getByRole("button", {name: "抓取并分析"}) as HTMLButtonElement).disabled, false);
+    assert.match(screen.getByRole("alert").textContent ?? "", /已停止/u);
   });
-  await screen.findByText("# 当前报告 2");
-  const currentDownload = await screen.findByRole("link", { name: "下载 Markdown" });
-  const current = createdMarkdownBlobs.at(-1);
-  assert.ok(current);
-  assert.equal(
-    currentDownload.getAttribute("href"),
-    current.url,
-  );
-  assert.equal(await current.blob.text(), "# 当前报告 2");
-  assert.ok(revokedMarkdownUrls.includes(firstCurrentUrl));
-  assert.deepEqual(
-    createdMarkdownBlobs.slice(0, -1).map(({ url }) => url),
-    revokedMarkdownUrls,
-  );
-  cleanup();
-  assert.deepEqual(
-    createdMarkdownBlobs.map(({ url }) => url),
-    revokedMarkdownUrls,
-  );
+  assert.equal(screen.queryByRole("button", {name: /继续生成报告|重试失败批次/u}), null);
+  assert.equal(screen.queryByRole("button", {name: "停止生成"}), null);
+  assert.equal(patches.at(-1)?.status, "failed");
+  assert.match(String(patches.at(-1)?.errorSummary), /已停止/u);
+
+  await user.click(screen.getByRole("button", {name: "抓取并分析"}));
+  await waitFor(() => assert.equal(createCount, 2));
 });
 
-function CompetitorCredentialRevisionHarness() {
-  const registry = useModelRegistry();
-  const [pathRequest, setPathRequest] = useState<{
-    requestId: number;
-    excelPath: string;
-  } | null>(null);
+function CompetitorPanelCredentialHarness() {
   return (
     <>
       <button
-        disabled={registry.connectedModels.length === 0}
+        onClick={() => configureCompetitorModelSession({
+          baseUrl: "https://api.openai.com/v1",
+          apiKey: "sk-revised-before-evidence",
+          model: "gpt-competitor-report",
+        }, "revision-before-evidence-new")}
+        type="button"
+      >
+        修改整理阶段模型凭据
+      </button>
+      <CompetitorInsightPanel mode="run" onPreview={() => undefined} />
+    </>
+  );
+}
+
+test("证据生成前修改模型凭据会中止请求、写入终态并解锁链接入口", async () => {
+  installCompetitorReportModel();
+  const patches: Record<string, unknown>[] = [];
+  let analyzeSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    if (url.endsWith("/project-tasks") && method === "POST") {
+      return Response.json({ok: true, task: persistedCompetitorTask()});
+    }
+    if (url.includes("/project-tasks/competitor-20260801-ui-a1") && method === "PATCH") {
+      patches.push(body);
+      const status = body.status as "running" | "failed";
+      return Response.json({ok: true, task: persistedCompetitorTask(status)});
+    }
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
+    if (url.endsWith("/scrape")) {
+      return Response.json(scrapeReadyFixture("douyin", "account"));
+    }
+    if (url.endsWith("/analyze-artifacts")) {
+      analyzeSignal = init?.signal ?? null;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("aborted", "AbortError")),
+          {once: true},
+        );
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const user = userEvent.setup({document});
+  render(
+    <ModelRegistryProvider>
+      <CompetitorPanelCredentialHarness />
+    </ModelRegistryProvider>,
+  );
+
+  const source = screen.getByLabelText("竞品主页或作品链接") as HTMLTextAreaElement;
+  await user.type(source, "https://www.douyin.com/user/MS4wLjABAAAA-test");
+  await user.click(screen.getByRole("button", {name: "抓取并分析"}));
+  await waitFor(() => assertSignalNotAborted(analyzeSignal));
+  await user.click(screen.getByRole("button", {name: "修改整理阶段模型凭据"}));
+
+  await waitFor(() => {
+    assertSignalAborted(analyzeSignal);
+    assert.equal(source.disabled, false);
+    assert.match(screen.getByRole("alert").textContent ?? "", /模型或凭据已变化/u);
+  });
+  assert.equal(screen.queryByRole("button", {name: /继续生成报告|重试失败批次/u}), null);
+  assert.equal(patches.at(-1)?.status, "failed");
+  assert.match(String(patches.at(-1)?.errorSummary), /模型或凭据已变化/u);
+});
+
+test("失败状态写完后才恢复重试并在 running 落库后继续生成", async () => {
+  installCompetitorReportModel();
+  const failedPatch = deferredValue<void>();
+  const runningPatch = deferredValue<void>();
+  const transitions: string[] = [];
+  const completed: Array<[string, string]> = [];
+  let persistedStatus: "running" | "failed" | "ready" = "running";
+  let modelCallCount = 0;
+  let recoveryPatchStarted = false;
+  let createCount = 0;
+  const createdTaskIds: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    if (url.endsWith("/project-tasks") && method === "POST") {
+      createCount += 1;
+      const taskId = String(body.id);
+      createdTaskIds.push(taskId);
+      if (createCount > 1) transitions.push("new-task-created");
+      return Response.json({
+        ok: true,
+        task: persistedCompetitorTask("waiting", 10, {}, taskId),
+      });
+    }
+    if (url.includes("/project-tasks/") && method === "PATCH") {
+      const taskId = url.split("/project-tasks/")[1]?.split("/")[0] ?? "";
+      if (body.inputKind) {
+        transitions.push(createCount === 1 ? "authoritative-running" : "new-authoritative-running");
+        persistedStatus = "running";
+        return Response.json({ok: true, task: persistedCompetitorTask("running", 45, {
+          inputKind: "account",
+          category: "douyin-account",
+        }, taskId)});
+      }
+      if (body.status === "failed") {
+        transitions.push("failed-started");
+        return failedPatch.promise.then(() => {
+          persistedStatus = "failed";
+          transitions.push("failed-finished");
+          return Response.json({
+            ok: true,
+            task: persistedCompetitorTask("failed", 10, {}, taskId),
+          });
+        });
+      }
+      if (body.status === "running") {
+        recoveryPatchStarted = true;
+        transitions.push("running-started");
+        return runningPatch.promise.then(() => {
+          persistedStatus = "running";
+          transitions.push("running-finished");
+          return Response.json({ok: true, task: persistedCompetitorTask("running", 70, {
+            inputKind: "account",
+            category: "douyin-account",
+          }, taskId)});
+        });
+      }
+    }
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
+    if (url.endsWith("/scrape")) {
+      return Response.json(scrapeReadyFixture("douyin", "account", String(body.taskId)));
+    }
+    if (url.endsWith("/analyze-artifacts")) {
+      return Response.json(evidenceReadyFixture(String(body.outputDir)));
+    }
+    if (url === "/api/agents/competitor-insight") {
+      modelCallCount += 1;
+      const batchId = body.batchId as "strategy" | "performance" | "execution";
+      if (batchId === "performance" && modelCallCount === 2) {
+        return new Response("provider unavailable", {status: 503});
+      }
+      return Response.json({ok: true, batch: competitorBatchFixture(batchId)});
+    }
+    if (url.endsWith("/validate-section")) {
+      const batch = body.batch as Record<string, unknown>;
+      return Response.json({
+        ok: true,
+        stage: "section_validated",
+        evidenceId: "0123456789abcdef",
+        batchId: batch.batchId,
+        batch,
+      });
+    }
+    if (url.endsWith("/assemble-report")) return Response.json(reportReadyFixture());
+    if (url.endsWith("/artifacts")) {
+      const taskId = url.split("/project-tasks/")[1]?.split("/")[0] ?? "";
+      return Response.json({
+        ok: true,
+        tasks: [persistedCompetitorTask("running", 90, {
+          inputKind: "account",
+          category: "douyin-account",
+        }, taskId)],
+        artifacts: [],
+      });
+    }
+    if (url.endsWith("/bundle")) {
+      assert.equal(persistedStatus, "running");
+      persistedStatus = "ready";
+      const taskId = url.split("/project-tasks/")[1]?.split("/")[0] ?? "";
+      return Response.json(readyBundleSnapshot(
+        "douyin",
+        "account",
+        String(body.outputDir),
+        reportReadyFixture().reportPath,
+        taskId,
+      ));
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const user = userEvent.setup({document});
+  render(
+    <ModelRegistryProvider>
+      <CompetitorInsightPanel
+        mode="run"
+        onPreview={() => undefined}
+        onTaskCompleted={(taskId, bundleId) => completed.push([taskId, bundleId])}
+      />
+    </ModelRegistryProvider>,
+  );
+
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://www.douyin.com/user/MS4wLjABAAAA-test",
+  );
+  await user.click(screen.getByRole("button", {name: "抓取并分析"}));
+  const retry = await screen.findByRole("button", {name: "重试失败批次"});
+  await waitFor(() => assert.deepEqual(transitions, ["authoritative-running", "failed-started"]));
+  assert.equal((retry as HTMLButtonElement).disabled, true);
+  assert.match(screen.getByRole("status", {name: "竞品分析进度"}).textContent ?? "", /正在同步失败状态/u);
+
+  await user.click(retry);
+  assert.equal(recoveryPatchStarted, false);
+  assert.equal(modelCallCount, 2);
+  runningPatch.resolve();
+  assert.equal(recoveryPatchStarted, false);
+  failedPatch.resolve();
+
+  await waitFor(() => assert.equal((retry as HTMLButtonElement).disabled, false));
+  await user.click(retry);
+  await waitFor(() => assert.equal(createCount, 2));
+  assert.equal(recoveryPatchStarted, false);
+  assert.notEqual(createdTaskIds[0], createdTaskIds[1]);
+  await waitFor(() => assert.deepEqual(completed, [[
+    createdTaskIds[1],
+    "bundle-0000000000000001",
+  ]]));
+  assert.deepEqual(transitions, [
+    "authoritative-running",
+    "failed-started",
+    "failed-finished",
+    "new-task-created",
+    "new-authoritative-running",
+  ]);
+  assert.equal(persistedStatus, "ready");
+  assert.equal(modelCallCount, 5);
+});
+
+test("证据生成请求挂起时卸载会中止请求并在后台收敛任务终态", async () => {
+  installCompetitorReportModel();
+  const patches: Record<string, unknown>[] = [];
+  const previews: string[] = [];
+  const completed: Array<[string, string]> = [];
+  let recordsChanged = 0;
+  let analyzeSignal: AbortSignal | null = null;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    if (url.endsWith("/project-tasks") && method === "POST") {
+      return Response.json({ok: true, task: persistedCompetitorTask()});
+    }
+    if (url.includes("/project-tasks/competitor-20260801-ui-a1") && method === "PATCH") {
+      patches.push(body);
+      const status = body.status as "running" | "failed";
+      return Response.json({ok: true, task: persistedCompetitorTask(status)});
+    }
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
+    if (url.endsWith("/scrape")) {
+      return Response.json(scrapeReadyFixture("douyin", "account"));
+    }
+    if (url.endsWith("/analyze-artifacts")) {
+      analyzeSignal = init?.signal ?? null;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("aborted", "AbortError")),
+          {once: true},
+        );
+      });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const user = userEvent.setup({document});
+  const view = render(
+    <ModelRegistryProvider>
+      <CompetitorInsightPanel
+        mode="run"
+        onPreview={(message) => previews.push(message)}
+        onRecordsChanged={() => { recordsChanged += 1; }}
+        onTaskCompleted={(taskId, bundleId) => completed.push([taskId, bundleId])}
+      />
+    </ModelRegistryProvider>,
+  );
+
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://www.douyin.com/user/MS4wLjABAAAA-test",
+  );
+  await user.click(screen.getByRole("button", {name: "抓取并分析"}));
+  await waitFor(() => assertSignalNotAborted(analyzeSignal));
+  const recordsBeforeUnmount = recordsChanged;
+  view.unmount();
+
+  await waitFor(() => {
+    assertSignalAborted(analyzeSignal);
+    assert.equal(patches.at(-1)?.status, "failed");
+  });
+  assert.match(String(patches.at(-1)?.errorSummary), /页面已关闭|分析已取消/u);
+  assert.equal(recordsChanged, recordsBeforeUnmount);
+  assert.deepEqual(previews, []);
+  assert.deepEqual(completed, []);
+});
+
+test("成果包请求挂起时卸载会忽略迟到 ready 和全部外部回调", async () => {
+  installCompetitorReportModel();
+  const bundlePending = deferredValue<Response>();
+  const previews: string[] = [];
+  const completed: Array<[string, string]> = [];
+  let recordsChanged = 0;
+  let bundleStarted = false;
+  const scrape = scrapeReadyFixture("xiaohongshu", "content");
+  const report = {
+    ...reportReadyFixture(),
+    filename: "content-report.md",
+    reportPath: `${scrape.outputDir}/content-report.md`,
+  };
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    const recordResponse = competitorRecordTestResponse(url, init);
+    if (recordResponse) return recordResponse;
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
+    if (url.endsWith("/scrape")) return Response.json(scrape);
+    if (url.endsWith("/analyze-artifacts")) return Response.json(contentEvidenceReadyFixture());
+    if (url === "/api/agents/competitor-insight") {
+      return Response.json({ok: true, batch: competitorBatchFixture("content")});
+    }
+    if (url.endsWith("/validate-section")) {
+      return Response.json({
+        ok: true,
+        stage: "section_validated",
+        evidenceId: "fedcba9876543210",
+        batchId: "content",
+        batch: body.batch,
+      });
+    }
+    if (url.endsWith("/assemble-report")) return Response.json(report);
+    if (url.endsWith("/bundle")) {
+      bundleStarted = true;
+      return bundlePending.promise;
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+  const user = userEvent.setup({document});
+  const view = render(
+    <ModelRegistryProvider>
+      <CompetitorInsightPanel
+        mode="run"
+        onPreview={(message) => previews.push(message)}
+        onRecordsChanged={() => { recordsChanged += 1; }}
+        onTaskCompleted={(taskId, bundleId) => completed.push([taskId, bundleId])}
+      />
+    </ModelRegistryProvider>,
+  );
+
+  await user.type(
+    screen.getByLabelText("竞品主页或作品链接"),
+    "https://www.xiaohongshu.com/explore/test-note",
+  );
+  await user.click(screen.getByRole("button", {name: "抓取并分析"}));
+  await waitFor(() => assert.equal(bundleStarted, true));
+  const recordsBeforeUnmount = recordsChanged;
+  view.unmount();
+  bundlePending.resolve(Response.json(readyBundleSnapshot(
+    "xiaohongshu",
+    "content",
+    scrape.outputDir,
+    report.reportPath,
+  )));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(recordsChanged, recordsBeforeUnmount);
+  assert.deepEqual(previews, []);
+  assert.deepEqual(completed, []);
+});
+
+function CompetitorCredentialRevisionHarness() {
+  const [analysisRequest, setAnalysisRequest] =
+    useState<CompetitorAnalysisRequest | null>(null);
+  return (
+    <>
+      <button
         onClick={() =>
-          setPathRequest({
-            requestId: 1,
-            excelPath: "/controlled/douyin/account.xlsx",
-          })
+          setAnalysisRequest(ACCOUNT_ANALYSIS_REQUEST)
         }
         type="button"
       >
@@ -6056,18 +7226,17 @@ function CompetitorCredentialRevisionHarness() {
       </button>
       <button
         onClick={() =>
-          registry.saveCredential(
-            "competitor-report-model",
-            "sk-revised-competitor-report",
-            false,
-            "revision-competitor-report-new",
-          )
+          configureCompetitorModelSession({
+            baseUrl: "https://api.openai.com/v1",
+            apiKey: "sk-revised-competitor-report",
+            model: "gpt-competitor-report",
+          }, "revision-competitor-report-new")
         }
         type="button"
       >
         修订竞品模型凭据
       </button>
-      <CompetitorReportRunner pathRequest={pathRequest} />
+      <CompetitorReportRunner analysisRequest={analysisRequest} />
     </>
   );
 }
@@ -6077,10 +7246,10 @@ test("竞品洞察报告凭据修订变化会中止请求并丢弃迟到响应",
   const pending = deferredValue<Response>();
   const requestedUrls: string[] = [];
   let modelSignal: AbortSignal | null = null;
-  globalThis.fetch = (async (input, init) => {
+  globalThis.fetch = withCompetitorHealth(async (input, init) => {
     const url = String(input);
     requestedUrls.push(url);
-    if (url.endsWith("/analyze-path")) {
+    if (url.endsWith("/analyze-artifacts")) {
       return Response.json(evidenceReadyFixture());
     }
     if (url === "/api/agents/competitor-insight") {
@@ -6088,7 +7257,7 @@ test("竞品洞察报告凭据修订变化会中止请求并丢弃迟到响应",
       return pending.promise;
     }
     throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
+  });
   const user = userEvent.setup({ document });
   render(
     <ModelRegistryProvider>
@@ -6113,8 +7282,8 @@ test("竞品洞察报告凭据修订变化会中止请求并丢弃迟到响应",
       /模型或凭据已变化[\s\S]*证据包已保留/u,
     ),
   );
-  assert.deepEqual(requestedUrls, [
-    "http://127.0.0.1:8768/analyze-path",
+  assert.deepEqual(requestedUrls.filter((url) => !url.endsWith("/health")), [
+    "http://127.0.0.1:8768/analyze-artifacts",
     "/api/agents/competitor-insight",
   ]);
   assert.equal(
@@ -6127,11 +7296,14 @@ test("竞品洞察报告凭据修订变化会中止请求并丢弃迟到响应",
 test("竞品洞察报告停止中止模型请求并保留证据包", async () => {
   installCompetitorReportModel();
   let modelSignal: AbortSignal | null = null;
-  let uploadCount = 0;
+  let analyzeCount = 0;
+  let stopPersistCount = 0;
+  const stopPersisted = deferredValue<void>();
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
-    if (url.endsWith("/analyze-upload")) {
-      uploadCount += 1;
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
+    if (url.endsWith("/analyze-artifacts")) {
+      analyzeCount += 1;
       return Response.json(evidenceReadyFixture());
     }
     if (url === "/api/agents/competitor-insight") {
@@ -6146,30 +7318,138 @@ test("竞品洞察报告停止中止模型请求并保留证据包", async () =>
     }
     throw new Error(`unexpected request: ${url}`);
   }) as typeof fetch;
-  const user = await openCompetitorReportRunner();
-  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
-    target: { files: [new File(["PK fixture"], "account.xlsx")] },
+  const user = await openCompetitorAnalysisRequestRunner(async () => {
+    stopPersistCount += 1;
+    await stopPersisted.promise;
+    return true;
   });
 
   await waitFor(() => assert.ok(screen.getByRole("button", { name: "停止生成" })));
   await user.click(screen.getByRole("button", { name: "停止生成" }));
 
   assertSignalAborted(modelSignal);
-  assert.match(document.body.textContent ?? "", /已停止[\s\S]*证据包已保留/);
-  assert.match(document.body.textContent ?? "", /0123456789abcdef/);
-  assert.equal(uploadCount, 1);
-  const stoppedStages = screen.getByRole("list", { name: "竞品报告五阶段" });
-  assert.ok(within(stoppedStages).getByRole("listitem", {
-    name: "读取 Excel（已完成）",
-  }));
-  assert.ok(within(stoppedStages).getByRole("listitem", {
-    name: "计算证据（已完成）",
-  }));
-  assert.equal(
-    within(stoppedStages).getByRole("listitem", { name: "生成三批（当前）" })
-      .getAttribute("aria-current"),
-    "step",
+  await waitFor(() => assert.equal(stopPersistCount, 1));
+  assert.match(document.body.textContent ?? "", /正在同步停止状态/u);
+  await act(async () => {
+    stopPersisted.resolve();
+    await stopPersisted.promise;
+  });
+  await waitFor(() =>
+    assert.match(document.body.textContent ?? "", /已停止[\s\S]*证据包已保留/),
   );
+  assert.match(document.body.textContent ?? "", /0123456789abcdef/);
+  assert.equal(analyzeCount, 1);
+  assert.equal(screen.queryByRole("list", {name: "竞品报告五阶段"}), null);
+});
+
+test("Panel 停止精确落库并在 records 重挂载后保持 stopped", async () => {
+  installCompetitorReportModel();
+  const stopPatch = deferredValue<Response>();
+  let modelSignal: AbortSignal | null = null;
+  let stoppedBody: Record<string, unknown> | null = null;
+  const douyinTask = (
+    status: "waiting" | "running" | "stopped",
+    progress: number,
+    classified = status !== "waiting",
+  ) => ({
+    ...persistedCompetitorTask(status, progress, classified ? {
+      inputKind: "account",
+      category: "douyin-account",
+      bundleId: null,
+    } : {
+      inputKind: "unknown",
+      category: null,
+      bundleId: null,
+    }),
+    title: "抖音竞品洞察",
+    platformId: "douyin",
+    platformLabel: "抖音",
+    skillId: "douyin-scraper",
+    sourceUrl: "https://www.douyin.com/user/MS4wLjABAAAA-test",
+    progress,
+    currentStep: status === "stopped" ? "用户已停止报告生成" : "正在生成竞品报告",
+    stoppedAt: status === "stopped" ? "2026-08-01T01:03:00.000Z" : null,
+  });
+  const stoppedTask = douyinTask("stopped", 70);
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    if (url.endsWith("/health")) return competitorHealthResponse(url);
+    if (url.endsWith("/project-tasks") && method === "POST") {
+      return Response.json({ok: true, task: douyinTask("waiting", 10, false)});
+    }
+    if (url.includes("/project-tasks/competitor-20260801-ui-a1") && method === "PATCH") {
+      if (body.status === "stopped") {
+        stoppedBody = body;
+        return stopPatch.promise;
+      }
+      return Response.json({ok: true, task: douyinTask("running", Number(body.progress ?? 45))});
+    }
+    if (url.endsWith("/scrape")) {
+      return Response.json(scrapeReadyFixture("douyin", "account"));
+    }
+    if (url.endsWith("/analyze-artifacts")) {
+      return Response.json(evidenceReadyFixture());
+    }
+    if (url === "/api/agents/competitor-insight") {
+      modelSignal = init?.signal ?? null;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("aborted", "AbortError")),
+          {once: true},
+        );
+      });
+    }
+    throw new Error(`unexpected request: ${method} ${url}`);
+  }) as typeof fetch;
+  const user = userEvent.setup({document});
+  const view = render(
+    <ModelRegistryProvider>
+      <CompetitorInsightPanel mode="run" onPreview={() => undefined} />
+    </ModelRegistryProvider>,
+  );
+  const source = screen.getByLabelText("竞品主页或作品链接") as HTMLTextAreaElement;
+  await user.type(source, "https://www.douyin.com/user/MS4wLjABAAAA-test");
+  await user.click(screen.getByRole("button", {name: "抓取并分析"}));
+  await waitFor(() => assertSignalNotAborted(modelSignal));
+  await user.click(screen.getByRole("button", {name: "停止生成"}));
+
+  await waitFor(() => assert.deepEqual(stoppedBody, {
+    status: "stopped",
+    progress: 70,
+    currentStep: "用户已停止报告生成",
+    errorSummary: null,
+  }));
+  assertSignalAborted(modelSignal);
+  assert.equal(source.disabled, true);
+  assert.match(document.body.textContent ?? "", /正在同步停止状态/u);
+  await act(async () => {
+    stopPatch.resolve(Response.json({ok: true, task: stoppedTask}));
+    await stopPatch.promise;
+  });
+  await waitFor(() => {
+    assert.equal(source.disabled, false);
+    assert.match(document.body.textContent ?? "", /已停止[\s\S]*证据包已保留/u);
+  });
+  view.unmount();
+
+  globalThis.fetch = withCompetitorHealth(async (input) => {
+    const url = String(input);
+    if (url.includes("/project-records")) {
+      return Response.json({ok: true, tasks: [stoppedTask], artifacts: [], bundles: []});
+    }
+    throw new Error(`unexpected request after remount: ${url}`);
+  });
+  const remountUser = userEvent.setup({document});
+  render(<Home />);
+  await remountUser.click(screen.getByRole("button", {name: "Agent 项目"}));
+  await remountUser.click(screen.getByRole("button", {name: /竞品洞察 Agent/}));
+  await remountUser.click(screen.getByRole("button", {name: "任务列表"}));
+  await screen.findByText("抖音竞品洞察");
+  assert.match(document.body.textContent ?? "", /已停止/u);
+  assert.equal(screen.queryByRole("button", {name: /继续生成报告|重试失败批次/u}), null);
 });
 
 test("竞品洞察报告失败批次重试从原批次继续且不重复上传", async () => {
@@ -6181,13 +7461,13 @@ test("竞品洞察报告失败批次重试从原批次继续且不重复上传",
     "execution",
   ] as const;
   let providerIndex = 0;
-  let uploadCount = 0;
+  let analyzeCount = 0;
   let shouldFailPerformance = true;
-  globalThis.fetch = (async (input, init) => {
+  globalThis.fetch = withCompetitorHealth(async (input, init) => {
     const url = String(input);
     const body = init?.body ? JSON.parse(String(init.body)) : null;
-    if (url.endsWith("/analyze-upload")) {
-      uploadCount += 1;
+    if (url.endsWith("/analyze-artifacts")) {
+      analyzeCount += 1;
       return Response.json(evidenceReadyFixture());
     }
     if (url === "/api/agents/competitor-insight") {
@@ -6212,32 +7492,17 @@ test("竞品洞察报告失败批次重试从原批次继续且不重复上传",
       return Response.json(reportReadyFixture());
     }
     throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
-  const user = await openCompetitorReportRunner();
-  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
-    target: { files: [new File(["PK fixture"], "account.xlsx")] },
   });
+  const user = await openCompetitorAnalysisRequestRunner();
 
   const retry = await screen.findByRole("button", { name: "重试失败批次" });
   assert.match(screen.getByRole("alert").textContent ?? "", /数据表现批次/);
-  const failedStages = screen.getByRole("list", { name: "竞品报告五阶段" });
-  assert.ok(within(failedStages).getByRole("listitem", {
-    name: "读取 Excel（已完成）",
-  }));
-  assert.ok(within(failedStages).getByRole("listitem", {
-    name: "计算证据（已完成）",
-  }));
-  assert.equal(
-    within(failedStages).getByRole("listitem", { name: "生成三批（当前）" })
-      .getAttribute("aria-current"),
-    "step",
-  );
   await user.click(retry);
   await waitFor(() =>
-    assert.ok(screen.getByRole("heading", { name: "Markdown 报告预览" })),
+    assert.ok(screen.getByRole("status", { name: "报告控制器完成" })),
   );
 
-  assert.equal(uploadCount, 1);
+  assert.equal(analyzeCount, 1);
   assert.deepEqual(batchIds.slice(0, providerIndex), [
     "strategy",
     "performance",
@@ -6250,10 +7515,10 @@ test("竞品报告模型首次格式错误会自动重试一次且携带账号�
   installCompetitorReportModel();
   const modelBatchIds: string[] = [];
   let strategyAttempts = 0;
-  globalThis.fetch = (async (input, init) => {
+  globalThis.fetch = withCompetitorHealth(async (input, init) => {
     const url = String(input);
     const body = init?.body ? JSON.parse(String(init.body)) : null;
-    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url.endsWith("/analyze-artifacts")) return Response.json(evidenceReadyFixture());
     if (url === "/api/agents/competitor-insight") {
       modelBatchIds.push(body?.batchId);
       if (body?.batchId === "strategy") {
@@ -6278,13 +7543,10 @@ test("竞品报告模型首次格式错误会自动重试一次且携带账号�
     }
     if (url.endsWith("/assemble-report")) return Response.json(reportReadyFixture());
     throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
-  await openCompetitorReportRunner();
-  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), {
-    target: { files: [new File(["PK fixture"], "account.xlsx")] },
   });
+  await openCompetitorAnalysisRequestRunner();
 
-  await screen.findByRole("heading", { name: "Markdown 报告预览" });
+  await screen.findByRole("status", { name: "报告控制器完成" });
   assert.deepEqual(modelBatchIds, ["strategy", "strategy", "performance", "execution"]);
 });
 
@@ -6292,10 +7554,10 @@ test("竞品报告章节校验首次失败会只自动重试当前批次", async
   installCompetitorReportModel();
   const modelBatchIds: string[] = [];
   let validationAttempts = 0;
-  globalThis.fetch = (async (input, init) => {
+  globalThis.fetch = withCompetitorHealth(async (input, init) => {
     const url = String(input);
     const body = init?.body ? JSON.parse(String(init.body)) : null;
-    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url.endsWith("/analyze-artifacts")) return Response.json(evidenceReadyFixture());
     if (url === "/api/agents/competitor-insight") {
       modelBatchIds.push(body.batchId);
       return Response.json({ ok: true, batch: competitorBatchFixture(body.batchId) });
@@ -6309,28 +7571,26 @@ test("竞品报告章节校验首次失败会只自动重试当前批次", async
     }
     if (url.endsWith("/assemble-report")) return Response.json(reportReadyFixture());
     throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
-  await openCompetitorReportRunner();
-  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), { target: { files: [new File(["PK"], "account.xlsx")] } });
+  });
+  await openCompetitorAnalysisRequestRunner();
 
-  await screen.findByRole("heading", { name: "Markdown 报告预览" });
+  await screen.findByRole("status", { name: "报告控制器完成" });
   assert.deepEqual(modelBatchIds, ["strategy", "strategy", "performance", "execution"]);
 });
 
 test("竞品报告同一批两次格式错误后失败且不进入后续批次", async () => {
   installCompetitorReportModel();
   let modelCalls = 0;
-  globalThis.fetch = (async (input) => {
+  globalThis.fetch = withCompetitorHealth(async (input) => {
     const url = String(input);
-    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url.endsWith("/analyze-artifacts")) return Response.json(evidenceReadyFixture());
     if (url === "/api/agents/competitor-insight") {
       modelCalls += 1;
       return Response.json({ ok: true, batch: {} });
     }
     throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
-  await openCompetitorReportRunner();
-  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), { target: { files: [new File(["PK"], "account.xlsx")] } });
+  });
+  await openCompetitorAnalysisRequestRunner();
 
   await screen.findByRole("button", { name: "重试失败批次" });
   assert.equal(modelCalls, 2);
@@ -6339,17 +7599,16 @@ test("竞品报告同一批两次格式错误后失败且不进入后续批次",
 test("竞品报告运营错误不自动重试", async () => {
   installCompetitorReportModel();
   let modelCalls = 0;
-  globalThis.fetch = (async (input) => {
+  globalThis.fetch = withCompetitorHealth(async (input) => {
     const url = String(input);
-    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url.endsWith("/analyze-artifacts")) return Response.json(evidenceReadyFixture());
     if (url === "/api/agents/competitor-insight") {
       modelCalls += 1;
       return new Response("rate limited", { status: 429 });
     }
     throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
-  await openCompetitorReportRunner();
-  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), { target: { files: [new File(["PK"], "account.xlsx")] } });
+  });
+  await openCompetitorAnalysisRequestRunner();
 
   await screen.findByRole("button", { name: "重试失败批次" });
   assert.equal(modelCalls, 1);
@@ -6358,18 +7617,17 @@ test("竞品报告运营错误不自动重试", async () => {
 test("竞品报告两次尝试之间停止会阻止第二次请求", async () => {
   installCompetitorReportModel();
   let modelCalls = 0;
-  globalThis.fetch = (async (input) => {
+  globalThis.fetch = withCompetitorHealth(async (input) => {
     const url = String(input);
-    if (url.endsWith("/analyze-upload")) return Response.json(evidenceReadyFixture());
+    if (url.endsWith("/analyze-artifacts")) return Response.json(evidenceReadyFixture());
     if (url === "/api/agents/competitor-insight") {
       modelCalls += 1;
       fireEvent.click(screen.getByRole("button", { name: "停止生成" }));
       return Response.json({ ok: true, batch: {} });
     }
     throw new Error(`unexpected request: ${url}`);
-  }) as typeof fetch;
-  await openCompetitorReportRunner();
-  fireEvent.change(screen.getByLabelText("选择已有 Excel 文件"), { target: { files: [new File(["PK"], "account.xlsx")] } });
+  });
+  await openCompetitorAnalysisRequestRunner();
 
   await waitFor(() => assert.match(document.body.textContent ?? "", /已停止/));
   assert.equal(modelCalls, 1);

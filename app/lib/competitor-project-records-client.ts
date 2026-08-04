@@ -1,4 +1,6 @@
 import type {
+  ProjectBundle,
+  ProjectBundleCategory,
   ProjectResult,
   ProjectResultKind,
   ProjectTask,
@@ -10,6 +12,8 @@ const RECORD_BRIDGE_ORIGIN = "http://127.0.0.1:8768";
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const TASK_ID = /^competitor-[0-9A-Za-z-]{4,120}$/u;
 const ARTIFACT_ID = /^artifact-[0-9a-f]{16}$/u;
+const BUNDLE_ID = /^bundle-[0-9a-f]{16}$/u;
+const MAX_BUNDLE_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 const TASK_STATUSES = new Set<TaskStatus>([
   "waiting",
   "running",
@@ -28,6 +32,7 @@ const ARTIFACT_KINDS = new Set<ProjectResultKind>([
 export type CompetitorProjectSnapshot = {
   tasks: readonly ProjectTask[];
   results: readonly ProjectResult[];
+  bundles: readonly ProjectBundle[];
 };
 
 export type CreateCompetitorTaskInput = {
@@ -51,6 +56,23 @@ export type RegisterCompetitorArtifactsInput = {
   explicitPaths: readonly string[];
 };
 
+export type FinalizeCompetitorBundleInput = {
+  platformId: "douyin" | "xiaohongshu";
+  inputKind: "account" | "content";
+  category: ProjectBundleCategory;
+  outputDir: string;
+  primaryReportPath: string;
+  explicitPaths: readonly string[];
+  subjectName: string;
+  itemCount: number;
+};
+
+export type CompetitorBundleDetail = {
+  bundle: ProjectBundle;
+  markdown: string | null;
+  previewable: boolean;
+};
+
 const SAFE_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
   ORIGIN_NOT_ALLOWED: "当前页面来源不能调用本地任务服务。",
   INVALID_REQUEST: "本地任务服务请求参数无效。",
@@ -58,6 +80,8 @@ const SAFE_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
   TASK_ALREADY_EXISTS: "任务已经存在，请刷新任务列表。",
   TASK_NOT_FOUND: "任务记录不存在，请刷新后重试。",
   ARTIFACT_NOT_FOUND: "成果记录不存在，请刷新后重试。",
+  BUNDLE_NOT_FOUND: "成果包记录不存在，请刷新后重试。",
+  BUNDLE_MISSING: "成果包文件已被移动或删除。",
   ARTIFACT_MISSING: "成果文件已被移动或删除。",
   PATH_NOT_ALLOWED: "成果路径不在受控目录中。",
   ARTIFACT_SCAN_FAILED: "成果目录扫描失败。",
@@ -145,6 +169,110 @@ export async function registerCompetitorArtifacts(
   return parseSnapshot(body);
 }
 
+export async function finalizeCompetitorBundle(
+  taskId: string,
+  input: FinalizeCompetitorBundleInput,
+  signal?: AbortSignal,
+): Promise<{snapshot: CompetitorProjectSnapshot; bundle: ProjectBundle}> {
+  assertTaskId(taskId);
+  const body = await requestBridge(
+    `/project-tasks/${taskId}/bundle`,
+    jsonRequest("POST", {
+      ...input,
+      explicitPaths: [...input.explicitPaths],
+    }, signal),
+  );
+  const snapshot = parseSnapshot(body);
+  const bundleId = snapshot.tasks.find((task) => task.id === taskId)?.bundleId;
+  const bundle = typeof bundleId === "string"
+    ? snapshot.bundles.find((item) => item.id === bundleId)
+    : undefined;
+  if (!bundle) throw invalidResponse();
+  return {snapshot, bundle};
+}
+
+export async function loadCompetitorBundleDetail(
+  bundleId: string,
+  signal?: AbortSignal,
+): Promise<CompetitorBundleDetail> {
+  assertBundleId(bundleId);
+  const body = await requestBridge(
+    `/project-bundles/${bundleId}`,
+    {method: "GET", signal},
+  );
+  const record = requireRecord(body);
+  if (
+    record.ok !== true
+    || !Array.isArray(record.artifacts)
+    || !isRecord(record.task)
+    || !isRecord(record.bundle)
+    || !(record.markdown === null || typeof record.markdown === "string")
+    || typeof record.previewable !== "boolean"
+    || record.previewable !== (typeof record.markdown === "string")
+  ) throw invalidResponse();
+  const task = parseTask(record.task);
+  const artifacts = record.artifacts.map(parseArtifact);
+  const bundle = isCompatibleLegacyBundle(record.bundle, [task], artifacts)
+    ? parseLegacyBundle(record.bundle, task, artifacts)
+    : parseBundle(record.bundle, task, artifacts);
+  if (bundle.id !== bundleId) throw invalidResponse();
+  return {bundle, markdown: record.markdown, previewable: record.previewable};
+}
+
+export async function downloadCompetitorBundle(
+  bundleId: string,
+  signal?: AbortSignal,
+): Promise<{filename: string; blob: Blob}> {
+  assertBundleId(bundleId);
+  await verifyRecordBridgeHealth(signal);
+  let response: Response;
+  try {
+    response = await fetch(`${RECORD_BRIDGE_ORIGIN}/project-bundles/${bundleId}/download`, {
+      method: "GET", cache: "no-store", credentials: "omit", redirect: "error",
+      headers: {accept: "application/zip"}, signal,
+    });
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw abortError();
+    throw new CompetitorProjectRecordsClientError("BRIDGE_UNAVAILABLE", "无法连接本地任务服务，请确认 8768 服务已启动。");
+  }
+  if (!response.ok) {
+    const body = await readBoundedDownloadErrorJson(response, signal);
+    const record = isRecord(body) ? body : {};
+    const code = stableErrorCode(record.error);
+    throw new CompetitorProjectRecordsClientError(code, SAFE_MESSAGES[code] ?? SAFE_MESSAGES.INTERNAL_ERROR);
+  }
+  if (response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/zip") {
+    void response.body?.cancel().catch(() => undefined);
+    throw invalidResponse();
+  }
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (!Number.isSafeInteger(declaredLength) || declaredLength < 2 || declaredLength > MAX_BUNDLE_DOWNLOAD_BYTES) {
+    void response.body?.cancel().catch(() => undefined);
+    throw invalidResponse();
+  }
+  const bytes = await readBoundedBytes(response, MAX_BUNDLE_DOWNLOAD_BYTES, signal);
+  if (bytes.byteLength !== declaredLength || bytes[0] !== 0x50 || bytes[1] !== 0x4b) throw invalidResponse();
+  return {
+    filename: safeZipFilename(response.headers.get("content-disposition"), bundleId),
+    blob: new Blob([
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+    ], {type: "application/zip"}),
+  };
+}
+
+export async function revealCompetitorBundle(
+  bundleId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  assertBundleId(bundleId);
+  const body = await requestBridge(
+    `/project-bundles/${bundleId}/reveal`,
+    jsonRequest("POST", {}, signal),
+  );
+  const record = requireRecord(body);
+  if (record.ok !== true || record.bundleId !== bundleId) throw invalidResponse();
+}
+
 export async function revealCompetitorArtifact(
   artifactId: string,
   signal?: AbortSignal,
@@ -180,6 +308,7 @@ function jsonRequest(
 }
 
 async function requestBridge(path: string, init: RequestInit): Promise<unknown> {
+  await verifyRecordBridgeHealth(init.signal);
   let response: Response;
   try {
     response = await fetch(`${RECORD_BRIDGE_ORIGIN}${path}`, {
@@ -206,6 +335,39 @@ async function requestBridge(path: string, init: RequestInit): Promise<unknown> 
     );
   }
   return body;
+}
+
+async function verifyRecordBridgeHealth(signal?: AbortSignal | null): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`${RECORD_BRIDGE_ORIGIN}/health`, {
+      method: "GET",
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+      headers: {accept: "application/json"},
+      signal: signal ?? undefined,
+    });
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw abortError();
+    throw new CompetitorProjectRecordsClientError(
+      "BRIDGE_UNAVAILABLE",
+      "无法连接本地任务服务，请确认 8768 服务已启动。",
+    );
+  }
+  const body = await readBoundedJson(response, signal);
+  if (
+    !response.ok
+    || !isRecord(body)
+    || body.ok !== true
+    || body.stage !== "healthy"
+    || body.service !== "competitor-insight-report"
+  ) {
+    throw new CompetitorProjectRecordsClientError(
+      "BRIDGE_UNAVAILABLE",
+      "无法确认本地任务服务身份，请检查 8768 端口后重试。",
+    );
+  }
 }
 
 async function readBoundedJson(
@@ -261,13 +423,44 @@ async function readBoundedJson(
 
 function parseSnapshot(value: unknown): CompetitorProjectSnapshot {
   const record = requireRecord(value);
-  if (record.ok !== true || !Array.isArray(record.tasks) || !Array.isArray(record.artifacts)) {
+  if (record.ok !== true || !Array.isArray(record.tasks) || !Array.isArray(record.artifacts) || !(record.bundles === undefined || Array.isArray(record.bundles))) {
     throw invalidResponse();
   }
+  const tasks = record.tasks.map(parseTask);
+  const results = record.artifacts.map(parseArtifact);
   return {
-    tasks: record.tasks.map(parseTask),
-    results: record.artifacts.map(parseArtifact),
+    tasks,
+    results,
+    bundles: (record.bundles ?? []).map((item) => {
+      if (isCompatibleLegacyBundle(item, tasks, results)) {
+        const raw = requireRecord(item);
+        const task = tasks.find((candidate) => candidate.id === raw.taskId);
+        if (!task) throw invalidResponse();
+        return parseLegacyBundle(raw, task, results);
+      }
+      return parseSnapshotBundle(item, tasks, results);
+    }),
   };
+}
+
+async function readBoundedDownloadErrorJson(
+  response: Response,
+  signal?: AbortSignal | null,
+): Promise<unknown> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    void response.body?.cancel().catch(() => undefined);
+    if (signal?.aborted) throw abortError();
+    throw responseTooLarge();
+  }
+  const bytes = await readBoundedBytes(response, MAX_RESPONSE_BYTES, signal);
+  if (signal?.aborted) throw abortError();
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    if (signal?.aborted) throw abortError();
+    throw invalidResponse();
+  }
 }
 
 function parseTask(value: unknown): ProjectTask {
@@ -298,6 +491,7 @@ function parseTask(value: unknown): ProjectTask {
     || !(task.errorSummary === null || typeof task.errorSummary === "string")
     || !Array.isArray(task.artifactIds)
     || !task.artifactIds.every((item) => typeof item === "string" && ARTIFACT_ID.test(item))
+    || !isTaskClassification(task)
   ) {
     throw invalidResponse();
   }
@@ -319,6 +513,101 @@ function parseTask(value: unknown): ProjectTask {
     stoppedAt: task.stoppedAt as string | null,
     errorSummary: task.errorSummary as string | null,
     artifactIds: task.artifactIds as string[],
+    ...(task.inputKind === undefined ? {} : {inputKind: task.inputKind as ProjectTask["inputKind"]}),
+    ...(task.category === undefined ? {} : {category: task.category as ProjectTask["category"]}),
+    ...(task.bundleId === undefined ? {} : {bundleId: task.bundleId as ProjectTask["bundleId"]}),
+  };
+}
+
+function parseSnapshotBundle(
+  value: unknown,
+  tasks: readonly ProjectTask[],
+  artifacts: readonly ProjectResult[],
+): ProjectBundle {
+  const raw = requireRecord(value);
+  const taskId = raw.taskId;
+  if (typeof taskId !== "string") throw invalidResponse();
+  const task = tasks.find((item) => item.id === taskId);
+  if (!task) throw invalidResponse();
+  return parseBundle(raw, task, artifacts);
+}
+
+function parseBundle(
+  value: Record<string, unknown>,
+  task: ProjectTask,
+  artifacts: readonly ProjectResult[],
+): ProjectBundle {
+  const status = value.status;
+  const inputKind = value.inputKind;
+  const category = value.category;
+  const artifactIds = value.artifactIds;
+  const primaryReportPath = value.primaryReportPath;
+  if (
+    typeof value.id !== "string" || !BUNDLE_ID.test(value.id)
+    || value.agentId !== "competitor-insight" || value.taskId !== task.id
+    || typeof value.platformId !== "string" || value.platformId !== task.platformId
+    || (inputKind !== "account" && inputKind !== "content")
+    || !isBundleCategory(value.platformId, inputKind, category)
+    || (status !== "ready" && status !== "missing" && status !== "legacy")
+    || typeof value.subjectName !== "string" || !value.subjectName
+    || !Number.isInteger(value.itemCount) || (value.itemCount as number) < 0
+    || typeof value.rootDirectory !== "string" || !value.rootDirectory.startsWith("/")
+    || !(primaryReportPath === null || typeof primaryReportPath === "string")
+    || !(value.manifestPath === null || typeof value.manifestPath === "string")
+    || !(value.archivePath === null || typeof value.archivePath === "string")
+    || !Array.isArray(artifactIds) || !artifactIds.every((item) => typeof item === "string" && ARTIFACT_ID.test(item))
+    || new Set(artifactIds).size !== artifactIds.length
+    || !isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt)
+    || task.bundleId !== value.id || task.status !== "completed"
+  ) throw invalidResponse();
+  const childArtifacts = artifacts.filter((item) => item.taskId === task.id && artifactIds.includes(item.id));
+  if (childArtifacts.length !== artifactIds.length) throw invalidResponse();
+  const primary = childArtifacts.find((item) => item.absolutePath === primaryReportPath);
+  return {
+    id: value.id, agentId: "competitor-insight", taskId: task.id,
+    platformId: task.platformId as string, platformLabel: task.platformLabel ?? "",
+    inputKind, category: category as ProjectBundleCategory, title: task.title,
+    subjectName: value.subjectName, sourceUrl: task.sourceUrl ?? "", status,
+    primaryArtifactId: primary?.id ?? null,
+    manifestPath: value.manifestPath as string | null,
+    archivePath: value.archivePath as string | null,
+    rootDirectory: value.rootDirectory, artifactIds: artifactIds as string[],
+    itemCount: value.itemCount as number, createdAt: value.createdAt,
+    completedAt: value.updatedAt,
+  };
+}
+
+function parseLegacyBundle(
+  value: Record<string, unknown>,
+  task: ProjectTask,
+  artifacts: readonly ProjectResult[],
+): ProjectBundle {
+  if (!isCompatibleLegacyBundle(value, [task], artifacts)) throw invalidResponse();
+  const artifactIds = value.artifactIds as string[];
+  const primary = artifacts.find(
+    (item) => artifactIds.includes(item.id)
+      && sameLegacyPath(item.absolutePath ?? "", String(value.primaryReportPath)),
+  );
+  return {
+    id: value.id as string,
+    agentId: "competitor-insight",
+    taskId: task.id,
+    platformId: task.platformId as string,
+    platformLabel: task.platformLabel ?? "",
+    inputKind: "unknown",
+    category: null,
+    title: task.title,
+    subjectName: value.subjectName as string,
+    sourceUrl: task.sourceUrl ?? "",
+    status: value.status as "legacy" | "missing",
+    primaryArtifactId: primary?.id ?? null,
+    manifestPath: value.manifestPath as string | null,
+    archivePath: value.archivePath as string | null,
+    rootDirectory: value.rootDirectory as string,
+    artifactIds,
+    itemCount: value.itemCount as number,
+    createdAt: value.createdAt as string,
+    completedAt: value.updatedAt as string,
   };
 }
 
@@ -396,8 +685,197 @@ function isSafeHttpUrl(value: unknown): value is string {
   }
 }
 
+function isTaskClassification(task: Record<string, unknown>): boolean {
+  if (task.inputKind === undefined && task.category === undefined && task.bundleId === undefined) return true;
+  if (
+    (task.inputKind !== "unknown" && task.inputKind !== "account" && task.inputKind !== "content")
+    || !(task.bundleId === null || (typeof task.bundleId === "string" && BUNDLE_ID.test(task.bundleId)))
+  ) return false;
+  if (task.inputKind === "unknown") return task.category === null;
+  return isBundleCategory(task.platformId, task.inputKind, task.category);
+}
+
+function isBundleCategory(
+  platformId: unknown,
+  inputKind: unknown,
+  category: unknown,
+): category is ProjectBundleCategory {
+  return (
+    (platformId === "douyin" && inputKind === "account" && category === "douyin-account")
+    || (platformId === "douyin" && inputKind === "content" && category === "douyin-content")
+    || (platformId === "xiaohongshu" && inputKind === "account" && category === "xhs-account")
+    || (platformId === "xiaohongshu" && inputKind === "content" && category === "xhs-note")
+  );
+}
+
 function assertTaskId(taskId: string): void {
   if (!TASK_ID.test(taskId)) throw invalidResponse();
+}
+
+function assertBundleId(bundleId: string): void {
+  if (!BUNDLE_ID.test(bundleId)) throw invalidResponse();
+}
+
+async function readBoundedBytes(
+  response: Response,
+  limit: number,
+  signal?: AbortSignal | null,
+): Promise<Uint8Array> {
+  if (!response.body) throw invalidResponse();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  const abortRead = () => { void reader.cancel().catch(() => undefined); };
+  if (signal?.aborted) throw abortError();
+  signal?.addEventListener("abort", abortRead, {once: true});
+  try {
+    while (true) {
+      if (signal?.aborted) throw abortError();
+      let done: boolean;
+      let value: Uint8Array | undefined;
+      try {
+        ({done, value} = await reader.read());
+      } catch (error) {
+        if (signal?.aborted || isAbortError(error)) throw abortError();
+        throw error;
+      }
+      if (signal?.aborted) throw abortError();
+      if (done) break;
+      if (!value) throw invalidResponse();
+      received += value.byteLength;
+      if (received > limit) {
+        void reader.cancel().catch(() => undefined);
+        throw invalidResponse();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    signal?.removeEventListener("abort", abortRead);
+    try { reader.releaseLock(); } catch { /* closed streams need no cleanup */ }
+  }
+  const merged = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
+}
+
+function safeZipFilename(contentDisposition: string | null, bundleId: string): string {
+  const match = contentDisposition?.match(/filename="?([A-Za-z0-9._-]{1,128})"?/u);
+  const candidate = match?.[1];
+  return candidate?.toLowerCase().endsWith(".zip") ? candidate : `${bundleId}.zip`;
+}
+
+function isCompatibleLegacyBundle(
+  value: unknown,
+  tasks: readonly ProjectTask[],
+  artifacts: readonly ProjectResult[],
+): boolean {
+  if (!isRecord(value) || !hasExactFields(value, LEGACY_BUNDLE_FIELDS)) return false;
+  const task = typeof value.taskId === "string"
+    ? tasks.find((item) => item.id === value.taskId)
+    : undefined;
+  if (!task || !Array.isArray(value.artifactIds) || !Array.isArray(task.artifactIds) || typeof value.rootDirectory !== "string") {
+    return false;
+  }
+  const artifactIds = value.artifactIds;
+  const taskArtifactIds = task.artifactIds;
+  const rootDirectory = value.rootDirectory;
+  if (
+    value.id === undefined || typeof value.id !== "string" || !BUNDLE_ID.test(value.id)
+    || value.agentId !== "competitor-insight" || value.taskId !== task.id
+    || value.platformId !== task.platformId || (value.platformId !== "douyin" && value.platformId !== "xiaohongshu")
+    || value.inputKind !== "unknown" || value.category !== null
+    || (value.status !== "legacy" && value.status !== "missing")
+    || task.agentId !== "competitor-insight" || task.status !== "completed"
+    || task.inputKind !== "unknown" || task.category !== null || task.bundleId !== value.id
+    || value.subjectName !== task.title || value.itemCount !== 0
+    || !isTimestamp(value.createdAt) || !isTimestamp(value.updatedAt) || value.createdAt !== task.completedAt
+    || !hasCompatibleLegacyCommitments(value)
+    || !isLegacyBundlePaths(value, task)
+    || artifactIds.length === 0
+    || !artifactIds.every((item) => typeof item === "string" && ARTIFACT_ID.test(item))
+    || new Set(artifactIds).size !== artifactIds.length
+    || artifactIds.length !== taskArtifactIds.length
+    || !artifactIds.every((item) => taskArtifactIds.includes(item))
+  ) return false;
+  const legacyArtifacts = artifacts.filter((item) => artifactIds.includes(item.id));
+  return legacyArtifacts.length === artifactIds.length
+    && legacyArtifacts.some((item) => typeof item.absolutePath === "string"
+      && typeof value.primaryReportPath === "string"
+      && sameLegacyPath(item.absolutePath, value.primaryReportPath))
+    && legacyArtifacts.every((item) => item.agentId === "competitor-insight"
+      && item.taskId === task.id
+      && typeof item.absolutePath === "string"
+      && isLegacyBundleMemberPath(item.absolutePath, rootDirectory));
+}
+
+function hasCompatibleLegacyCommitments(value: Record<string, unknown>): boolean {
+  const commitments = [value.manifestSha256, value.archiveSha256, value.memberIdentitySha256];
+  return commitments.every((item) => item === null)
+    || commitments.every((item) => typeof item === "string" && /^[0-9a-f]{64}$/u.test(item));
+}
+
+const LEGACY_BUNDLE_FIELDS = new Set([
+  "id", "agentId", "taskId", "platformId", "inputKind", "category", "subjectName",
+  "itemCount", "status", "rootDirectory", "primaryReportPath", "manifestPath", "archivePath",
+  "artifactIds", "manifestSha256", "archiveSha256", "memberIdentitySha256", "createdAt", "updatedAt",
+]);
+
+function hasExactFields(value: Record<string, unknown>, fields: ReadonlySet<string>): boolean {
+  const keys = Object.keys(value);
+  return keys.length === fields.size && keys.every((key) => fields.has(key));
+}
+
+function isLegacyBundlePaths(value: Record<string, unknown>, task: ProjectTask): boolean {
+  if (typeof value.rootDirectory !== "string" || typeof value.id !== "string") return false;
+  const root = value.rootDirectory;
+  const rootSegments = normalizedLegacyPath(root).split("/").slice(1);
+  const isPlatformChild = rootSegments.some((segment, index) => (
+    segment === "outputs"
+    && rootSegments[index + 1] === "competitor-insight"
+    && rootSegments[index + 2] === task.platformId
+    && index + 3 < rootSegments.length
+  ));
+  return isCleanAbsolutePath(root)
+    && isPlatformChild
+    && value.manifestPath === `${root}/${value.id}.manifest.json`
+    && value.archivePath === `${root}/${value.id}.zip`
+    && typeof value.primaryReportPath === "string"
+    && value.primaryReportPath.endsWith(".md")
+    && isLegacyBundleMemberPath(value.primaryReportPath, root);
+}
+
+function isLegacyBundleMemberPath(value: string, root: string): boolean {
+  if (!isCleanAbsolutePath(value) || !isCleanAbsolutePath(root)) return false;
+  const member = normalizedLegacyPath(value);
+  const normalizedRoot = normalizedLegacyPath(root);
+  return member === normalizedRoot || member.startsWith(`${normalizedRoot}/`);
+}
+
+function sameLegacyPath(left: string, right: string): boolean {
+  return isCleanAbsolutePath(left)
+    && isCleanAbsolutePath(right)
+    && normalizedLegacyPath(left) === normalizedLegacyPath(right);
+}
+
+function normalizedLegacyPath(value: string): string {
+  return value.startsWith("/private/var/") ? value.slice("/private".length) : value;
+}
+
+function isCleanAbsolutePath(value: string): boolean {
+  return value.startsWith("/")
+    && !value.includes("\0")
+    && !value.includes("\\")
+    && value.split("/").slice(1).every((part) => part !== "" && part !== "." && part !== "..");
+}
+
+function stableErrorCode(value: unknown): string {
+  return typeof value === "string" && Object.hasOwn(SAFE_MESSAGES, value)
+    ? value
+    : "INTERNAL_ERROR";
 }
 
 function isAbortError(error: unknown): boolean {

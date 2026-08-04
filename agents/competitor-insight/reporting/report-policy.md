@@ -2,23 +2,23 @@
 
 ## 固定章节
 
-最终 Markdown 按已确认设计固定输出：账号概览、战略层、业务层、内容层、Top 10 高表现作品、起号期 Top 5、高收藏/高分享/高评论作品、流量层、数据层、对标建议和 7 天执行清单。结论必须可追溯到已提供的证据，不以缺失数据补写事实。
+最终 Markdown 只能由确定性 renderer 组装。账号报告固定输出账号概览、战略层、业务层、内容层、Top 10 高表现作品、起号期 Top 5、高收藏/高分享/高评论作品、流量层、数据层、三步对标建议和 7 天执行清单；小红书账号仅将“作品/视频链接”替换为“笔记/笔记链接”。单内容报告固定输出内容概览、数据完整性、主题与钩子、互动结构、可复用角度、拍法、转化假设和合规边界，绝不输出 Top 10、起号期、账号均值或 7 天账号执行表。结论必须可追溯到已提供的证据，不以缺失数据补写事实。
 
 ## 首期输入与结构化输出协议
 
 首期唯一输入源是用户提供的**单个抖音账号 Excel** 证据文件及其确定性解析结果；不混入小红书、其他账号、网页抓取或模型自行补充的数据。模型只输出符合 `section-batch.schema.json` 的 JSON 对象，不输出 Markdown、代码块、说明文字或其他字段。
 
-正式模型输出严格分为三批：`strategy`、`performance`、`execution`，不得使用其他批次名。所有批次保留统一根字段；`strategy` 和 `performance` 的选题、拍法、转化与执行数组必须为空，`execution` 的 `claims` 必须为空。
+账号正式模型输出严格分为三批：`strategy`、`performance`、`execution`，不得使用其他批次名。所有批次保留统一根字段；`strategy` 和 `performance` 的选题、拍法、转化与执行数组必须为空，`execution` 的 `claims` 必须为空。单内容只允许一批 `content`：其 claims 必须且只能覆盖 `content-overview`、`content-structure`、`interaction`、`conversion`，且全部 `strength: "hypothesis"` 并有非空 `verificationPlan`；复用角度恰好 3 项、拍法恰好 1 项、执行日恰好 0 项。content 的每个选题、拍法和转化项也必须显式提供 `strength: "hypothesis"` 与非空 `verificationPlan`。
 
 `strategy` 的每条判断必须以 `section` 标明 `strategy`、`business` 或 `content`；`performance` 的每条判断必须以 `section` 标明 `traffic` 或 `data`。不得依赖数组位置猜测章节，也不得跨批次放置判断。
 
-证据数字（点赞、评论、收藏、分享、总互动、发布时间、行号及各榜单名次）只由确定性证据层读取和计算。模型只能引用既有 `evidenceId`，不得输出、计算、改写或推断这些证据数字；报告渲染如需展示数字，只能从已验证的 `EvidenceBundle` 读取。
+证据数字（点赞、评论、收藏、分享、总互动、发布时间、行号及各榜单名次）只由确定性证据层读取和计算。每个请求批次都必须由服务端保存一份受信上下文 `{ batchId, allowedEvidenceIds }`；模型只能引用该批次 allowlist 中的既有 `evidenceId`。模型响应自身携带的 ID、全量 EvidenceBundle 中“恰好存在”的 ID，均不能替代该受信上下文。缺少、错配、重复或含未知 ID 的受信上下文必须失败关闭。不得硬编码平台前缀、输出、计算、改写或推断这些证据数字；报告渲染如需展示标题、互动、时间或链接，只能从已验证的 `EvidenceBundleV2` 读取。
 
 最终报告校验必须同时接收 Markdown、同一 `EvidenceBundle` 和组装时使用的三批已验证 sections。缺少 sections 时不得给出通过结果。终检使用同一确定性组装器重新生成完整期望 Markdown，并要求全文精确一致；同时按语义章节、选题、拍法、转化和逐日清单的实际渲染顺序，逐行、逐次核对完整证据引用。移动引用、替换正文、删除、复制、重排或遗漏引用均失败。
 
 ## 证据与判断口径
 
-每条内容证据使用 `evidenceId`、`sourceRow`、标题、发布时间、链接、点赞、评论、收藏、分享、总互动及各榜单名次。所有发现、选题、拍法、转化动作和每日执行项均须列明至少一个 `evidenceId`。
+每条内容证据使用 `evidenceId`、`sourceRow`、标题、发布时间、链接、点赞、评论、收藏、分享、总互动及各榜单名次。所有发现、选题、拍法、转化动作和每日执行项均须列明至少一个 `evidenceId`。单内容的模型文本一律是结构化待验证假设：禁止 `direct` 或 `weak` claim，且选题、拍法、转化不得只在正文写入“待验证假设”作为放行条件；字段缺失、非 hypothesis strength 或空验证计划均拒绝。标题、时间和指标等确定性事实由 renderer 从 EvidenceBundle 直接注入，不由模型作事实性表述。
 
 `direct` 仅用于可由数据或作品原文直接支持的陈述；`weak` 用于证据有限但存在合理信号的判断；`hypothesis` 用于尚未被证实的推测。`weak` 与 `hypothesis` 必须说明依据和验证方式，不得表述为既成事实。所有要求提供的 `complianceNotes` 均至少包含一条非空合规提示。
 

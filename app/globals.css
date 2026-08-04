@@ -2060,22 +2060,34 @@ button {
 .competitor-skill-card strong { display: block; margin-top: 15px; color: #2f66f6; font-size: 16px; }
 .competitor-skill-card.planned strong { color: #8290a5; }
 .competitor-skill-card p { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.competitor-transcription-note {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #cfe0ff;
+  border-radius: 10px;
+  background: #f3f7ff;
+  color: #31548d;
+  font-size: 11px;
+  line-height: 1.6;
+}
 .competitor-workflow {
   margin: 16px 0 0;
   padding: 13px;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
   border-radius: 12px;
   background: #f5f8fc;
   list-style: none;
 }
 .competitor-workflow li {
+  min-width: 0;
   padding: 8px;
   border: 1px solid transparent;
   border-radius: 9px;
   color: #607089;
   font-size: 11px;
+  overflow-wrap: anywhere;
 }
 .competitor-workflow li span {
   width: 21px;
@@ -2134,7 +2146,10 @@ button {
 }
 .competitor-capture-progress strong { color: #33445f; }
 .competitor-capture-progress.connecting,
-.competitor-capture-progress.scraping {
+.competitor-capture-progress.scraping,
+.competitor-capture-progress.normalizing,
+.competitor-capture-progress.generating,
+.competitor-capture-progress.bundling {
   border-color: #a9c2ff;
   background: #edf3ff;
   color: #214fae;
@@ -2144,8 +2159,7 @@ button {
   background: #effaf4;
   color: #25714d;
 }
-.competitor-capture-progress.connection-failed,
-.competitor-capture-progress.scrape-failed {
+.competitor-capture-progress.failed {
   border-color: #edc4c4;
   background: #fff6f6;
   color: #9a3e3e;
@@ -2218,30 +2232,13 @@ button {
   padding-top: 20px;
   border-top: 1px solid #dfe7f2;
 }
-.competitor-report-heading,
-.competitor-report-status,
-.competitor-report-preview-heading,
-.competitor-report-path {
+.competitor-report-status {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
 }
-.competitor-report-heading h3,
-.competitor-report-preview-heading h3 {
-  margin: 3px 0 5px;
-  color: #2f3e56;
-  font-size: 18px;
-}
-.competitor-report-heading p {
-  margin: 0;
-  color: var(--muted);
-  font-size: 11px;
-}
-.competitor-upload-button,
-.competitor-report-actions button,
-.competitor-report-preview-heading a,
-.competitor-report-path button {
+.competitor-report-actions button {
   padding: 9px 12px;
   border: 0;
   border-radius: 9px;
@@ -2251,51 +2248,6 @@ button {
   font-size: 11px;
   font-weight: 800;
   text-decoration: none;
-}
-.competitor-upload-button input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
-  clip-path: inset(50%);
-}
-.competitor-upload-button.disabled {
-  cursor: not-allowed;
-  opacity: .45;
-}
-.competitor-report-stages {
-  margin: 15px 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 7px;
-  list-style: none;
-}
-.competitor-report-stages li {
-  padding: 9px 7px;
-  border: 1px solid #e1e8f2;
-  border-radius: 9px;
-  background: #f8fafc;
-  color: #78879b;
-  font-size: 10px;
-  text-align: center;
-}
-.competitor-report-stages li span {
-  display: block;
-  margin-bottom: 4px;
-  font-weight: 900;
-}
-.competitor-report-stages li.current {
-  border-color: #aac3ff;
-  background: #edf3ff;
-  color: #2f66f6;
-}
-.competitor-report-stages li.completed {
-  border-color: #b9e4ce;
-  background: #effaf4;
-  color: #25714d;
 }
 .competitor-report-status {
   min-height: 52px;
@@ -2385,43 +2337,6 @@ button {
   margin: 5px 0 0;
   font-size: 11px;
   line-height: 1.55;
-}
-.competitor-report-preview {
-  margin-top: 14px;
-  padding: 14px;
-  border: 1px solid #cbd9eb;
-  border-radius: 12px;
-  background: #fff;
-}
-.competitor-report-preview pre {
-  max-height: 480px;
-  margin: 12px 0;
-  padding: 13px;
-  overflow: auto;
-  border-radius: 9px;
-  background: #172033;
-  color: #e9eef8;
-  font: 11px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.competitor-report-path {
-  align-items: flex-start;
-}
-.competitor-report-path code {
-  min-width: 0;
-  padding: 8px 10px;
-  flex: 1 1 auto;
-  border-radius: 8px;
-  background: #f2f5f9;
-  color: #53647c;
-  font-size: 10px;
-  overflow-wrap: anywhere;
-}
-.competitor-copy-message {
-  margin: 8px 0 0;
-  color: #4d6c88;
-  font-size: 10px;
 }
 
 .matrix-overview { display: grid; grid-template-columns: minmax(220px, .75fr) minmax(0, 1.25fr); gap: 14px; }
@@ -3423,6 +3338,260 @@ button {
   color: #fff;
 }
 
+.competitor-bundles-view {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.competitor-bundle-filters {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.competitor-bundle-filters button {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.competitor-bundle-filters button.active {
+  border-color: #b8c8f5;
+  background: var(--soft-blue);
+  color: var(--blue);
+  font-weight: 700;
+}
+
+.competitor-bundle-list {
+  min-width: 0;
+  margin-top: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.competitor-bundle-card {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid #dfe6f0;
+  border-radius: 16px;
+  background: #fbfcfe;
+}
+
+.competitor-bundle-card.status-missing {
+  border-color: #e1c9a3;
+  background: #fffaf2;
+}
+
+.competitor-bundle-card-heading,
+.competitor-bundle-card-heading > div,
+.competitor-bundle-actions,
+.competitor-bundle-preview > div {
+  display: flex;
+  align-items: center;
+}
+
+.competitor-bundle-card-heading {
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.competitor-bundle-card-heading > div {
+  min-width: 0;
+  gap: 10px;
+}
+
+.competitor-bundle-card-heading h3 {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #324158;
+  font-size: 17px;
+}
+
+.competitor-bundle-category,
+.bundle-integrity {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.competitor-bundle-category {
+  background: #eaf1ff;
+  color: var(--blue-dark);
+}
+
+.bundle-integrity.complete {
+  background: #e9f7f0;
+  color: #208657;
+}
+
+.bundle-integrity.incomplete {
+  background: #fff1e8;
+  color: #a36022;
+}
+
+.competitor-bundle-meta {
+  margin: 15px 0 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.competitor-bundle-meta div {
+  min-width: 0;
+  padding: 10px;
+  border-radius: 10px;
+  background: #f1f4f8;
+}
+
+.competitor-bundle-meta dt,
+.competitor-bundle-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.competitor-bundle-meta dt {
+  color: #8a95a6;
+  font-size: 10px;
+}
+
+.competitor-bundle-meta dd {
+  margin-top: 5px;
+  color: #44536a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.competitor-bundle-source {
+  max-width: 100%;
+  margin-top: 12px;
+  display: block;
+  overflow: hidden;
+  color: #52647f;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.competitor-bundle-source.unavailable {
+  color: #9a641d;
+}
+
+.competitor-bundle-actions {
+  margin-top: 15px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.competitor-bundle-actions button,
+.competitor-bundle-preview button {
+  padding: 8px 10px;
+  border: 1px solid #cfdbf7;
+  border-radius: 9px;
+  background: #fff;
+  color: var(--blue-dark);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.competitor-bundle-actions button:first-child {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: #fff;
+}
+
+.competitor-bundle-actions button:disabled {
+  cursor: not-allowed;
+  opacity: .5;
+}
+
+.competitor-bundle-artifacts {
+  margin: 14px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 7px;
+  list-style: none;
+}
+
+.competitor-bundle-artifacts li {
+  min-width: 0;
+  padding: 9px 10px;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid #e3e8f0;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.competitor-bundle-artifacts li > span,
+.competitor-bundle-artifacts li > small {
+  color: #7e899a;
+  font-size: 10px;
+}
+
+.competitor-bundle-artifacts li > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #435168;
+  font-size: 12px;
+}
+
+.competitor-bundle-preview {
+  min-width: 0;
+  margin-top: 14px;
+  padding: 13px;
+  border: 1px solid #dbe4f4;
+  border-radius: 11px;
+  background: #fff;
+}
+
+.competitor-bundle-preview > div {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.competitor-bundle-preview pre,
+.competitor-bundle-preview p {
+  max-height: 360px;
+  margin: 12px 0 0;
+  padding: 13px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: 9px;
+  background: #f7f9fc;
+  color: #35445a;
+  font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.competitor-bundle-status {
+  min-height: 1.2em;
+  margin-top: 12px;
+}
+
+.competitor-bundle-interface-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 @keyframes result-preview-in {
   from {
     transform: translateY(10px) scale(0.99);
@@ -3640,15 +3809,11 @@ button {
   .competitor-console-heading,
   .competitor-overview-actions,
   .competitor-detection,
-  .competitor-report-heading,
-  .competitor-report-status,
-  .competitor-report-preview-heading,
-  .competitor-report-path {
+  .competitor-report-status {
     align-items: stretch;
     display: grid;
   }
 
-  .competitor-report-stages,
   .competitor-evidence-summary {
     grid-template-columns: 1fr;
   }
@@ -3682,6 +3847,38 @@ button {
   .result-file-card {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .competitor-bundle-card-heading,
+  .competitor-bundle-card-heading > div {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .competitor-bundle-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .competitor-bundle-source {
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .competitor-bundle-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .competitor-bundle-actions button {
+    width: 100%;
+  }
+
+  .competitor-bundle-artifacts li {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .competitor-bundle-artifacts li > small {
+    grid-column: 2;
   }
 
   .result-task-focus,

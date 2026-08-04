@@ -1,4 +1,3 @@
-import base64
 import http.client
 import json
 from pathlib import Path
@@ -19,10 +18,8 @@ import bridge_server
 import project_records
 import service
 from test_service import (
-    malformed_account_workbook_bytes,
     valid_batches,
     workbook_bytes,
-    xlsx_with_compression_bomb,
 )
 
 
@@ -117,7 +114,7 @@ class BridgeServerTests(unittest.TestCase):
         })
 
     def test_write_endpoints_reject_missing_or_malicious_origins(self) -> None:
-        payload = json.dumps({"filename": "sample.xlsx", "contentBase64": ""}).encode()
+        payload = json.dumps({}).encode()
         for origin in (None, "https://evil.example"):
             with self.subTest(origin=origin):
                 headers = {"Content-Type": "application/json"}
@@ -125,7 +122,7 @@ class BridgeServerTests(unittest.TestCase):
                     headers["Origin"] = origin
                 status, _response_headers, body = self._request(
                     "POST",
-                    "/analyze-upload",
+                    "/analyze-artifacts",
                     payload,
                     headers,
                 )
@@ -134,7 +131,7 @@ class BridgeServerTests(unittest.TestCase):
 
         status, _headers, body = self._request(
             "OPTIONS",
-            "/analyze-upload",
+            "/analyze-artifacts",
             headers={"Origin": "https://evil.example"},
         )
         self.assertEqual(status, 403)
@@ -155,7 +152,7 @@ class BridgeServerTests(unittest.TestCase):
         production_origin = "https://zhongfan-ai-workbench.lvyakun325.chatgpt.site"
         status, headers, body = self._request(
             "OPTIONS",
-            "/analyze-upload",
+            "/analyze-artifacts",
             headers={
                 "Origin": production_origin,
                 "Access-Control-Request-Method": "POST",
@@ -292,11 +289,246 @@ class BridgeServerTests(unittest.TestCase):
         )
         self.assertEqual(headers["access-control-allow-private-network"], "true")
 
+    def test_bundle_download_returns_zip_not_json(self) -> None:
+        payload = {
+            **self.task_payload(),
+            "inputKind": "account",
+        }
+        status, _headers, _body = self._json_request("POST", "/project-tasks", payload)
+        self.assertEqual(status, 200)
+        status, _headers, _body = self._json_request(
+            "PATCH", f"/project-tasks/{payload['id']}",
+            {"inputKind": "account", "category": "xhs-account"},
+        )
+        self.assertEqual(status, 200)
+        output = self.project_root / "outputs" / "competitor-insight" / "xiaohongshu" / payload["id"]
+        output.mkdir(parents=True)
+        report = output / "report.md"
+        report.write_text("# report\n", encoding="utf-8")
+        status, _headers, body = self._json_request(
+            "POST", f"/project-tasks/{payload['id']}/artifacts",
+            {"outputDir": str(output), "explicitPaths": [str(report)]},
+        )
+        self.assertEqual(status, 200)
+        status, _headers, body = self._json_request(
+            "POST", f"/project-tasks/{payload['id']}/bundle",
+            {
+                "platformId": "xiaohongshu", "inputKind": "account", "category": "xhs-account",
+                "outputDir": str(output), "primaryReportPath": str(report),
+                "explicitPaths": [str(report)], "subjectName": "测试账号", "itemCount": 1,
+            },
+        )
+        self.assertEqual(status, 200)
+        bundle_id = json.loads(body)["bundles"][0]["id"]
+
+        status, headers, body = self._request(
+            "GET", f"/project-bundles/{bundle_id}/download",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["content-type"], "application/zip")
+        self.assertTrue(body.startswith(b"PK"))
+        self.assertEqual(headers["access-control-allow-origin"], "http://localhost:3000")
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertEqual(headers["content-length"], str(len(body)))
+        self.assertEqual(headers["content-disposition"], f'attachment; filename="{bundle_id}.zip"')
+
+        status, _headers, body = self._request(
+            "GET", f"/project-bundles/{bundle_id}",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(status, 200)
+        detail = json.loads(body)
+        self.assertEqual(detail["markdown"], "# report\n")
+        self.assertTrue(detail["previewable"])
+
+        status, _headers, body = self._request(
+            "GET", f"/project-bundles/{bundle_id}/download",
+            headers={"Origin": "https://evil.example"},
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["error"], "ORIGIN_NOT_ALLOWED")
+
+        with patch.object(
+            project_records,
+            "reveal_bundle",
+            return_value={"ok": True, "bundleId": bundle_id},
+        ) as reveal:
+            status, _headers, body = self._json_request(
+                "POST", f"/project-bundles/{bundle_id}/reveal", {},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["bundleId"], bundle_id)
+        reveal.assert_called_once_with(bundle_id)
+
+        (output / f"{bundle_id}.zip").unlink()
+        status, _headers, body = self._request(
+            "GET", f"/project-bundles/{bundle_id}/download",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body)["error"], "BUNDLE_MISSING")
+
+        status, _headers, body = self._request(
+            "GET", "/project-bundles/../../private/download",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body)["error"], "NOT_FOUND")
+
+    def test_bundle_routes_reject_query_method_and_origin_without_disconnect(self) -> None:
+        bundle_id = "bundle-0000000000000001"
+        routes = [
+            ("GET", f"/project-bundles/{bundle_id}?unexpected=1", None),
+            ("GET", f"/project-bundles/{bundle_id}/download?unexpected=1", None),
+            ("POST", f"/project-tasks/competitor-20260801-http-a1/bundle?unexpected=1", {}),
+            ("POST", f"/project-bundles/{bundle_id}/reveal?unexpected=1", {}),
+        ]
+        for method, path, payload in routes:
+            with self.subTest(method=method, path=path):
+                headers = {"Origin": "http://localhost:3000"}
+                body = None
+                if payload is not None:
+                    headers["Content-Type"] = "application/json"
+                    body = json.dumps(payload).encode("utf-8")
+                status, _headers, response_body = self._request(method, path, body, headers)
+                self.assertEqual(status, 400)
+                self.assertEqual(json.loads(response_body)["error"], "INVALID_REQUEST")
+        for method, path, payload in (
+            ("GET", f"/project-bundles/{bundle_id}", None),
+            ("GET", f"/project-bundles/{bundle_id}/download", None),
+            ("POST", "/project-tasks/competitor-20260801-http-a1/bundle", {}),
+            ("POST", f"/project-bundles/{bundle_id}/reveal", {}),
+        ):
+            with self.subTest(method=method, path=path):
+                headers = {"Origin": "https://evil.example"}
+                body = None
+                if payload is not None:
+                    headers["Content-Type"] = "application/json"
+                    body = json.dumps(payload).encode("utf-8")
+                status, _headers, response_body = self._request(method, path, body, headers)
+                self.assertEqual(status, 403)
+                self.assertEqual(json.loads(response_body)["error"], "ORIGIN_NOT_ALLOWED")
+        for method, path in (
+            ("POST", f"/project-bundles/{bundle_id}"),
+            ("POST", f"/project-bundles/{bundle_id}/download"),
+            ("GET", "/project-tasks/competitor-20260801-http-a1/bundle"),
+            ("GET", f"/project-bundles/{bundle_id}/reveal"),
+            ("GET", "/project-bundles/bundle-not-hex"),
+            ("POST", "/project-tasks/not-a-task/bundle"),
+            ("POST", "/project-bundles/bundle-not-hex/reveal"),
+        ):
+            with self.subTest(method=method, path=path):
+                headers = {"Origin": "http://localhost:3000"}
+                body = None
+                if method == "POST":
+                    headers["Content-Type"] = "application/json"
+                    body = b"{}"
+                status, _headers, response_body = self._request(method, path, body, headers)
+                self.assertEqual(status, 404)
+                self.assertEqual(json.loads(response_body)["error"], "NOT_FOUND")
+
+    def test_bundle_detail_hides_markdown_above_two_mebibytes(self) -> None:
+        payload = {**self.task_payload(), "id": "competitor-20260801-http-b2", "inputKind": "account"}
+        self.assertEqual(self._json_request("POST", "/project-tasks", payload)[0], 200)
+        self.assertEqual(self._json_request("PATCH", f"/project-tasks/{payload['id']}", {"inputKind": "account", "category": "xhs-account"})[0], 200)
+        output = self.project_root / "outputs" / "competitor-insight" / "xiaohongshu" / payload["id"]
+        output.mkdir(parents=True)
+        report = output / "large.md"
+        report.write_text("x" * (2 * 1024 * 1024 + 1), encoding="utf-8")
+        self.assertEqual(self._json_request("POST", f"/project-tasks/{payload['id']}/artifacts", {"outputDir": str(output), "explicitPaths": [str(report)]})[0], 200)
+        status, _headers, body = self._json_request("POST", f"/project-tasks/{payload['id']}/bundle", {"platformId": "xiaohongshu", "inputKind": "account", "category": "xhs-account", "outputDir": str(output), "primaryReportPath": str(report), "explicitPaths": [str(report)], "subjectName": "测试账号", "itemCount": 1})
+        self.assertEqual(status, 200)
+        bundle_id = json.loads(body)["bundles"][0]["id"]
+        status, _headers, body = self._request("GET", f"/project-bundles/{bundle_id}", headers={"Origin": "http://localhost:3000"})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["markdown"], None)
+        self.assertFalse(json.loads(body)["previewable"])
+
+    def test_bundle_detail_previews_exactly_two_mebibytes(self) -> None:
+        payload = {**self.task_payload(), "id": "competitor-20260801-http-c3", "inputKind": "account"}
+        self.assertEqual(self._json_request("POST", "/project-tasks", payload)[0], 200)
+        self.assertEqual(self._json_request("PATCH", f"/project-tasks/{payload['id']}", {"inputKind": "account", "category": "xhs-account"})[0], 200)
+        output = self.project_root / "outputs" / "competitor-insight" / "xiaohongshu" / payload["id"]
+        output.mkdir(parents=True)
+        report = output / "limit.md"
+        report.write_text("y" * (2 * 1024 * 1024), encoding="utf-8")
+        self.assertEqual(self._json_request("POST", f"/project-tasks/{payload['id']}/artifacts", {"outputDir": str(output), "explicitPaths": [str(report)]})[0], 200)
+        status, _headers, body = self._json_request("POST", f"/project-tasks/{payload['id']}/bundle", {"platformId": "xiaohongshu", "inputKind": "account", "category": "xhs-account", "outputDir": str(output), "primaryReportPath": str(report), "explicitPaths": [str(report)], "subjectName": "测试账号", "itemCount": 1})
+        self.assertEqual(status, 200)
+        bundle_id = json.loads(body)["bundles"][0]["id"]
+        status, _headers, body = self._request("GET", f"/project-bundles/{bundle_id}", headers={"Origin": "http://localhost:3000"})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(json.loads(body)["markdown"]), 2 * 1024 * 1024)
+        self.assertTrue(json.loads(body)["previewable"])
+
+        status, _headers, body = self._request(
+            "GET", "/project-bundles/bundle-not-hex/download",
+            headers={"Origin": "http://localhost:3000"},
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(json.loads(body)["error"], "NOT_FOUND")
+
+    def test_bundle_detail_hides_markdown_when_full_json_encoding_exceeds_client_cap(self) -> None:
+        payload = {
+            **self.task_payload(),
+            "id": "competitor-20260801-http-json-cap",
+            "inputKind": "account",
+        }
+        self.assertEqual(self._json_request("POST", "/project-tasks", payload)[0], 200)
+        self.assertEqual(
+            self._json_request(
+                "PATCH",
+                f"/project-tasks/{payload['id']}",
+                {"inputKind": "account", "category": "xhs-account"},
+            )[0],
+            200,
+        )
+        output = (
+            self.project_root / "outputs" / "competitor-insight"
+            / "xiaohongshu" / payload["id"]
+        )
+        output.mkdir(parents=True)
+        report = output / "escaped.md"
+        report.write_text("\\" * (2 * 1024 * 1024), encoding="utf-8")
+        self.assertEqual(
+            self._json_request(
+                "POST",
+                f"/project-tasks/{payload['id']}/artifacts",
+                {"outputDir": str(output), "explicitPaths": [str(report)]},
+            )[0],
+            200,
+        )
+        status, _headers, body = self._json_request(
+            "POST",
+            f"/project-tasks/{payload['id']}/bundle",
+            {
+                "platformId": "xiaohongshu", "inputKind": "account",
+                "category": "xhs-account", "outputDir": str(output),
+                "primaryReportPath": str(report), "explicitPaths": [str(report)],
+                "subjectName": "测试账号", "itemCount": 1,
+            },
+        )
+        self.assertEqual(status, 200)
+        bundle_id = json.loads(body)["bundles"][0]["id"]
+
+        status, _headers, body = self._request(
+            "GET",
+            f"/project-bundles/{bundle_id}",
+            headers={"Origin": "http://localhost:3000"},
+        )
+
+        detail = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertLessEqual(len(body), 4 * 1024 * 1024)
+        self.assertIsNone(detail["markdown"])
+        self.assertFalse(detail["previewable"])
+
     def test_rejects_oversized_request_before_parsing_json(self) -> None:
         self.handler_class.max_body_bytes = 64
         status, _headers, body = self._request(
             "POST",
-            "/analyze-upload",
+            "/analyze-artifacts",
             b"x" * 65,
             {
                 "Content-Type": "application/json",
@@ -307,69 +539,48 @@ class BridgeServerTests(unittest.TestCase):
         self.assertEqual(status, 413)
         self.assertEqual(json.loads(body)["error"], "REQUEST_TOO_LARGE")
 
-    def test_transport_limit_accommodates_base64_and_decoded_excel_limit_still_applies(self) -> None:
-        valid = workbook_bytes()
-        encoded_limit = ((service.MAX_EXCEL_BYTES + 2) // 3) * 4
-        self.assertGreaterEqual(
-            bridge_server.MAX_REQUEST_BYTES,
-            encoded_limit + 1024 * 1024,
-        )
-        self.handler_class.max_body_bytes = len(valid) * 2 + 1024
+    def test_analyze_upload_is_not_a_route_for_any_origin(self) -> None:
+        for origin in (None, "https://evil.example", "http://localhost:3000"):
+            with self.subTest(origin=origin):
+                headers = {"Content-Type": "application/json"}
+                if origin is not None:
+                    headers["Origin"] = origin
+                status, _headers, body = self._request("POST", "/analyze-upload", b"{}", headers)
+                self.assertEqual(status, 404)
+                self.assertEqual(json.loads(body)["error"], "NOT_FOUND")
 
-        with patch.object(service, "MAX_EXCEL_BYTES", len(valid)):
-            status, _headers, body = self._post_json(
-                "/analyze-upload",
-                {
-                    "filename": "at-limit.xlsx",
-                    "contentBase64": base64.b64encode(valid).decode("ascii"),
-                },
-            )
-            self.assertEqual(status, 200)
+    def test_analyze_upload_tombstone_is_404_for_every_http_verb(self) -> None:
+        for method in ("GET", "POST", "OPTIONS", "PATCH", "PUT", "DELETE", "HEAD"):
+            for origin in (None, "https://evil.example", "http://localhost:3000"):
+                with self.subTest(method=method, origin=origin):
+                    headers = {} if origin is None else {"Origin": origin}
+                    status, _headers, body = self._request(method, "/analyze-upload", b"{}" if method == "POST" else None, headers)
+                    self.assertEqual(status, 404)
+                    if method == "HEAD":
+                        self.assertEqual(body, b"")
+                    else:
+                        self.assertEqual(json.loads(body)["error"], "NOT_FOUND")
 
-            status, _headers, body = self._post_json(
-                "/analyze-upload",
-                {
-                    "filename": "over-limit.xlsx",
-                    "contentBase64": base64.b64encode(valid + b"x").decode("ascii"),
-                },
-            )
-            self.assertEqual(status, 413)
-            self.assertEqual(json.loads(body)["error"], "EXCEL_TOO_LARGE")
+    def test_analyze_artifacts_accepts_only_a_task_scoped_result_bundle(self) -> None:
+        task_dir = self.project_root / "outputs" / "competitor-insight" / "douyin" / "competitor-20260801-http-a1"
+        task_dir.mkdir(parents=True)
+        data_path = task_dir / "结构化数据.json"
+        data_path.write_text(json.dumps({"status": "success", "data": {"profile": {"nickname": "桥接账号", "sec_uid": "id"}, "videos": [{"desc": "作品", "statistics": {"digg_count": 1, "comment_count": 1, "collect_count": 1, "share_count": 1}, "create_time": "2026-07-01", "share_url": "https://example.com/1"}]}}), encoding="utf-8")
+        payload = {
+            "taskId": "competitor-20260801-http-a1",
+            "platformId": "douyin",
+            "inputKind": "account",
+            "outputDir": str(task_dir.resolve()),
+            "dataPath": str(data_path.resolve()),
+            "excelPath": None,
+        }
 
-    def test_rejects_non_json_and_invalid_base64_with_stable_errors(self) -> None:
-        status, _headers, body = self._request(
-            "POST",
-            "/analyze-upload",
-            b"plain text",
-            {
-                "Content-Type": "text/plain",
-                "Origin": "http://localhost:3000",
-            },
-        )
-        self.assertEqual(status, 400)
-        self.assertEqual(json.loads(body)["error"], "INVALID_JSON")
+        status, _headers, body = self._post_json("/analyze-artifacts", payload)
 
-        status, _headers, body = self._post_json(
-            "/analyze-upload",
-            {"filename": "sample.xlsx", "contentBase64": "%%%"},
-        )
-        self.assertEqual(status, 400)
-        self.assertEqual(json.loads(body)["error"], "INVALID_BASE64")
-
-    def test_analyze_upload_uses_the_fixed_json_boundary(self) -> None:
-        status, headers, body = self._post_json(
-            "/analyze-upload",
-            {
-                "filename": "sample.xlsx",
-                "contentBase64": base64.b64encode(workbook_bytes()).decode("ascii"),
-            },
-        )
-
-        payload = json.loads(body)
+        response = json.loads(body)
         self.assertEqual(status, 200)
-        self.assertEqual(payload["stage"], "evidence_ready")
-        self.assertRegex(payload["evidenceId"], r"^[0-9a-f]{16}$")
-        self.assertEqual(headers["access-control-allow-origin"], "http://localhost:3000")
+        self.assertEqual(response["outputDir"], str(task_dir.resolve()))
+        self.assertEqual(response["batchInputs"]["strategy"]["allowedEvidenceIds"], ["DY-E0001"])
 
     def test_errors_do_not_echo_stack_input_path_or_excel_body(self) -> None:
         secret_path = "/Users/example/private-secret.xlsx"
@@ -380,6 +591,22 @@ class BridgeServerTests(unittest.TestCase):
         self.assertNotIn(secret_path, decoded)
         self.assertNotIn("Traceback", decoded)
         self.assertEqual(json.loads(body)["error"], "PATH_NOT_ALLOWED")
+
+    def test_record_store_contention_is_a_retryable_service_error(self) -> None:
+        with patch.object(
+            project_records,
+            "read_records",
+            side_effect=ValueError("record_store_locked"),
+        ):
+            status, _headers, body = self._request(
+                "GET",
+                "/project-records?agentId=competitor-insight",
+                headers={"Origin": "http://localhost:3000"},
+            )
+
+        payload = json.loads(body)
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["error"], "RECORD_STORE_LOCKED")
 
     def test_missing_secure_nofollow_has_stable_safe_http_error(self) -> None:
         douyin_root = (
@@ -418,34 +645,6 @@ class BridgeServerTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertEqual(json.loads(body)["error"], "INTERNAL_SECURITY_BOUNDARY")
         self.assertNotIn(str(workbook_path), decoded)
-
-    def test_archive_bomb_and_internal_workbook_value_error_have_safe_http_codes(self) -> None:
-        cases = (
-            (
-                xlsx_with_compression_bomb(),
-                "XLSX_ARCHIVE_TOO_LARGE",
-                "compression-bomb",
-            ),
-            (
-                malformed_account_workbook_bytes(),
-                "INVALID_WORKBOOK",
-                "not enough values to unpack",
-            ),
-        )
-        for content, error_code, forbidden in cases:
-            with self.subTest(error_code=error_code):
-                status, _headers, body = self._post_json(
-                    "/analyze-upload",
-                    {
-                        "filename": "sample.xlsx",
-                        "contentBase64": base64.b64encode(content).decode("ascii"),
-                    },
-                )
-                decoded = body.decode("utf-8")
-                expected_status = 413 if error_code == "XLSX_ARCHIVE_TOO_LARGE" else 400
-                self.assertEqual(status, expected_status)
-                self.assertEqual(json.loads(body)["error"], error_code)
-                self.assertNotIn(forbidden, decoded)
 
     def test_oversized_report_is_retained_but_not_returned_for_preview(self) -> None:
         evidence = service.analyze_upload("sample.xlsx", workbook_bytes())

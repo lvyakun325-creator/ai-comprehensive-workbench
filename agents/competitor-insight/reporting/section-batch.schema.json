@@ -14,7 +14,7 @@
   ],
   "properties": {
     "batchId": {
-      "enum": ["strategy", "performance", "execution"]
+      "enum": ["strategy", "performance", "execution", "content"]
     },
     "claims": {
       "type": "array",
@@ -22,15 +22,30 @@
     },
     "topicDirections": {
       "type": "array",
-      "items": { "$ref": "#/$defs/topicDirection" }
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/topicDirection" },
+          { "$ref": "#/$defs/contentTopicDirection" }
+        ]
+      }
     },
     "filmingTemplates": {
       "type": "array",
-      "items": { "$ref": "#/$defs/filmingTemplate" }
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/filmingTemplate" },
+          { "$ref": "#/$defs/contentFilmingTemplate" }
+        ]
+      }
     },
     "conversionItems": {
       "type": "array",
-      "items": { "$ref": "#/$defs/conversionItem" }
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/conversionItem" },
+          { "$ref": "#/$defs/contentConversionItem" }
+        ]
+      }
     },
     "executionDays": {
       "type": "array",
@@ -88,8 +103,9 @@
       "then": {
         "properties": {
           "claims": { "maxItems": 0 },
-          "topicDirections": { "minItems": 5, "maxItems": 5 },
-          "filmingTemplates": { "minItems": 3, "maxItems": 3 },
+          "topicDirections": { "minItems": 5, "maxItems": 5, "items": { "$ref": "#/$defs/topicDirection" } },
+          "filmingTemplates": { "minItems": 3, "maxItems": 3, "items": { "$ref": "#/$defs/filmingTemplate" } },
+          "conversionItems": { "items": { "$ref": "#/$defs/conversionItem" } },
           "executionDays": {
             "minItems": 7,
             "maxItems": 7,
@@ -133,6 +149,55 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": { "batchId": { "const": "content" } },
+        "required": ["batchId"]
+      },
+      "then": {
+        "properties": {
+          "claims": {
+            "minItems": 4,
+            "maxItems": 4,
+            "items": { "$ref": "#/$defs/contentClaim" },
+            "allOf": [
+              {
+                "contains": { "properties": { "section": { "const": "content-overview" } }, "required": ["section"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "section": { "const": "content-structure" } }, "required": ["section"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "section": { "const": "interaction" } }, "required": ["section"] },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": { "properties": { "section": { "const": "conversion" } }, "required": ["section"] },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            ]
+          },
+          "topicDirections": {
+            "minItems": 3,
+            "maxItems": 3,
+            "items": { "$ref": "#/$defs/contentTopicDirection" }
+          },
+          "filmingTemplates": {
+            "minItems": 1,
+            "maxItems": 1,
+            "items": { "$ref": "#/$defs/contentFilmingTemplate" }
+          },
+          "conversionItems": { "items": { "$ref": "#/$defs/contentConversionItem" } },
+          "executionDays": { "maxItems": 0 }
+        }
+      }
     }
   ],
   "$defs": {
@@ -147,13 +212,13 @@
       "required": ["section", "statement", "strength", "evidenceIds"],
       "properties": {
         "section": {
-          "enum": ["strategy", "business", "content", "traffic", "data"]
+          "enum": ["strategy", "business", "content", "traffic", "data", "content-overview", "content-structure", "interaction", "conversion"]
         },
         "statement": { "type": "string", "minLength": 1 },
         "strength": { "enum": ["direct", "weak", "hypothesis"] },
         "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
         "rationale": { "type": "string", "minLength": 1 },
-        "verificationPlan": { "type": "string", "minLength": 1 },
+        "verificationPlan": { "type": "string", "minLength": 1, "maxLength": 1000 },
         "complianceNotes": {
           "type": "array",
           "minItems": 1,
@@ -177,6 +242,15 @@
         }
       ]
     },
+    "contentClaim": {
+      "allOf": [
+        { "$ref": "#/$defs/claim" },
+        {
+          "properties": { "strength": { "const": "hypothesis" } },
+          "required": ["verificationPlan"]
+        }
+      ]
+    },
     "topicDirection": {
       "type": "object",
       "additionalProperties": false,
@@ -184,6 +258,23 @@
       "properties": {
         "title": { "type": "string", "minLength": 1 },
         "angle": { "type": "string", "minLength": 1 },
+        "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
+        "complianceNotes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "contentTopicDirection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "angle", "strength", "verificationPlan", "evidenceIds", "complianceNotes"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "angle": { "type": "string", "minLength": 1 },
+        "strength": { "const": "hypothesis" },
+        "verificationPlan": { "type": "string", "minLength": 1, "maxLength": 1000 },
         "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
         "complianceNotes": {
           "type": "array",
@@ -208,12 +299,46 @@
         }
       }
     },
+    "contentFilmingTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "hook", "structure", "strength", "verificationPlan", "evidenceIds", "complianceNotes"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "hook": { "type": "string", "minLength": 1 },
+        "structure": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "strength": { "const": "hypothesis" },
+        "verificationPlan": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
+        "complianceNotes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "conversionItem": {
       "type": "object",
       "additionalProperties": false,
       "required": ["action", "evidenceIds", "complianceNotes"],
       "properties": {
         "action": { "type": "string", "minLength": 1 },
+        "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
+        "complianceNotes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "contentConversionItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "strength", "verificationPlan", "evidenceIds", "complianceNotes"],
+      "properties": {
+        "action": { "type": "string", "minLength": 1 },
+        "strength": { "const": "hypothesis" },
+        "verificationPlan": { "type": "string", "minLength": 1, "maxLength": 1000 },
         "evidenceIds": { "$ref": "#/$defs/evidenceIds" },
         "complianceNotes": {
           "type": "array",

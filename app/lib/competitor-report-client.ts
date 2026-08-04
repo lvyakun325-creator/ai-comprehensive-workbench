@@ -1,28 +1,35 @@
 const REPORT_BRIDGE_ORIGIN = "http://127.0.0.1:8768";
-const MAX_EXCEL_BYTES = 50 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_PATH_CHARACTERS = 4_096;
 const MAX_BATCH_INPUT_CHARACTERS = 80_000;
-const BASE64_ALPHABET =
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+export type AnalyzeScrapeArtifactsInput = {
+  taskId: string;
+  platformId: "douyin" | "xiaohongshu";
+  inputKind: "account" | "content";
+  outputDir: string;
+  dataPath: string;
+  excelPath: string | null;
+};
 
 export type EvidenceReadyResponse = {
   ok: true;
   stage: "evidence_ready";
   evidenceId: string;
-  account: Record<string, unknown>;
-  completeness: Record<string, unknown>;
-  batchInputs: Record<
-    "strategy" | "performance" | "execution",
-    Record<string, unknown>
-  >;
+  platformId: AnalyzeScrapeArtifactsInput["platformId"];
+  inputKind: AnalyzeScrapeArtifactsInput["inputKind"];
+  reportType: "douyin-account" | "douyin-content" | "xhs-account" | "xhs-note";
+  outputDir: string;
+  subjectName: string;
+  itemCount: number;
+  batchInputs: Record<string, Record<string, unknown>>;
 };
 
 export type ValidatedBatchResponse = {
   ok: true;
   stage: "section_validated";
   evidenceId: string;
-  batchId: "strategy" | "performance" | "execution";
+  batchId: "strategy" | "performance" | "execution" | "content";
   batch: Record<string, unknown>;
 };
 
@@ -67,48 +74,16 @@ export class CompetitorReportClientError extends Error {
   }
 }
 
-export async function analyzeReportPath(
-  excelPath: string,
-  signal: AbortSignal,
+export async function analyzeScrapeArtifacts(
+  input: AnalyzeScrapeArtifactsInput,
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<EvidenceReadyResponse> {
-  const path = excelPath.trim();
-  if (!path || path.length > MAX_PATH_CHARACTERS || !/\.xlsx$/iu.test(path)) {
-    throw new CompetitorReportClientError(
-      "INVALID_WORKBOOK",
-      "仅支持受控目录中的 .xlsx 文件。",
-    );
+  if (!validArtifactInput(input)) {
+    throw new CompetitorReportClientError("INVALID_REQUEST", "抓取成果路径无效。");
   }
   return postReportBridge(
-    "/analyze-path",
-    { path },
-    signal,
-    parseEvidenceReady,
-  );
-}
-
-export async function analyzeReportUpload(
-  file: File,
-  signal: AbortSignal,
-): Promise<EvidenceReadyResponse> {
-  if (!/\.xlsx$/iu.test(file.name)) {
-    throw new CompetitorReportClientError(
-      "INVALID_WORKBOOK",
-      "仅支持 .xlsx 文件。",
-    );
-  }
-  if (file.size > MAX_EXCEL_BYTES) {
-    throw new CompetitorReportClientError(
-      "EXCEL_TOO_LARGE",
-      "Excel 文件超过 50 MB 上限。",
-    );
-  }
-  assertNotAborted(signal);
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  assertNotAborted(signal);
-  const contentBase64 = await encodeBase64(bytes, signal);
-  return postReportBridge(
-    "/analyze-upload",
-    { filename: file.name, contentBase64 },
+    "/analyze-artifacts",
+    input,
     signal,
     parseEvidenceReady,
   );
@@ -116,12 +91,13 @@ export async function analyzeReportUpload(
 
 export async function validateReportBatch(
   evidenceId: string,
+  outputDir: string,
   batch: unknown,
   signal: AbortSignal,
 ): Promise<ValidatedBatchResponse> {
   return postReportBridge(
     "/validate-section",
-    { evidenceId, batch },
+    { evidenceId, outputDir, batch },
     signal,
     parseValidatedBatch,
   );
@@ -129,12 +105,13 @@ export async function validateReportBatch(
 
 export async function assembleReport(
   evidenceId: string,
+  outputDir: string,
   batches: unknown[],
   signal: AbortSignal,
 ): Promise<ReportReadyResponse> {
   return postReportBridge(
     "/assemble-report",
-    { evidenceId, batches },
+    { evidenceId, outputDir, batches },
     signal,
     parseReportReady,
   );
@@ -147,6 +124,7 @@ async function postReportBridge<T>(
   parseSuccess: (value: unknown) => T,
 ): Promise<T> {
   assertNotAborted(signal);
+  await verifyReportBridgeHealth(signal);
   let response: Response;
   try {
     response = await fetch(`${REPORT_BRIDGE_ORIGIN}${path}`, {
@@ -175,6 +153,41 @@ async function postReportBridge<T>(
   } catch (error) {
     if (error instanceof CompetitorReportClientError) throw error;
     throw invalidResponse();
+  }
+}
+
+async function verifyReportBridgeHealth(signal: AbortSignal): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`${REPORT_BRIDGE_ORIGIN}/health`, {
+      method: "GET",
+      cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
+      headers: {accept: "application/json"},
+      signal,
+    });
+  } catch (error) {
+    if (signal.aborted || isAbortError(error)) throw abortError();
+    throw new CompetitorReportClientError(
+      "BRIDGE_UNAVAILABLE",
+      "无法连接本地报告服务，请确认 8768 服务已启动。",
+    );
+  }
+  const body = await readBoundedJson(response, signal);
+  if (
+    !response.ok
+    || !body
+    || typeof body !== "object"
+    || Array.isArray(body)
+    || (body as Record<string, unknown>).ok !== true
+    || (body as Record<string, unknown>).stage !== "healthy"
+    || (body as Record<string, unknown>).service !== "competitor-insight-report"
+  ) {
+    throw new CompetitorReportClientError(
+      "BRIDGE_UNAVAILABLE",
+      "无法确认本地报告服务身份，请检查 8768 端口后重试。",
+    );
   }
 }
 
@@ -230,6 +243,7 @@ async function readBoundedJson(
       // Releasing a closed response stream must not replace the stable result.
     }
   }
+  if (signal.aborted) throw abortError();
   try {
     return JSON.parse(chunks.join(""));
   } catch {
@@ -237,43 +251,17 @@ async function readBoundedJson(
   }
 }
 
-async function encodeBase64(
-  bytes: Uint8Array,
-  signal: AbortSignal,
-): Promise<string> {
-  const chunks: string[] = [];
-  const bytesPerChunk = 3 * 87_381;
-  for (let offset = 0; offset < bytes.length; offset += bytesPerChunk) {
-    assertNotAborted(signal);
-    const end = Math.min(bytes.length, offset + bytesPerChunk);
-    let encoded = "";
-    for (let index = offset; index < end; index += 3) {
-      const first = bytes[index] ?? 0;
-      const hasSecond = index + 1 < bytes.length;
-      const hasThird = index + 2 < bytes.length;
-      const second = hasSecond ? bytes[index + 1] ?? 0 : 0;
-      const third = hasThird ? bytes[index + 2] ?? 0 : 0;
-      encoded += BASE64_ALPHABET[first >> 2];
-      encoded += BASE64_ALPHABET[((first & 3) << 4) | (second >> 4)];
-      encoded += hasSecond
-        ? BASE64_ALPHABET[((second & 15) << 2) | (third >> 6)]
-        : "=";
-      encoded += hasThird ? BASE64_ALPHABET[third & 63] : "=";
-    }
-    chunks.push(encoded);
-    if (end < bytes.length) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
-  }
-  assertNotAborted(signal);
-  return chunks.join("");
-}
-
 function parseEvidenceReady(value: unknown): EvidenceReadyResponse {
   const body = exactRecord(value, [
     "ok",
     "stage",
     "evidenceId",
+    "platformId",
+    "inputKind",
+    "reportType",
+    "outputDir",
+    "subjectName",
+    "itemCount",
     "account",
     "completeness",
     "batchInputs",
@@ -283,61 +271,101 @@ function parseEvidenceReady(value: unknown): EvidenceReadyResponse {
     || body.stage !== "evidence_ready"
     || typeof body.evidenceId !== "string"
     || !/^[0-9a-f]{16}$/u.test(body.evidenceId)
+    || (body.platformId !== "douyin" && body.platformId !== "xiaohongshu")
+    || (body.inputKind !== "account" && body.inputKind !== "content")
+    || !validReportType(body.platformId, body.inputKind, body.reportType)
+    || !validText(body.outputDir, MAX_PATH_CHARACTERS)
+    || !validText(body.subjectName, 200)
+    || typeof body.itemCount !== "number"
+    || !Number.isSafeInteger(body.itemCount)
+    || body.itemCount < 1
     || !validAccount(body.account)
     || !isRecord(body.completeness)
-    || !validBatchInputs(body.batchInputs)
-    || !sameAccount(
-      (body.batchInputs as Record<string, Record<string, unknown>>).strategy.account,
-      body.account,
-    )
+    || !validBatchInputs(body.batchInputs, body.platformId)
   ) {
     throw invalidResponse();
   }
   return body as EvidenceReadyResponse;
 }
 
-function validBatchInputs(value: unknown): value is EvidenceReadyResponse["batchInputs"] {
+function validBatchInputs(value: unknown, platformId: unknown): value is EvidenceReadyResponse["batchInputs"] {
   if (!isRecord(value)) return false;
-  const batchIds = ["strategy", "performance", "execution"] as const;
+  const batchIds = Object.keys(value);
+  const account = hasExactKeys(value, ["strategy", "performance", "execution"]);
+  const content = hasExactKeys(value, ["content"]);
+  if (!account && !content) return false;
   if (!hasExactKeys(value, batchIds)) return false;
   try {
     if (JSON.stringify(value).length > MAX_BATCH_INPUT_CHARACTERS) return false;
   } catch {
     return false;
   }
-  return batchIds.every((batchId) => validBatchInput(batchId, value[batchId]));
+  return batchIds.every((batchId) => validBatchInput(batchId, value[batchId], platformId));
 }
 
 function validBatchInput(
-  batchId: "strategy" | "performance" | "execution",
+  batchId: string,
   value: unknown,
+  platformId: unknown,
 ): boolean {
   if (!isRecord(value)) return false;
   const expectedKeys = batchId === "strategy"
-    ? ["account", "availability", "evidence", "rankings"]
+    ? ["batchId", "allowedEvidenceIds", "account", "availability", "evidence", "rankings"]
     : batchId === "performance"
-      ? ["availability", "evidence", "metrics", "rankings"]
-      : ["availability", "evidence", "rankings"];
-  if (
-    !hasExactKeys(value, expectedKeys)
-    || !validAvailability(value.availability)
-  ) {
-    return false;
+      ? ["batchId", "allowedEvidenceIds", "availability", "evidence", "metrics", "rankings"]
+      : batchId === "execution"
+        ? ["batchId", "allowedEvidenceIds", "availability", "evidence", "rankings"]
+        : ["batchId", "allowedEvidenceIds", "author", "content", "evidence"];
+  if (!hasExactKeys(value, expectedKeys) || value.batchId !== batchId || !validAllowedEvidenceIds(value.allowedEvidenceIds, platformId)) return false;
+  if (batchId === "content") {
+    return validEvidenceItems(value.evidence)
+      && validEvidenceIdsMatch(value.evidence, value.allowedEvidenceIds, platformId)
+      && isRecord(value.author)
+      && isRecord(value.content);
   }
+  if (!validAvailability(value.availability)) return false;
   if (batchId === "strategy" && !validAccount(value.account)) return false;
   const evidenceIds = validEvidenceIdSet(value.evidence);
   if (
     !evidenceIds
     || !validRankings(
-      batchId,
+      batchId as "strategy" | "performance" | "execution",
       value.rankings,
       evidenceIds,
       value.availability as Record<string, boolean>,
+      platformId,
     )
   ) {
     return false;
   }
   return batchId !== "performance" || validMetrics(value.metrics);
+}
+
+function validAllowedEvidenceIds(value: unknown, platformId: unknown): value is string[] {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.length <= 30
+    && value.every((id) => validPlatformEvidenceId(id, platformId))
+    && new Set(value).size === value.length;
+}
+
+function validEvidenceIdsMatch(evidence: unknown, allowed: unknown, platformId: unknown): boolean {
+  if (!validEvidenceItems(evidence) || !validAllowedEvidenceIds(allowed, platformId)) return false;
+  const ids = (evidence as Array<Record<string, unknown>>).map((item) => item.evidenceId);
+  return ids.length === allowed.length && ids.every((id, index) => validPlatformEvidenceId(id, platformId) && id === allowed[index]);
+}
+
+function validReportType(platformId: unknown, inputKind: unknown, reportType: unknown): boolean {
+  const expected = `${platformId === "xiaohongshu" ? "xhs" : "douyin"}-${inputKind === "content" && platformId === "xiaohongshu" ? "note" : inputKind}`;
+  return reportType === expected;
+}
+
+function validArtifactInput(input: AnalyzeScrapeArtifactsInput): boolean {
+  if (!isRecord(input) || !/^competitor-[0-9A-Za-z-]{4,120}$/u.test(input.taskId)) return false;
+  if (input.platformId !== "douyin" && input.platformId !== "xiaohongshu") return false;
+  if (input.inputKind !== "account" && input.inputKind !== "content") return false;
+  const paths = [input.outputDir, input.dataPath, ...(input.excelPath === null ? [] : [input.excelPath])];
+  return paths.every((path) => validText(path, MAX_PATH_CHARACTERS) && !path.includes("\0"));
 }
 
 function validAccount(value: unknown): boolean {
@@ -392,6 +420,7 @@ function validRankings(
   value: unknown,
   batchEvidenceIds: ReadonlySet<string>,
   availability: Readonly<Record<string, boolean>>,
+  platformId: unknown,
 ): boolean {
   if (!isRecord(value)) return false;
   const expected = batchId === "strategy"
@@ -408,7 +437,7 @@ function validRankings(
       || (ranking.status !== "available" && ranking.status !== "unavailable")
       || !Array.isArray(ranking.evidenceIds)
       || ranking.evidenceIds.length > 10
-      || !ranking.evidenceIds.every(validEvidenceId)
+      || !ranking.evidenceIds.every((id) => validPlatformEvidenceId(id, platformId))
     ) {
       return false;
     }
@@ -506,7 +535,12 @@ function validMetrics(value: unknown): boolean {
 }
 
 function validEvidenceId(value: unknown): value is string {
-  return typeof value === "string" && /^DY-E\d{4,8}$/u.test(value);
+  return typeof value === "string" && /^(?:DY|XHS)-E\d{4,8}$/u.test(value);
+}
+
+function validPlatformEvidenceId(value: unknown, platformId: unknown): value is string {
+  const prefix = platformId === "xiaohongshu" ? "XHS" : platformId === "douyin" ? "DY" : "";
+  return typeof value === "string" && new RegExp(`^${prefix}-E\\d{4,8}$`, "u").test(value);
 }
 
 function hasExactKeys(
@@ -534,7 +568,7 @@ function parseValidatedBatch(value: unknown): ValidatedBatchResponse {
     || body.stage !== "section_validated"
     || typeof body.evidenceId !== "string"
     || !/^[0-9a-f]{16}$/u.test(body.evidenceId)
-    || !["strategy", "performance", "execution"].includes(String(body.batchId))
+    || !["strategy", "performance", "execution", "content"].includes(String(body.batchId))
     || !isRecord(body.batch)
     || body.batch.batchId !== body.batchId
   ) {

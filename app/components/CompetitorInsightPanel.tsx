@@ -1,20 +1,30 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   COMPETITOR_PLATFORM_ROUTES,
   detectCompetitorPlatform,
+  type CompetitorBundleCategory,
 } from "../lib/competitor-platform-router.mjs";
 import {
   CompetitorReportRunner,
-  type CompetitorReportPathRequest,
+  type CompetitorAnalysisRequest,
+  type PreEvidenceTerminationReason,
+  type ReportWorkflowStage,
 } from "./CompetitorReportRunner";
 import {
   createCompetitorTask,
   createCompetitorTaskId,
+  finalizeCompetitorBundle,
   registerCompetitorArtifacts,
   updateCompetitorTask,
+  type CompetitorTaskPatch,
 } from "../lib/competitor-project-records-client";
+import {
+  scrapeCompetitorLink,
+  ScrapeClientError,
+  type ScrapeReadyResponse,
+} from "../lib/competitor-scrape-client";
 import type { ReportReadyResponse } from "../lib/competitor-report-client";
 
 type CompetitorInsightPanelProps = {
@@ -22,65 +32,83 @@ type CompetitorInsightPanelProps = {
   onPreview: (message: string) => void;
   onStart?: () => void;
   onRecordsChanged?: () => void;
-  onTaskCompleted?: (taskId: string) => void;
+  onTaskCompleted?: (taskId: string, bundleId: string) => void;
 };
 
-type PendingReportTask = {
+type PendingAnalysis = {
   taskId: string;
-  outputDir: string;
-  explicitPaths: string[];
+  scrape: ScrapeReadyResponse | null;
+  epoch: number;
+  evidenceReady: boolean;
+  terminalWriteStarted: boolean;
 };
 
-const WORKFLOW = ["识别平台", "连接本地 Skill", "抓取平台数据", "保存抓取结果"];
+type AnalysisTaskPatch = CompetitorTaskPatch & {
+  inputKind?: "account" | "content";
+  category?: CompetitorBundleCategory;
+};
 
-type DispatchPhase =
+const WORKFLOW = [
+  "识别平台",
+  "调用抓取 Skill",
+  "整理账号数据",
+  "生成洞察报告",
+  "整理成果包",
+] as const;
+
+type AnalysisPhase =
   | "idle"
   | "connecting"
   | "scraping"
+  | "normalizing"
+  | "generating"
+  | "bundling"
   | "completed"
-  | "connection-failed"
-  | "scrape-failed";
+  | "failed";
 
 type WorkflowStepStatus = "pending" | "active" | "completed" | "failed";
 
 function getWorkflowStepStatuses(
-  phase: DispatchPhase,
+  phase: AnalysisPhase,
+  lastActivePhase: AnalysisPhase,
   platformReady: boolean,
 ): WorkflowStepStatus[] {
-  const first: WorkflowStepStatus = platformReady ? "completed" : "pending";
-  switch (phase) {
-    case "connecting":
-      return [first, "active", "pending", "pending"];
-    case "scraping":
-      return [first, "completed", "active", "pending"];
-    case "completed":
-      return ["completed", "completed", "completed", "completed"];
-    case "connection-failed":
-      return [first, "failed", "pending", "pending"];
-    case "scrape-failed":
-      return [first, "completed", "failed", "pending"];
-    default:
-      return [first, "pending", "pending", "pending"];
+  const statuses: WorkflowStepStatus[] = Array.from({length: WORKFLOW.length}, () => "pending");
+  if (platformReady) statuses[0] = "completed";
+  const sourcePhase = phase === "failed" ? lastActivePhase : phase;
+  const activeIndex = workflowIndex(sourcePhase);
+  if (activeIndex < 0) return statuses;
+  for (let index = 0; index < activeIndex; index += 1) statuses[index] = "completed";
+  if (sourcePhase === "completed") {
+    statuses.fill("completed");
+  } else {
+    statuses[activeIndex] = phase === "failed" ? "failed" : "active";
   }
+  return statuses;
 }
 
-function getDispatchProgress(phase: DispatchPhase, platformReady: boolean) {
-  switch (phase) {
-    case "connecting":
-      return { step: 2, message: "正在连接本地 Skill" };
-    case "scraping":
-      return { step: 3, message: "正在抓取平台数据，请保持页面打开" };
-    case "completed":
-      return { step: 4, message: "抓取结果已保存" };
-    case "connection-failed":
-      return { step: 2, message: "连接失败" };
-    case "scrape-failed":
-      return { step: 3, message: "抓取失败" };
-    default:
-      return platformReady
-        ? { step: 1, message: "平台已识别，等待开始" }
-        : { step: 0, message: "等待识别平台" };
-  }
+function getAnalysisProgress(
+  phase: AnalysisPhase,
+  lastActivePhase: AnalysisPhase,
+  platformReady: boolean,
+  message: string,
+) {
+  const sourcePhase = phase === "failed" ? lastActivePhase : phase;
+  const step = workflowIndex(sourcePhase) + 1;
+  if (message) return {step, message};
+  if (phase === "completed") return {step: 5, message: "成果包已就绪"};
+  return platformReady
+    ? {step: 1, message: "平台已识别，等待开始"}
+    : {step: 0, message: "等待识别平台"};
+}
+
+function workflowIndex(phase: AnalysisPhase): number {
+  if (phase === "connecting" || phase === "scraping") return 1;
+  if (phase === "normalizing") return 2;
+  if (phase === "generating") return 3;
+  if (phase === "bundling") return 4;
+  if (phase === "completed") return 4;
+  return -1;
 }
 
 export function CompetitorInsightPanel({
@@ -91,275 +119,376 @@ export function CompetitorInsightPanel({
   onTaskCompleted,
 }: CompetitorInsightPanelProps) {
   const [source, setSource] = useState("");
-  const [dispatchMessage, setDispatchMessage] = useState("");
+  const [analysisMessage, setAnalysisMessage] = useState("");
   const [isDispatching, setIsDispatching] = useState(false);
-  const [dispatchPhase, setDispatchPhase] = useState<DispatchPhase>("idle");
-  const [reportPathRequest, setReportPathRequest] =
-    useState<CompetitorReportPathRequest | null>(null);
-  const pendingReportTaskRef = useRef<PendingReportTask | null>(null);
-  const detection = useMemo(
-    () => detectCompetitorPlatform(source),
-    [source],
-  );
+  const [analysisPhase, setAnalysisPhase] = useState<AnalysisPhase>("idle");
+  const [lastActivePhase, setLastActivePhase] = useState<AnalysisPhase>("idle");
+  const [analysisRequest, setAnalysisRequest] =
+    useState<CompetitorAnalysisRequest | null>(null);
+  const [isTaskStateSettling, setIsTaskStateSettling] = useState(false);
+  const pendingAnalysisRef = useRef<PendingAnalysis | null>(null);
+  const mountedRef = useRef(false);
+  const runEpochRef = useRef(0);
+  const taskWriteTailsRef = useRef(new Map<string, Promise<void>>());
+  const detection = useMemo(() => detectCompetitorPlatform(source), [source]);
   const platformReady = detection.kind === "ready";
   const workflowStepStatuses = getWorkflowStepStatuses(
-    dispatchPhase,
+    analysisPhase,
+    lastActivePhase,
     platformReady,
   );
-  const dispatchProgress = getDispatchProgress(dispatchPhase, platformReady);
+  const analysisProgress = getAnalysisProgress(
+    analysisPhase,
+    lastActivePhase,
+    platformReady,
+    analysisMessage,
+  );
 
-  const failPersistedTask = async (
-    taskId: string | null,
-    errorSummary: string,
-  ) => {
-    if (!taskId) return;
+  const moveToPhase = (phase: AnalysisPhase, message: string) => {
+    if (!mountedRef.current) return;
+    if (phase !== "failed") setLastActivePhase(phase);
+    setAnalysisPhase(phase);
+    setAnalysisMessage(message);
+  };
+
+  const isMountedEpoch = (epoch: number) =>
+    mountedRef.current && runEpochRef.current === epoch;
+
+  const isCurrentPending = (pending: PendingAnalysis) =>
+    isMountedEpoch(pending.epoch)
+    && pendingAnalysisRef.current?.epoch === pending.epoch
+    && pendingAnalysisRef.current.taskId === pending.taskId;
+
+  const writeTaskState = async (taskId: string, patch: AnalysisTaskPatch) => {
+    const previous = taskWriteTailsRef.current.get(taskId) ?? Promise.resolve();
+    const write = previous.catch(() => undefined).then(async () => {
+      await updateCompetitorTask(taskId, patch);
+    });
+    const tail = write.then(() => undefined, () => undefined);
+    taskWriteTailsRef.current.set(taskId, tail);
     try {
-      await updateCompetitorTask(taskId, {
-        status: "failed",
-        errorSummary,
+      await write;
+    } finally {
+      if (taskWriteTailsRef.current.get(taskId) === tail) {
+        taskWriteTailsRef.current.delete(taskId);
+      }
+    }
+  };
+
+  const settleAbandonedTask = (taskId: string) => {
+    void writeTaskState(taskId, {
+      status: "failed",
+      errorSummary: "页面已关闭，本次竞品分析已取消。",
+    }).catch(() => undefined);
+  };
+
+  const settleAbandonedPending = (pending: PendingAnalysis) => {
+    if (pending.terminalWriteStarted) return;
+    pending.terminalWriteStarted = true;
+    settleAbandonedTask(pending.taskId);
+  };
+
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      const pending = pendingAnalysisRef.current;
+      mountedRef.current = false;
+      runEpochRef.current += 1;
+      pendingAnalysisRef.current = null;
+      if (
+        pending
+        && !pending.evidenceReady
+        && !pending.terminalWriteStarted
+      ) {
+        settleAbandonedPending(pending);
+      }
+    };
+  }, []);
+
+  const failPersistedTask = async (taskId: string | null, errorSummary: string) => {
+    if (!taskId) return;
+    await writeTaskState(taskId, {status: "failed", errorSummary});
+  };
+
+  const failAnalysis = async (
+    taskId: string | null,
+    message: string,
+    epoch = runEpochRef.current,
+    clearPending = false,
+  ) => {
+    if (!isMountedEpoch(epoch)) return;
+    if (!taskId) {
+      setIsDispatching(false);
+      moveToPhase("failed", message);
+      return;
+    }
+    if (pendingAnalysisRef.current?.epoch === epoch) {
+      pendingAnalysisRef.current.terminalWriteStarted = true;
+    }
+    setIsTaskStateSettling(true);
+    setIsDispatching(true);
+    moveToPhase("failed", `${message} 正在同步失败状态…`);
+    try {
+      await failPersistedTask(taskId, message);
+      if (!isMountedEpoch(epoch)) return;
+      onRecordsChanged?.();
+      if (clearPending && pendingAnalysisRef.current?.epoch === epoch) {
+        pendingAnalysisRef.current = null;
+      }
+      setIsTaskStateSettling(false);
+      setIsDispatching(false);
+      moveToPhase("failed", message);
+    } catch {
+      if (!isMountedEpoch(epoch)) return;
+      setIsTaskStateSettling(true);
+      setIsDispatching(false);
+      moveToPhase("failed", `${message} 任务终态同步失败，请检查本地任务服务。`);
+    }
+  };
+
+  const handleReportStageChange = (stage: ReportWorkflowStage, message: string) => {
+    if (!mountedRef.current) return;
+    if (stage === "generating" && pendingAnalysisRef.current) {
+      pendingAnalysisRef.current.evidenceReady = true;
+    }
+    const nextPhase: AnalysisPhase = stage === "normalizing" ? "normalizing" : "generating";
+    setIsDispatching(true);
+    moveToPhase(nextPhase, message);
+  };
+
+  const preparePendingRetry = async (): Promise<boolean> => {
+    const pending = pendingAnalysisRef.current;
+    if (!pending || !isCurrentPending(pending) || isTaskStateSettling) return false;
+    if (pending.terminalWriteStarted) {
+      await submit();
+      return false;
+    }
+    setIsTaskStateSettling(true);
+    setIsDispatching(true);
+    moveToPhase("generating", "正在恢复任务状态，完成后继续生成报告…");
+    try {
+      await writeTaskState(pending.taskId, {
+        status: "running",
+        progress: 70,
+        currentStep: "任务状态已恢复，继续生成洞察报告",
+        errorSummary: null,
       });
+      if (!isCurrentPending(pending)) return false;
+      setIsTaskStateSettling(false);
+      onRecordsChanged?.();
+      return true;
+    } catch {
+      if (!isCurrentPending(pending)) return false;
+      setIsTaskStateSettling(false);
+      setIsDispatching(false);
+      moveToPhase("failed", "任务状态恢复失败，请检查本地任务服务后重试。");
+      return false;
+    }
+  };
+
+  const terminatePreEvidence = async (
+    reason: PreEvidenceTerminationReason,
+    message: string,
+  ) => {
+    const pending = pendingAnalysisRef.current;
+    if (!pending || !isCurrentPending(pending)) return;
+    const safeMessage = reason === "stopped"
+      ? "竞品分析已停止，未生成证据包。"
+      : message;
+    await failAnalysis(pending.taskId, safeMessage, pending.epoch, true);
+  };
+
+  const pausePendingReport = async () => {
+    const pending = pendingAnalysisRef.current;
+    if (!pending || !isCurrentPending(pending)) return;
+    try {
+      await writeTaskState(pending.taskId, {
+        status: "running",
+        progress: 70,
+        currentStep: "证据包已生成，等待配置模型",
+      });
+      if (!isCurrentPending(pending)) return;
       onRecordsChanged?.();
     } catch {
-      // The original bridge failure remains the primary user-facing error.
+      if (!isCurrentPending(pending)) return;
+      setAnalysisMessage("证据包已生成，但任务状态同步失败，请检查本地任务服务。");
+    }
+  };
+
+  const stopPendingReport = async (message: string): Promise<boolean> => {
+    const pending = pendingAnalysisRef.current;
+    if (!pending || !isCurrentPending(pending)) return false;
+    pending.terminalWriteStarted = true;
+    setIsTaskStateSettling(true);
+    setIsDispatching(true);
+    moveToPhase("generating", "模型请求已停止，正在同步停止状态…");
+    try {
+      await writeTaskState(pending.taskId, {
+        status: "stopped",
+        progress: 70,
+        currentStep: "用户已停止报告生成",
+        errorSummary: null,
+      });
+      if (!isCurrentPending(pending)) return false;
+      onRecordsChanged?.();
+      setIsTaskStateSettling(false);
+      setIsDispatching(false);
+      moveToPhase("failed", message);
+      return true;
+    } catch {
+      if (!isCurrentPending(pending)) return false;
+      setIsTaskStateSettling(true);
+      setIsDispatching(true);
+      moveToPhase("failed", "已停止生成，但任务状态同步失败，请检查本地任务服务。链接入口保持锁定。");
+      return false;
     }
   };
 
   const completePendingReport = async (report: ReportReadyResponse) => {
-    const pending = pendingReportTaskRef.current;
-    if (!pending) return;
-    pendingReportTaskRef.current = null;
+    const pending = pendingAnalysisRef.current;
+    if (!pending || !pending.scrape || !isCurrentPending(pending)) return;
+    const {taskId, scrape} = pending;
+    const explicitPaths = Array.from(new Set([...scrape.explicitPaths, report.reportPath]));
+    moveToPhase("bundling", "报告已生成，正在登记内部产物并封装成果包…");
     try {
-      await registerCompetitorArtifacts(pending.taskId, {
-        outputDir: pending.outputDir,
-        explicitPaths: [...pending.explicitPaths, report.reportPath],
+      await registerCompetitorArtifacts(taskId, {
+        outputDir: scrape.outputDir,
+        explicitPaths,
       });
-      await updateCompetitorTask(pending.taskId, {
-        status: "completed",
-        progress: 100,
-        currentStep: "账号报告与抓取成果已登记",
-      });
+      if (!isCurrentPending(pending)) return;
       onRecordsChanged?.();
-      onTaskCompleted?.(pending.taskId);
-    } catch {
-      await failPersistedTask(
-        pending.taskId,
-        "报告已生成，但成果登记失败，请检查本地任务服务。",
-      );
-      setDispatchPhase("scrape-failed");
-      setDispatchMessage("报告已生成，但成果登记失败，请检查本地任务服务。");
-    }
-  };
-
-  const pausePendingReport = async () => {
-    const pending = pendingReportTaskRef.current;
-    if (!pending) return;
-    try {
-      await updateCompetitorTask(pending.taskId, {
-        status: "running",
-        progress: 92,
-        currentStep: "证据包已生成，等待配置模型",
+      const finalized = await finalizeCompetitorBundle(taskId, {
+        platformId: scrape.platformId,
+        inputKind: scrape.inputKind,
+        category: scrape.category,
+        outputDir: scrape.outputDir,
+        primaryReportPath: report.reportPath,
+        explicitPaths,
+        subjectName: scrape.subjectName,
+        itemCount: scrape.itemCount,
       });
-      onRecordsChanged?.();
-    } catch {
-      setDispatchMessage("证据包已生成，但任务状态同步失败，请检查本地任务服务。");
-    }
-  };
-
-  const failPendingReport = async (message: string) => {
-    const pending = pendingReportTaskRef.current;
-    if (!pending) return;
-    pendingReportTaskRef.current = null;
-    await failPersistedTask(pending.taskId, message);
-  };
-
-  const submit = async () => {
-    if (
-      detection.kind === "ready"
-      && detection.platformId
-      && detection.skillId
-      && detection.bridgeUrl
-    ) {
-      const message = `已自动路由：${detection.platformLabel} → ${detection.skillId}`;
-      let taskId: string | null = null;
-      setIsDispatching(true);
-      setDispatchPhase("connecting");
-      setDispatchMessage(`${message}。正在创建可追踪任务…`);
-      let healthConfirmed = false;
-      try {
-        const createdTask = await createCompetitorTask({
-          id: createCompetitorTaskId(),
-          title: `${detection.platformLabel}${detection.reportMode === "douyin-account" ? "账号" : "作品"}抓取`,
-          platformId: detection.platformId,
-          platformLabel: detection.platformLabel,
-          skillId: detection.skillId,
-          sourceUrl: detection.normalizedUrl,
-        });
-        taskId = createdTask.id;
-        onRecordsChanged?.();
-        await updateCompetitorTask(taskId, {
-          status: "running",
-          progress: 25,
-          currentStep: "正在连接本地 Skill",
-        });
-        onRecordsChanged?.();
-        setDispatchMessage(`${message}。正在连接本地采集桥…`);
-        const healthResponse = await fetch(`${detection.bridgeUrl}/health`, {
-          method: "GET",
-          credentials: "omit",
-          cache: "no-store",
-        });
-        if (!healthResponse.ok) {
-          throw new Error("bridge_health_failed");
-        }
-        healthConfirmed = true;
-        await updateCompetitorTask(taskId, {
-          status: "running",
-          progress: 60,
-          currentStep: "正在抓取平台数据",
-        });
-        onRecordsChanged?.();
-        setDispatchPhase("scraping");
-        setDispatchMessage(`${message}。本地服务已连接，正在抓取平台数据…`);
-        const response = await fetch(`${detection.bridgeUrl}/scrape`, {
-          method: "POST",
-          credentials: "omit",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ input: detection.normalizedUrl }),
-        });
-        const payload = await response.json() as {
-          ok?: boolean;
-          message?: string;
-          outputDir?: string;
-          inputType?: string;
-          excelPath?: string;
-        };
-        if (!response.ok || payload.ok !== true) {
-          const failure = payload.message
-            ?? `${message}。本地采集桥未完成任务，请确认本地工作台和抓取服务已启动。`;
-          await failPersistedTask(taskId, failure);
-          setDispatchPhase("scrape-failed");
-          setDispatchMessage(failure);
-          return;
-        }
-        if (!payload.outputDir) {
-          await failPersistedTask(taskId, "抓取完成，但没有返回成果目录。");
-          setDispatchPhase("scrape-failed");
-          setDispatchMessage("抓取完成，但没有返回成果目录，未登记任务成果。");
-          return;
-        }
-        await updateCompetitorTask(taskId, {
-          status: "running",
-          progress: 90,
-          currentStep: "正在登记成果",
-        });
-        onRecordsChanged?.();
-        const explicitPaths = typeof payload.excelPath === "string"
-          ? [payload.excelPath]
-          : [];
-        await registerCompetitorArtifacts(taskId, {
-          outputDir: payload.outputDir,
-          explicitPaths,
-        });
-        onRecordsChanged?.();
-        setDispatchPhase("completed");
-        if (
-          detection.reportMode === "douyin-account"
-          && payload.inputType === "作品链接"
-        ) {
-          const completed = `${message}。单作品抓取完成，结果已保存到 ${payload.outputDir ?? "竞品洞察输出目录"}；单作品不会进入账号报告。`;
-          setDispatchMessage(completed);
-          await updateCompetitorTask(taskId, {
-            status: "completed",
-            progress: 100,
-            currentStep: "单作品抓取成果已登记",
-          });
-          onRecordsChanged?.();
-          onPreview("抖音单作品抓取完成");
-          onTaskCompleted?.(taskId);
-          return;
-        }
-        if (detection.reportMode === "douyin-account") {
-          if (
-            payload.inputType !== "账号链接/账号标识"
-            || typeof payload.excelPath !== "string"
-            || !/\.xlsx$/iu.test(payload.excelPath)
-          ) {
-            setDispatchMessage(
-              `${message}。账号抓取已返回，但没有得到有效的账号 Excel，未启动报告分析。`,
-            );
-            await failPersistedTask(taskId, "账号抓取未返回有效的账号 Excel。");
-            return;
-          }
-          pendingReportTaskRef.current = {
-            taskId,
-            outputDir: payload.outputDir,
-            explicitPaths,
-          };
-          await updateCompetitorTask(taskId, {
-            status: "running",
-            progress: 90,
-            currentStep: "抓取完成，正在生成账号报告",
-          });
-          onRecordsChanged?.();
-          setReportPathRequest((current) => ({
-            requestId: (current?.requestId ?? 0) + 1,
-            excelPath: payload.excelPath as string,
-          }));
-          setDispatchMessage(`${message}。抓取完成，正在生成账号报告…`);
-          onPreview("抖音账号抓取完成，正在生成报告");
-          return;
-        }
-        const completed = `${message}。抓取完成，结果已保存到 ${payload.outputDir ?? "竞品洞察输出目录"}。`;
-        setDispatchMessage(completed);
-        await updateCompetitorTask(taskId, {
-          status: "completed",
-          progress: 100,
-          currentStep: "抓取成果已登记",
-        });
-        onRecordsChanged?.();
-        onPreview(`${detection.platformLabel}竞品数据抓取完成`);
-        onTaskCompleted?.(taskId);
-      } catch {
-        const failure = taskId
-          ? healthConfirmed
-            ? `${message}。本地服务已连接，但抓取任务中断；请检查平台登录或验证状态后重试。`
-            : `${message}。浏览器未能访问本机采集服务：可能是服务未启动，或本站的本地网络访问被浏览器拦截。请刷新页面后重试；若服务已运行，请允许本站访问本地网络。`
-          : "无法创建可追踪任务，请确认本地任务服务 8768 已启动。";
-        await failPersistedTask(taskId, failure);
-        if (healthConfirmed) {
-          setDispatchPhase("scrape-failed");
-          setDispatchMessage(
-            `${message}。本地服务已连接，但抓取任务中断；请检查平台登录或验证状态后重试。`,
-          );
-        } else {
-          setDispatchPhase("connection-failed");
-          setDispatchMessage(
-            taskId
-              ? `${message}。浏览器未能访问本机采集服务：可能是服务未启动，或本站的本地网络访问被浏览器拦截。请刷新页面后重试；若服务已运行，请允许本站访问本地网络。`
-              : failure,
-          );
-        }
-      } finally {
-        setIsDispatching(false);
+      if (!isCurrentPending(pending)) return;
+      if (finalized.bundle.status !== "ready") {
+        throw new Error("bundle_not_ready");
       }
+      pendingAnalysisRef.current = null;
+      setIsTaskStateSettling(false);
+      setIsDispatching(false);
+      moveToPhase("completed", "成果包已就绪，可在成果页查看。");
+      onRecordsChanged?.();
+      onPreview("竞品洞察成果包已就绪");
+      onTaskCompleted?.(taskId, finalized.bundle.id);
+    } catch {
+      await failAnalysis(
+        taskId,
+        "报告已生成，但成果登记或封装失败，请检查本地任务服务。",
+        pending.epoch,
+      );
+    }
+  };
+
+  async function submit() {
+    if (
+      detection.kind !== "ready"
+      || !detection.platformId
+      || !detection.skillId
+      || !detection.bridgeUrl
+    ) {
+      setAnalysisMessage(detection.message);
       return;
     }
-    setDispatchMessage(detection.message);
-  };
+    const route = COMPETITOR_PLATFORM_ROUTES.find((item) => item.id === detection.platformId);
+    if (!route) {
+      setAnalysisMessage("未找到对应的本地抓取 Skill。");
+      return;
+    }
+
+    const routeMessage = `已自动路由：${detection.platformLabel} → ${detection.skillId}`;
+    const epoch = runEpochRef.current + 1;
+    runEpochRef.current = epoch;
+    let taskId: string | null = null;
+    let pending: PendingAnalysis | null = null;
+    setIsDispatching(true);
+    setIsTaskStateSettling(false);
+    pendingAnalysisRef.current = null;
+    moveToPhase("connecting", `${routeMessage}。正在创建可追踪任务…`);
+    try {
+      const createdTask = await createCompetitorTask({
+        id: createCompetitorTaskId(),
+        title: `${detection.platformLabel}竞品洞察`,
+        platformId: detection.platformId,
+        platformLabel: detection.platformLabel,
+        skillId: detection.skillId,
+        sourceUrl: detection.normalizedUrl,
+      });
+      taskId = createdTask.id;
+      pending = {
+        taskId,
+        scrape: null,
+        epoch,
+        evidenceReady: false,
+        terminalWriteStarted: false,
+      };
+      if (!isMountedEpoch(epoch)) {
+        settleAbandonedPending(pending);
+        return;
+      }
+      pendingAnalysisRef.current = pending;
+      onRecordsChanged?.();
+      moveToPhase("scraping", `${routeMessage}。正在调用本地抓取 Skill…`);
+      const scrape = await scrapeCompetitorLink(
+        route,
+        detection.normalizedUrl,
+        taskId,
+      );
+      if (!isCurrentPending(pending)) {
+        settleAbandonedPending(pending);
+        return;
+      }
+      pending.scrape = scrape;
+
+      const authoritativePatch = {
+        status: "running" as const,
+        progress: 45,
+        currentStep: "抓取完成，链接类型与成果分类已确认",
+        inputKind: scrape.inputKind,
+        category: scrape.category as CompetitorBundleCategory,
+      };
+      await writeTaskState(taskId, authoritativePatch);
+      if (!isCurrentPending(pending)) {
+        settleAbandonedPending(pending);
+        return;
+      }
+      onRecordsChanged?.();
+      setAnalysisRequest((current) => ({
+        requestId: (current?.requestId ?? 0) + 1,
+        taskId: createdTask.id,
+        platformId: scrape.platformId,
+        inputKind: scrape.inputKind,
+        outputDir: scrape.outputDir,
+        dataPath: scrape.dataPath,
+        excelPath: scrape.excelPath,
+      }));
+      moveToPhase("normalizing", "抓取完成，正在整理账号或作品数据…");
+    } catch (error) {
+      if (!isMountedEpoch(epoch)) {
+        if (pending) settleAbandonedPending(pending);
+        else if (taskId) settleAbandonedTask(taskId);
+        return;
+      }
+      await failAnalysis(taskId, safeAnalysisError(error), epoch, true);
+    }
+  }
 
   return (
     <section className={`competitor-console ${mode}`} aria-labelledby="competitor-console-title">
       <header className="competitor-console-heading">
         <div>
-          <span className="panel-label">
-            {mode === "overview" ? "能力总览" : "竞品采集入口"}
-          </span>
+          <span className="panel-label">{mode === "overview" ? "能力总览" : "竞品分析入口"}</span>
           <h2 id="competitor-console-title">
-            {mode === "overview" ? "跨平台竞品洞察工作流" : "粘贴链接，自动选择抓取 Skill"}
+            {mode === "overview" ? "跨平台竞品洞察工作流" : "粘贴链接，自动抓取、分析并封装"}
           </h2>
-          <p>
-            先识别链接所属平台，再调用该平台专用 Skill；不跨平台混用登录态和抓取逻辑。
-          </p>
+          <p>链接是唯一入口；系统按平台调用本地 Skill，并在报告完整后生成成果包。</p>
         </div>
         <span className="competitor-live-badge">Agent 已启动</span>
       </header>
@@ -367,56 +496,38 @@ export function CompetitorInsightPanel({
       <div className="competitor-capability-grid">
         {COMPETITOR_PLATFORM_ROUTES.map((route) => (
           <article className={`competitor-skill-card ${route.status}`} key={route.id}>
-            <div>
-              <span>{route.label}</span>
-              <b>{route.status === "ready" ? "已接入" : "待接入"}</b>
-            </div>
+            <div><span>{route.label}</span><b>{route.status === "ready" ? "已接入" : "待接入"}</b></div>
             <strong>{route.skillId}</strong>
-            <p>
-              {route.status === "ready"
-                ? route.id === "douyin"
-                  ? "账号主页、作品列表和 Excel 导出已就绪；账号 Excel → Markdown 证据报告"
-                  : "账号主页、作品列表和 Excel 导出已就绪"
-                : "平台识别规则已预留，安装后自动启用"}
-            </p>
+            <p>{route.status === "ready" ? "账号与作品链接均会进入证据分析和成果包流程" : "平台识别规则已预留，安装后自动启用"}</p>
           </article>
         ))}
       </div>
 
+      <p className="competitor-transcription-note">
+        抖音单视频会自动下载音频并在本机转写，转写文稿随分析报告一起进入成果包。
+      </p>
+
       <ol className="competitor-workflow" aria-label="竞品洞察处理流程">
         {WORKFLOW.map((step, index) => (
           <li
-            aria-label={`${step}（${
-              workflowStepStatuses[index] === "completed"
-                ? "已完成"
-                : workflowStepStatuses[index] === "active"
-                  ? "进行中"
-                  : workflowStepStatuses[index] === "failed"
-                    ? "失败"
-                    : "未开始"
-            }）`}
+            aria-label={`${step}（${workflowStatusLabel(workflowStepStatuses[index])}）`}
             className={workflowStepStatuses[index]}
             key={step}
           >
-            <span>{index + 1}</span>
-            {step}
+            <span>{index + 1}</span>{step}
           </li>
         ))}
       </ol>
 
       {mode === "run" ? (
         <div
-          aria-label="竞品抓取进度"
+          aria-label="竞品分析进度"
           aria-live="polite"
-          className={`competitor-capture-progress ${dispatchPhase}`}
+          className={`competitor-capture-progress ${analysisPhase}`}
           role="status"
         >
-          <strong>
-            {dispatchProgress.step > 0
-              ? `第 ${dispatchProgress.step}/4 步`
-              : "等待开始"}
-          </strong>
-          <span>{dispatchProgress.message}</span>
+          <strong>{analysisProgress.step > 0 ? `第 ${analysisProgress.step}/5 步` : "等待开始"}</strong>
+          <span>{analysisProgress.message}</span>
         </div>
       ) : null}
 
@@ -426,69 +537,76 @@ export function CompetitorInsightPanel({
             className="competitor-source-form"
             onSubmit={(event) => {
               event.preventDefault();
-              submit();
+              void submit();
             }}
           >
-          <label htmlFor="competitor-source">
-            竞品主页或作品链接
-            <textarea
-              id="competitor-source"
-              onChange={(event) => {
-                setSource(event.target.value);
-                setDispatchMessage("");
-                setDispatchPhase("idle");
-              }}
-              placeholder="可直接粘贴抖音或小红书分享文字，系统会提取其中链接"
-              value={source}
-            />
-          </label>
-          <div
-            aria-label="竞品平台识别状态"
-            className={`competitor-detection ${detection.kind}`}
-            role="status"
-            aria-live="polite"
-          >
-            <span>{detection.platformLabel}</span>
-            <p>{detection.message}</p>
-            {detection.skillId ? <code>{detection.skillId}</code> : null}
-          </div>
-          <button
-            className="competitor-dispatch-button"
-            disabled={detection.kind === "empty" || isDispatching}
-            type="submit"
-          >
-            {isDispatching ? "正在抓取…" : "抓取并分析"}
-          </button>
-          {dispatchMessage ? (
+            <label htmlFor="competitor-source">
+              竞品主页或作品链接
+              <textarea
+                disabled={isDispatching}
+                id="competitor-source"
+                onChange={(event) => {
+                  setSource(event.target.value);
+                  setAnalysisMessage("");
+                  setAnalysisPhase("idle");
+                  setLastActivePhase("idle");
+                }}
+                placeholder="可直接粘贴抖音或小红书分享文字，系统会提取其中链接"
+                value={source}
+              />
+            </label>
             <div
-              className={`competitor-dispatch-result ${detection.kind}`}
-              role="alert"
+              aria-label="竞品平台识别状态"
+              className={`competitor-detection ${detection.kind}`}
+              role="status"
+              aria-live="polite"
             >
-              {dispatchMessage}
+              <span>{detection.platformLabel}</span>
+              <p>{detection.message}</p>
+              {detection.skillId ? <code>{detection.skillId}</code> : null}
             </div>
-          ) : null}
+            <button
+              className="competitor-dispatch-button"
+              disabled={detection.kind === "empty" || isDispatching}
+              type="submit"
+            >
+              {isDispatching ? "正在分析…" : "抓取并分析"}
+            </button>
+            {analysisMessage && analysisPhase === "failed" ? (
+              <div className="competitor-dispatch-result failed" role="alert">{analysisMessage}</div>
+            ) : null}
           </form>
           <CompetitorReportRunner
+            analysisRequest={analysisRequest}
+            onBeforeRetry={preparePendingRetry}
             onCompleted={(report) => void completePendingReport(report)}
             onEvidencePaused={() => void pausePendingReport()}
-            onFailed={(message) => void failPendingReport(message)}
-            pathRequest={reportPathRequest}
+            onFailed={(message) => {
+              const pending = pendingAnalysisRef.current;
+              void failAnalysis(
+                pending?.taskId ?? null,
+                message,
+                pending?.epoch ?? runEpochRef.current,
+              );
+            }}
+            onPreEvidenceTerminated={(reason, message) => {
+              void terminatePreEvidence(reason, message);
+            }}
+            onStopped={stopPendingReport}
+            onStageChange={handleReportStageChange}
+            retryBlocked={isTaskStateSettling}
           />
         </>
       ) : (
         <>
           <div className="competitor-overview-actions">
             <div>
-              <strong>当前可执行：抖音与小红书账号采集</strong>
+              <strong>当前可执行：抖音与小红书链接分析</strong>
               <p>登录态只保存在本机；不会要求输入账号密码，也不会展示或导出 Cookie。</p>
             </div>
-            <button onClick={onStart} type="button">开始竞品采集</button>
+            <button onClick={onStart} type="button">开始竞品分析</button>
           </div>
-          <div
-            className="compliance-status data-review"
-            role="status"
-            aria-label="成果合规状态"
-          >
+          <div className="compliance-status data-review" role="status" aria-label="成果合规状态">
             <strong>数据口径确认</strong>
             <p>当前项目以经营分析为主，仍需人工确认数据口径。</p>
             <small>平台公开互动数据不等于成交、销量或真实用户规模。</small>
@@ -497,4 +615,17 @@ export function CompetitorInsightPanel({
       )}
     </section>
   );
+}
+
+function workflowStatusLabel(status: WorkflowStepStatus): string {
+  if (status === "completed") return "已完成";
+  if (status === "active") return "进行中";
+  if (status === "failed") return "失败";
+  return "未开始";
+}
+
+function safeAnalysisError(error: unknown): string {
+  if (error instanceof ScrapeClientError) return error.message;
+  if (error instanceof DOMException && error.name === "AbortError") return "本次竞品分析已取消。";
+  return "竞品分析未完成，请检查本地抓取与任务服务后重试。";
 }

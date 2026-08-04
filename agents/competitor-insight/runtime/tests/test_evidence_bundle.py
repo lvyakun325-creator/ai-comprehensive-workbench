@@ -8,6 +8,7 @@ import unittest
 RUNTIME_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RUNTIME_DIR))
 
+import evidence_bundle
 from evidence_bundle import build_evidence_bundle, write_evidence_bundle
 
 
@@ -38,6 +39,9 @@ class EvidenceBundleTests(unittest.TestCase):
         )
         self.assertEqual(bundle_a["items"][0]["evidenceId"], "DY-E0001")
         self.assertEqual(bundle_a["items"][0]["sourceRow"], 2)
+        self.assertEqual(bundle_a["evidenceVersion"], "2.0")
+        self.assertEqual(bundle_a["reportType"], "douyin-account")
+        self.assertEqual(bundle_a["subject"]["nickname"], "测试账号")
         self.assertEqual(bundle_a["metrics"]["top10InteractionShare"], 1.0)
         self.assertEqual(bundle_a["items"][0]["ranks"]["overall"], 1)
 
@@ -67,6 +71,33 @@ class EvidenceBundleTests(unittest.TestCase):
             output_a = write_evidence_bundle(bundle_a, Path(directory) / "a")
             output_b = write_evidence_bundle(bundle_b, Path(directory) / "b")
             self.assertEqual(output_a.read_text(encoding="utf-8"), output_b.read_text(encoding="utf-8"))
+
+    def test_rejects_untrusted_platform_kind_or_report_type(self) -> None:
+        """Would fail if an impossible v2 tuple were persisted with a plausible prefix."""
+        cases = (
+            {"platformId": "unknown", "inputKind": "account"},
+            {"platformId": "douyin", "inputKind": "bad-kind"},
+            {"platformId": "xiaohongshu", "inputKind": "content", "reportType": "douyin-account"},
+        )
+        for fields in cases:
+            with self.subTest(fields=fields):
+                parsed = self._parsed() | fields
+                with self.assertRaisesRegex(ValueError, r"^unsupported_report_source$"):
+                    build_evidence_bundle(parsed, {"platformId": "douyin", "inputKind": "account"})
+
+    def test_exposes_the_same_canonical_identity_preimage_used_by_bundle_generation(self) -> None:
+        """Would fail if session integrity persisted a digest preimage that diverges from Task 2 generation."""
+        canonicalizer = getattr(evidence_bundle, "canonical_evidence_input", None)
+        self.assertTrue(callable(canonicalizer))
+        parsed = self._parsed()
+        source = {"kind": "scrape-artifacts", "taskId": "competitor-test", "platformId": "douyin"}
+
+        canonical = canonicalizer(parsed, source)
+        from_raw = build_evidence_bundle(parsed, source)
+        from_canonical = build_evidence_bundle(canonical["parsed"], canonical["source"])
+
+        self.assertEqual(from_canonical, from_raw)
+        self.assertEqual(from_canonical["evidenceId"], from_raw["evidenceId"])
 
 
 if __name__ == "__main__":

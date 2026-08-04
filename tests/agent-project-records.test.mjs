@@ -6,8 +6,12 @@ import {
   PROJECT_TASKS,
   TASK_STATUSES,
   getAgentResults,
+  getAgentBundles,
+  getBundleArtifacts,
   getAgentTasks,
+  getTaskBundle,
   getTaskResults,
+  mergeProjectBundles,
   mergeProjectResults,
   mergeProjectTasks,
 } from "../app/lib/agent-project-records.mjs";
@@ -173,4 +177,62 @@ test("queries registered non-Markdown artifacts for a completed competitor task"
 
   assert.deepEqual(results.map((result) => result.id), [artifact.id]);
   assert.deepEqual(taskResults.map((result) => result.id), [artifact.id]);
+});
+
+test("queries completed bundles only when their task relationships are consistent", () => {
+  const task = {
+    ...PROJECT_TASKS[2],
+    id: "competitor-20260801-bundle-a1",
+    platformId: "xiaohongshu",
+    platformLabel: "小红书",
+    inputKind: "account",
+    category: "xhs-account",
+    bundleId: "bundle-0000000000000001",
+  };
+  const artifacts = [{
+    id: "artifact-0000000000000001",
+    agentId: "competitor-insight",
+    taskId: task.id,
+    filename: "report.md",
+    completedAt: "2026-08-01T02:00:00.000Z",
+    sizeBytes: 12,
+    markdown: null,
+    kind: "markdown",
+    absolutePath: "/controlled/report.md",
+    exists: true,
+    isDirectory: false,
+    previewable: true,
+  }];
+  const bundle = {
+    id: "bundle-0000000000000001",
+    agentId: "competitor-insight",
+    taskId: task.id,
+    platformId: "xiaohongshu",
+    platformLabel: "小红书",
+    inputKind: "account",
+    category: "xhs-account",
+    title: task.title,
+    subjectName: "测试账号",
+    sourceUrl: "https://www.xiaohongshu.com/user/profile/a",
+    status: "ready",
+    primaryArtifactId: artifacts[0].id,
+    manifestPath: "/controlled/bundle.manifest.json",
+    archivePath: "/controlled/bundle.zip",
+    rootDirectory: "/controlled",
+    artifactIds: [artifacts[0].id],
+    itemCount: 1,
+    createdAt: "2026-08-01T01:00:00.000Z",
+    completedAt: "2026-08-01T02:00:00.000Z",
+  };
+  const orphan = {...bundle, id: "bundle-0000000000000002", taskId: "missing-task"};
+
+  const bundles = mergeProjectBundles([], [bundle, orphan], [task]);
+
+  assert.deepEqual(bundles.map((item) => item.id), [bundle.id]);
+  assert.equal(getAgentBundles("competitor-insight", bundles, [task])[0].id, bundle.id);
+  assert.equal(getTaskBundle(task.id, bundles, [task])?.id, bundle.id);
+  assert.deepEqual(getBundleArtifacts(bundle.id, bundles, artifacts).map((item) => item.id), artifacts.map((item) => item.id));
+
+  assert.equal(projectRecords.isValidProjectBundle({...bundle, platformId: "douyin", inputKind: "content", category: "douyin-content"}, [task]), false);
+  assert.deepEqual(getBundleArtifacts(bundle.id, bundles, [{...artifacts[0], agentId: "other-agent"}]), []);
 });

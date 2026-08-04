@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 import json
 import re
 from typing import cast
 from urllib.parse import parse_qs, urlsplit
+import zipfile
 
 import project_records
 import service
@@ -16,8 +16,9 @@ import service
 
 HOST = "127.0.0.1"
 PORT = 8768
-MAX_REQUEST_BYTES = ((service.MAX_EXCEL_BYTES + 2) // 3) * 4 + 1024 * 1024
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_BUNDLE_DETAIL_RESPONSE_BYTES = 4 * 1024 * 1024
 ALLOWED_ORIGINS = {
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -25,7 +26,7 @@ ALLOWED_ORIGINS = {
 }
 WRITE_ENDPOINTS = {
     "/analyze-path",
-    "/analyze-upload",
+    "/analyze-artifacts",
     "/validate-section",
     "/assemble-report",
 }
@@ -36,6 +37,12 @@ ARTIFACTS_PATH = re.compile(
 REVEAL_PATH = re.compile(
     r"^/project-artifacts/(?P<artifact_id>artifact-[0-9a-f]{16})/reveal$"
 )
+BUNDLE_TASK_PATH = re.compile(
+    r"^/project-tasks/(?P<task_id>competitor-[0-9A-Za-z-]{4,120})/bundle$"
+)
+BUNDLE_PATH = re.compile(r"^/project-bundles/(?P<bundle_id>bundle-[0-9a-f]{16})$")
+BUNDLE_DOWNLOAD_PATH = re.compile(r"^/project-bundles/(?P<bundle_id>bundle-[0-9a-f]{16})/download$")
+BUNDLE_REVEAL_PATH = re.compile(r"^/project-bundles/(?P<bundle_id>bundle-[0-9a-f]{16})/reveal$")
 
 _ERRORS = {
     "unsafe_output_path": (503, "INTERNAL_SECURITY_BOUNDARY", "报告输出目录未通过安全校验。"),
@@ -65,6 +72,7 @@ _ERRORS = {
     "invalid_request_fields": (400, "INVALID_REQUEST", "请求参数无效。"),
     "invalid_task_id": (400, "INVALID_REQUEST", "任务 ID 无效。"),
     "invalid_artifact_id": (400, "INVALID_REQUEST", "成果 ID 无效。"),
+    "invalid_bundle_id": (400, "INVALID_REQUEST", "成果包 ID 无效。"),
     "invalid_agent_id": (400, "INVALID_REQUEST", "Agent ID 无效。"),
     "invalid_source_url": (400, "INVALID_REQUEST", "抓取链接无效。"),
     "invalid_status": (400, "INVALID_REQUEST", "任务状态无效。"),
@@ -76,10 +84,15 @@ _ERRORS = {
     "task_not_found": (404, "TASK_NOT_FOUND", "任务不存在。"),
     "artifact_not_found": (404, "ARTIFACT_NOT_FOUND", "成果不存在。"),
     "artifact_missing": (404, "ARTIFACT_MISSING", "成果文件已不存在。"),
+    "bundle_not_found": (404, "BUNDLE_NOT_FOUND", "成果包不存在。"),
+    "bundle_missing": (404, "BUNDLE_MISSING", "成果包文件已不存在。"),
+    "bundle_path_unsafe": (503, "INTERNAL_SECURITY_BOUNDARY", "成果包安全校验未通过。"),
     "path_not_allowed": (400, "PATH_NOT_ALLOWED", "成果路径不在受控目录中。"),
     "artifact_scan_failed": (500, "ARTIFACT_SCAN_FAILED", "成果目录扫描失败。"),
     "too_many_artifacts": (413, "TOO_MANY_ARTIFACTS", "本次成果文件数量超过上限。"),
     "record_store_damaged": (503, "RECORD_STORE_DAMAGED", "本地任务记录需要修复。"),
+    "record_store_locked": (503, "RECORD_STORE_LOCKED", "本地任务记录正忙，请稍后重试。"),
+    "sensitive_artifact_content": (400, "SENSITIVE_ARTIFACT_CONTENT", "成果文件包含不应保存的请求凭据。"),
     "reveal_failed": (500, "REVEAL_FAILED", "无法在访达中显示该成果。"),
 }
 
@@ -131,6 +144,23 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_binary(
+        self,
+        body: bytes,
+        *,
+        filename: str,
+        origin: str,
+    ) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Vary", "Origin")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _origin_allowed(self) -> bool:
         origin = self._origin()
         if origin in ALLOWED_ORIGINS:
@@ -148,6 +178,27 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _request_path(self) -> str:
         return urlsplit(self.path).path
 
+    def _not_found(self, *, head: bool = False) -> None:
+        payload = {"ok": False, "error": "NOT_FOUND", "message": "接口不存在。"}
+        if not head:
+            self._send_json(404, payload)
+            return
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self.send_response(404)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+    def do_HEAD(self) -> None:
+        self._not_found(head=True)
+
+    def do_PUT(self) -> None:
+        self._not_found()
+
+    def do_DELETE(self) -> None:
+        self._not_found()
+
     def _is_write_endpoint(self) -> bool:
         path = self._request_path()
         return bool(
@@ -156,6 +207,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             or TASK_PATH.fullmatch(path)
             or ARTIFACTS_PATH.fullmatch(path)
             or REVEAL_PATH.fullmatch(path)
+            or BUNDLE_TASK_PATH.fullmatch(path)
+            or BUNDLE_REVEAL_PATH.fullmatch(path)
         )
 
     def do_OPTIONS(self) -> None:
@@ -203,6 +256,68 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 origin=origin,
             )
             return
+        bundle_match = BUNDLE_PATH.fullmatch(parsed.path)
+        download_match = BUNDLE_DOWNLOAD_PATH.fullmatch(parsed.path)
+        if bundle_match or download_match:
+            if not self._origin_allowed():
+                return
+            if parsed.query:
+                self._send_json(
+                    400,
+                    {"ok": False, "error": "INVALID_REQUEST", "message": "请求参数无效。"},
+                    origin=self._origin(),
+                )
+                return
+            bundle_id = (bundle_match or download_match).group("bundle_id")
+            try:
+                if download_match:
+                    archive = project_records.bundle_archive(bundle_id)
+                    self._send_binary(
+                        archive,
+                        filename=f"{bundle_id}.zip",
+                        origin=cast(str, self._origin()),
+                    )
+                    return
+                bundle = project_records.read_bundle(bundle_id)
+                snapshot = project_records.read_records("competitor-insight")
+                primary_path = bundle.get("primaryReportPath")
+                markdown: str | None = None
+                previewable = False
+                markdown_candidate: str | None = None
+                if isinstance(primary_path, str):
+                    archive = project_records.bundle_archive(bundle_id)
+                    with zipfile.ZipFile(BytesIO(archive)) as package:
+                        manifest = json.loads(package.read("bundle-manifest.json"))
+                        primary = manifest.get("primaryReport") if isinstance(manifest, dict) else None
+                        if isinstance(primary, str):
+                            info = package.getinfo(primary)
+                            if info.file_size <= self.max_response_bytes:
+                                markdown_candidate = package.read(primary).decode("utf-8")
+                task = next((item for item in snapshot["tasks"] if item.get("id") == bundle.get("taskId")), None)
+                artifacts = [item for item in snapshot["artifacts"] if item.get("taskId") == bundle.get("taskId")]
+                if task is None:
+                    raise ValueError("record_store_damaged")
+                if markdown_candidate is not None:
+                    candidate_payload = {
+                        "ok": True, "bundle": bundle, "task": task,
+                        "artifacts": artifacts, "markdown": markdown_candidate,
+                        "previewable": True,
+                    }
+                    encoded = json.dumps(
+                        candidate_payload, ensure_ascii=False, separators=(",", ":"),
+                    ).encode("utf-8")
+                    if len(encoded) <= MAX_BUNDLE_DETAIL_RESPONSE_BYTES:
+                        markdown = markdown_candidate
+                        previewable = True
+                self._send_json(200, {"ok": True, "bundle": bundle, "task": task, "artifacts": artifacts, "markdown": markdown, "previewable": previewable}, origin=self._origin())
+                return
+            except ValueError as error:
+                status, response = _value_error_response(error)
+                self._send_json(status, response, origin=self._origin())
+                return
+            except (OSError, UnicodeError, json.JSONDecodeError, zipfile.BadZipFile, KeyError):
+                self._send_json(500, {"ok": False, "error": "INTERNAL_ERROR", "message": "本地任务服务处理失败。"}, origin=self._origin())
+                return
         if parsed.path != "/project-records":
             self._send_json(
                 404,
@@ -304,30 +419,34 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 payload,
             )
             return {"ok": True, **snapshot}
+        bundle_task_match = BUNDLE_TASK_PATH.fullmatch(path)
+        if bundle_task_match:
+            snapshot = project_records.finalize_bundle(bundle_task_match.group("task_id"), payload)
+            return {"ok": True, **snapshot}
         reveal_match = REVEAL_PATH.fullmatch(path)
         if reveal_match:
             self._exact_fields(payload, set())
             return project_records.reveal_artifact(reveal_match.group("artifact_id"))
+        bundle_reveal_match = BUNDLE_REVEAL_PATH.fullmatch(path)
+        if bundle_reveal_match:
+            self._exact_fields(payload, set())
+            return project_records.reveal_bundle(bundle_reveal_match.group("bundle_id"))
         if path == "/analyze-path":
             self._exact_fields(payload, {"path"})
             return service.analyze_path(self._text(payload, "path"))
-        if path == "/analyze-upload":
-            self._exact_fields(payload, {"filename", "contentBase64"})
-            filename = self._text(payload, "filename")
-            encoded = self._text(payload, "contentBase64")
-            try:
-                content = base64.b64decode(encoded.encode("ascii"), validate=True)
-            except (UnicodeError, ValueError, binascii.Error):
-                raise ValueError("invalid_base64") from None
-            return service.analyze_upload(filename, content)
+        if path == "/analyze-artifacts":
+            return service.analyze_artifacts(payload)
         if path == "/validate-section":
-            self._exact_fields(payload, {"evidenceId", "batch"})
+            if set(payload) not in ({"evidenceId", "outputDir", "batch"}, {"evidenceId", "batch"}):
+                raise ValueError("invalid_request_fields")
             return service.validate_batch(
                 self._text(payload, "evidenceId"),
                 payload["batch"],
+                self._text(payload, "outputDir") if "outputDir" in payload else None,
             )
         if path == "/assemble-report":
-            self._exact_fields(payload, {"evidenceId", "batches"})
+            if set(payload) not in ({"evidenceId", "outputDir", "batches"}, {"evidenceId", "batches"}):
+                raise ValueError("invalid_request_fields")
             batches = payload["batches"]
             if not isinstance(batches, list):
                 raise ValueError("invalid_batches")
@@ -336,11 +455,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 service.assemble(
                     self._text(payload, "evidenceId"),
                     cast(list[object], batches),
+                    self._text(payload, "outputDir") if "outputDir" in payload else None,
                 ),
             )
         raise ValueError("unknown_endpoint")
 
     def do_POST(self) -> None:
+        parsed = urlsplit(self.path)
+        if (
+            (BUNDLE_TASK_PATH.fullmatch(parsed.path) or BUNDLE_REVEAL_PATH.fullmatch(parsed.path))
+            and parsed.query
+        ):
+            if not self._origin_allowed():
+                return
+            self._send_json(
+                400,
+                {"ok": False, "error": "INVALID_REQUEST", "message": "请求参数无效。"},
+                origin=self._origin(),
+            )
+            return
         if not self._is_write_endpoint() or TASK_PATH.fullmatch(self._request_path()):
             self._send_json(
                 404,
@@ -355,17 +488,6 @@ class BridgeHandler(BaseHTTPRequestHandler):
         try:
             result = self._dispatch(payload)
         except ValueError as error:
-            if str(error).split(":", 1)[0] == "invalid_base64":
-                self._send_json(
-                    400,
-                    {
-                        "ok": False,
-                        "error": "INVALID_BASE64",
-                        "message": "contentBase64 不是有效的 Base64。",
-                    },
-                    origin=self._origin(),
-                )
-                return
             status, response = _value_error_response(error)
             self._send_json(status, response, origin=self._origin())
             return

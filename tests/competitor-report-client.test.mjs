@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { afterEach, test } from "node:test";
 
 import {
-  analyzeReportPath,
+  analyzeScrapeArtifacts,
   CompetitorReportClientError,
 } from "../app/lib/competitor-report-client.ts";
 
@@ -15,7 +15,14 @@ afterEach(() => {
 });
 
 function analyze(signal = new AbortController().signal) {
-  return analyzeReportPath("/controlled/douyin/account.xlsx", signal);
+  return analyzeScrapeArtifacts({
+    taskId: "competitor-20260801-a1",
+    platformId: "douyin",
+    inputKind: "account",
+    outputDir: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-a1",
+    dataPath: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-a1/结构化数据.json",
+    excelPath: null,
+  }, signal);
 }
 
 function evidenceReadyFixture() {
@@ -34,6 +41,12 @@ function evidenceReadyFixture() {
     ok: true,
     stage: "evidence_ready",
     evidenceId: "0123456789abcdef",
+    platformId: "douyin",
+    inputKind: "account",
+    reportType: "douyin-account",
+    outputDir: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-a1",
+    subjectName: "测试账号",
+    itemCount: 1,
     account: {
       nickname: "测试账号",
       followers: 100,
@@ -42,6 +55,8 @@ function evidenceReadyFixture() {
     completeness: { missingFields: [], warnings: [] },
     batchInputs: {
       strategy: {
+        batchId: "strategy",
+        allowedEvidenceIds: ["DY-E0001"],
         account: {
           nickname: "测试账号",
           followers: 100,
@@ -52,6 +67,8 @@ function evidenceReadyFixture() {
         evidence,
       },
       performance: {
+        batchId: "performance",
+        allowedEvidenceIds: ["DY-E0001"],
         availability: { comments: true, collects: true, shares: true },
         metrics: {
           workCount: 1,
@@ -75,6 +92,8 @@ function evidenceReadyFixture() {
         evidence,
       },
       execution: {
+        batchId: "execution",
+        allowedEvidenceIds: ["DY-E0001"],
         availability: { comments: true, collects: true, shares: true },
         rankings: {
           overall: ranking,
@@ -88,14 +107,46 @@ function evidenceReadyFixture() {
   };
 }
 
+function contentEvidenceReadyFixture(platformId = "douyin") {
+  const prefix = platformId === "xiaohongshu" ? "XHS" : "DY";
+  const inputKind = "content";
+  return {
+    ok: true, stage: "evidence_ready", evidenceId: "0123456789abcdef",
+    platformId, inputKind,
+    reportType: platformId === "xiaohongshu" ? "xhs-note" : "douyin-content",
+    outputDir: `/controlled/outputs/competitor-insight/${platformId}/competitor-20260801-a1`,
+    subjectName: "公开作者", itemCount: 1,
+    account: { nickname: "公开作者" }, completeness: {},
+    batchInputs: { content: {
+      batchId: "content", allowedEvidenceIds: [`${prefix}-E0001`],
+      author: { nickname: "公开作者" },
+      content: { title: "公开作品", body: "已抓取文本", transcript: "" },
+      evidence: [{ evidenceId: `${prefix}-E0001`, title: "公开作品", likes: 1, comments: 1, collects: 1, shares: 1, totalInteractions: 4, publishedAt: "2026-07-01" }],
+    }},
+  };
+}
+
 function assertClientCode(code) {
   return (error) =>
     error instanceof CompetitorReportClientError && error.code === code;
 }
 
+function withReportHealth(handler) {
+  return async (input, init) => {
+    if (String(input).endsWith("/health")) {
+      return Response.json({
+        ok: true,
+        stage: "healthy",
+        service: "competitor-insight-report",
+      });
+    }
+    return handler(input, init);
+  };
+}
+
 test("declared responses above 2 MB are canceled and rejected", async () => {
   let canceled = false;
-  globalThis.fetch = async () =>
+  globalThis.fetch = withReportHealth(async () =>
     new Response(
       new ReadableStream({
         cancel() {
@@ -103,16 +154,31 @@ test("declared responses above 2 MB are canceled and rejected", async () => {
         },
       }),
       { headers: { "content-length": String(MAX_RESPONSE_BYTES + 1) } },
-    );
+    ));
 
   await assert.rejects(analyze(), assertClientCode("BRIDGE_RESPONSE_TOO_LARGE"));
   assert.equal(canceled, true);
 });
 
+test("wrong report health identity fails closed before evidence is posted", async () => {
+  let businessPosts = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/health")) {
+      return Response.json({ok: true, stage: "healthy", service: "wrong-service"});
+    }
+    if (init?.method === "POST") businessPosts += 1;
+    return Response.json(evidenceReadyFixture());
+  };
+
+  await assert.rejects(analyze(), assertClientCode("BRIDGE_UNAVAILABLE"));
+  assert.equal(businessPosts, 0);
+});
+
 test("streamed responses above 2 MB are canceled and reject with a stable code", async () => {
   let canceled = false;
   let emitted = 0;
-  globalThis.fetch = async () =>
+  globalThis.fetch = withReportHealth(async () =>
     new Response(new ReadableStream({
       pull(controller) {
         emitted += 1;
@@ -121,7 +187,7 @@ test("streamed responses above 2 MB are canceled and reject with a stable code",
       cancel() {
         canceled = true;
       },
-    }));
+    })));
 
   await assert.rejects(analyze(), assertClientCode("BRIDGE_RESPONSE_TOO_LARGE"));
   assert.equal(canceled, true);
@@ -130,7 +196,7 @@ test("streamed responses above 2 MB are canceled and reject with a stable code",
 
 test("reader cancel rejection never replaces the stable size error", async () => {
   let canceled = false;
-  globalThis.fetch = async () =>
+  globalThis.fetch = withReportHealth(async () =>
     new Response(new ReadableStream({
       pull(controller) {
         controller.enqueue(new Uint8Array(MAX_RESPONSE_BYTES + 1));
@@ -139,7 +205,7 @@ test("reader cancel rejection never replaces the stable size error", async () =>
         canceled = true;
         throw new Error("sensitive cleanup failure");
       },
-    }));
+    })));
 
   await assert.rejects(analyze(), assertClientCode("BRIDGE_RESPONSE_TOO_LARGE"));
   assert.equal(canceled, true);
@@ -152,7 +218,7 @@ test("abort during a stalled response read cancels the reader and settles", asyn
     readStarted = resolve;
   });
   let canceled = false;
-  globalThis.fetch = async () =>
+  globalThis.fetch = withReportHealth(async () =>
     new Response(new ReadableStream({
       pull() {
         readStarted();
@@ -161,7 +227,7 @@ test("abort during a stalled response read cancels the reader and settles", asyn
       cancel() {
         canceled = true;
       },
-    }));
+    })));
 
   const request = analyze(controller.signal);
   await started;
@@ -193,7 +259,7 @@ test("malformed and unknown-error bridge responses fail closed", async () => {
   ];
 
   for (const response of responses) {
-    globalThis.fetch = async () => response;
+    globalThis.fetch = withReportHealth(async () => response);
     await assert.rejects(
       analyze(),
       (error) =>
@@ -204,28 +270,52 @@ test("malformed and unknown-error bridge responses fail closed", async () => {
 });
 
 test("a top-level extra field alone makes an otherwise valid response fail closed", async () => {
-  globalThis.fetch = async () => Response.json(evidenceReadyFixture());
+  globalThis.fetch = withReportHealth(async () => Response.json(evidenceReadyFixture()));
   await analyze();
 
-  globalThis.fetch = async () => Response.json({
+  globalThis.fetch = withReportHealth(async () => Response.json({
     ...evidenceReadyFixture(),
     extra: "must fail",
-  });
+  }));
   await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
 });
 
 test("ranking evidence IDs must belong to evidence from the same batch", async () => {
   const fixture = structuredClone(evidenceReadyFixture());
   fixture.batchInputs.strategy.rankings.overall.evidenceIds = ["DY-E9999"];
-  globalThis.fetch = async () => Response.json(fixture);
+  globalThis.fetch = withReportHealth(async () => Response.json(fixture));
 
   await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
+});
+
+test("accepts xiaohongshu account IDs and rejects a cross-platform prefix", async () => {
+  const fixture = evidenceReadyFixture();
+  fixture.platformId = "xiaohongshu";
+  fixture.reportType = "xhs-account";
+  for (const batch of Object.values(fixture.batchInputs)) {
+    batch.allowedEvidenceIds = ["XHS-E0001"];
+    batch.evidence[0].evidenceId = "XHS-E0001";
+    for (const ranking of Object.values(batch.rankings)) ranking.evidenceIds = ["XHS-E0001"];
+  }
+  globalThis.fetch = withReportHealth(async () => Response.json(fixture));
+  await analyze();
+  fixture.batchInputs.strategy.evidence[0].evidenceId = "DY-E0001";
+  globalThis.fetch = withReportHealth(async () => Response.json(fixture));
+  await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
+});
+
+test("accepts exact bounded content batches for douyin and xiaohongshu", async () => {
+  for (const platformId of ["douyin", "xiaohongshu"]) {
+    globalThis.fetch = withReportHealth(async () => Response.json(contentEvidenceReadyFixture(platformId)));
+    const accepted = await analyze();
+    assert.equal(accepted.batchInputs.content.batchId, "content");
+  }
 });
 
 test("every batch requires a nonempty available overall ranking", async () => {
   const fixture = structuredClone(evidenceReadyFixture());
   fixture.batchInputs.performance.rankings.overall.evidenceIds = [];
-  globalThis.fetch = async () => Response.json(fixture);
+  globalThis.fetch = withReportHealth(async () => Response.json(fixture));
 
   await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
 });
@@ -236,22 +326,22 @@ test("ranking availability follows the strict service contract", async () => {
     status: "unavailable",
     evidenceIds: [],
   };
-  globalThis.fetch = async () => Response.json(startupUnavailable);
+  globalThis.fetch = withReportHealth(async () => Response.json(startupUnavailable));
   await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
 
   const emptyAvailableCollects = structuredClone(evidenceReadyFixture());
   emptyAvailableCollects.batchInputs.performance.rankings.collect.evidenceIds = [];
-  globalThis.fetch = async () => Response.json(emptyAvailableCollects);
+  globalThis.fetch = withReportHealth(async () => Response.json(emptyAvailableCollects));
   await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
 
   const unavailableMismatch = structuredClone(evidenceReadyFixture());
   unavailableMismatch.batchInputs.execution.availability.comments = false;
-  globalThis.fetch = async () => Response.json(unavailableMismatch);
+  globalThis.fetch = withReportHealth(async () => Response.json(unavailableMismatch));
   await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
 });
 
 test("account context is exact bounded and strategy-only before model use", async () => {
-  globalThis.fetch = async () => Response.json(evidenceReadyFixture());
+  globalThis.fetch = withReportHealth(async () => Response.json(evidenceReadyFixture()));
   const accepted = await analyze();
   assert.deepEqual(accepted.batchInputs.strategy.account, {
     nickname: "测试账号",
@@ -267,23 +357,33 @@ test("account context is exact bounded and strategy-only before model use", asyn
   ]) {
     const fixture = structuredClone(evidenceReadyFixture());
     mutate(fixture);
-    globalThis.fetch = async () => Response.json(fixture);
+    globalThis.fetch = withReportHealth(async () => Response.json(fixture));
     await assert.rejects(analyze(), assertClientCode("INVALID_BRIDGE_RESPONSE"));
   }
 });
 
-test("report bridge endpoint is 8768 and matches the Python fixed port", async () => {
+test("scraper artifact bridge endpoint is 8768 and matches the Python fixed port", async () => {
   let requestedUrl = "";
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = withReportHealth(async (input) => {
     requestedUrl = String(input);
     return Response.json(evidenceReadyFixture());
-  };
+  });
   await analyze();
-  assert.equal(requestedUrl, "http://127.0.0.1:8768/analyze-path");
+  assert.equal(requestedUrl, "http://127.0.0.1:8768/analyze-artifacts");
 
   const pythonSource = await readFile(
     new URL("../agents/competitor-insight/runtime/bridge_server.py", import.meta.url),
     "utf8",
   );
   assert.match(pythonSource, /^PORT = 8768$/mu);
+});
+
+test("analyze artifacts supports the documented one-argument signal default", async () => {
+  globalThis.fetch = withReportHealth(async () => Response.json(evidenceReadyFixture()));
+  const result = await analyzeScrapeArtifacts({
+    taskId: "competitor-20260801-a1", platformId: "douyin", inputKind: "account",
+    outputDir: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-a1",
+    dataPath: "/controlled/outputs/competitor-insight/douyin/competitor-20260801-a1/结构化数据.json", excelPath: null,
+  });
+  assert.equal(result.stage, "evidence_ready");
 });

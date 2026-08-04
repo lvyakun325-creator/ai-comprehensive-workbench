@@ -7,7 +7,7 @@ import unittest
 RUNTIME_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RUNTIME_DIR))
 
-from section_validator import validate_section_batch
+from section_validator import validate_section_batch as _validate_section_batch
 
 
 def evidence_bundle() -> dict[str, object]:
@@ -118,6 +118,57 @@ def execution_batch() -> dict[str, object]:
     }
 
 
+def xhs_note_bundle() -> dict[str, object]:
+    bundle = evidence_bundle()
+    bundle["platformId"] = "xiaohongshu"
+    bundle["inputKind"] = "content"
+    bundle["reportType"] = "xhs-note"
+    bundle["account"] = {"nickname": "单篇笔记"}
+    bundle["subject"] = {"title": "笔记标题"}
+    bundle["items"][0]["evidenceId"] = "XHS-E0001"
+    bundle["items"] = [bundle["items"][0]]
+    bundle["rankings"] = {}
+    bundle["metrics"] = {}
+    return bundle
+
+
+def content_batch() -> dict[str, object]:
+    evidence_fields = {"evidenceIds": ["XHS-E0001"], "complianceNotes": ["不承诺疗效"]}
+    return {
+        "batchId": "content",
+        "claims": [
+            {"section": "content-overview", "statement": "标题呈现日常管理主题", "strength": "hypothesis", "rationale": "来自标题字段的有限观察", "verificationPlan": "补充同主题内容样本后核验", **evidence_fields},
+            {"section": "content-structure", "statement": "画面结构未提供，作为待验证假设", "strength": "hypothesis", "rationale": "证据包未提供画面字段", "verificationPlan": "补充画面记录后核验", **evidence_fields},
+            {"section": "interaction", "statement": "互动数据可作为后续观察信号", "strength": "hypothesis", "rationale": "仅来自单条内容数据", "verificationPlan": "结合更多内容核验", **evidence_fields},
+            {"section": "conversion", "statement": "转化链路未提供，作为待验证假设", "strength": "hypothesis", "rationale": "输入未提供商品或私域字段", "verificationPlan": "补充承接记录后核验", **evidence_fields},
+        ],
+        "topicDirections": [
+            {"title": f"复用角度{label}", "angle": "从日常管理场景切入", "strength": "hypothesis", "verificationPlan": "补充同类内容样本后核验", **evidence_fields}
+            for label in ("一", "二", "三")
+        ],
+        "filmingTemplates": [{"name": "单内容拍法", "hook": "用主题自然开场", "structure": ["主题", "日常提醒"], "strength": "hypothesis", "verificationPlan": "补充画面与口播记录后核验", **evidence_fields}],
+        "conversionItems": [{"action": "提供合规资料记录入口", "strength": "hypothesis", "verificationPlan": "补充承接记录后核验", **evidence_fields}],
+        "executionDays": [],
+    }
+
+
+_REQUEST_CONTEXTS = {
+    "strategy": {"batchId": "strategy", "allowedEvidenceIds": ["DY-E0001"]},
+    "performance": {"batchId": "performance", "allowedEvidenceIds": ["DY-E0001", "DY-E0002"]},
+    "execution": {"batchId": "execution", "allowedEvidenceIds": ["DY-E0001", "DY-E0002"]},
+    "content": {"batchId": "content", "allowedEvidenceIds": ["XHS-E0001"]},
+}
+
+
+def validate_section_batch(batch: dict[str, object], bundle: dict[str, object]) -> dict[str, object]:
+    batch_id = batch["batchId"]
+    context = _REQUEST_CONTEXTS.get(
+        batch_id,
+        {"batchId": batch_id, "allowedEvidenceIds": ["DY-E0001", "DY-E0002"]},
+    )
+    return _validate_section_batch(batch, bundle, context)
+
+
 def strategy_batch() -> dict[str, object]:
     return {
         "batchId": "strategy",
@@ -139,6 +190,87 @@ def strategy_batch() -> dict[str, object]:
 
 
 class SectionValidatorTests(unittest.TestCase):
+    def test_fails_closed_without_trusted_batch_context(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing_trusted_batch_context"):
+            _validate_section_batch(content_batch(), xhs_note_bundle())
+
+    def test_rejects_response_evidence_not_in_the_trusted_batch_allowlist(self) -> None:
+        bundle = xhs_note_bundle()
+        second = dict(bundle["items"][0])
+        second["evidenceId"] = "XHS-E0002"
+        bundle["items"].append(second)
+        batch = content_batch()
+        batch["claims"][0]["evidenceIds"] = ["XHS-E0002"]
+
+        with self.assertRaisesRegex(ValueError, "evidence_id_not_allowed"):
+            _validate_section_batch(
+                batch,
+                bundle,
+                {"batchId": "content", "allowedEvidenceIds": ["XHS-E0001"]},
+            )
+
+    def test_content_rejects_direct_uncaptured_visual_comment_and_private_domain_claims(self) -> None:
+        batch = content_batch()
+        batch["claims"][1] = {
+            "section": "content-structure",
+            "statement": "画面展示医生讲解并引导私域咨询",
+            "strength": "direct",
+            "evidenceIds": ["XHS-E0001"],
+            "rationale": "来自画面和评论",
+        }
+
+        with self.assertRaisesRegex(ValueError, "content_claim_requires_hypothesis"):
+            validate_section_batch(batch, xhs_note_bundle())
+
+    def test_content_allows_synonym_recommendation_only_with_structured_hypothesis(self) -> None:
+        batch = content_batch()
+        batch["topicDirections"][0]["angle"] = "画面展示医生讲解并引导私域咨询"
+
+        normalized = validate_section_batch(batch, xhs_note_bundle())
+
+        self.assertEqual(normalized["topicDirections"][0]["strength"], "hypothesis")
+        self.assertIn("核验", normalized["topicDirections"][0]["verificationPlan"])
+
+    def test_content_rejects_direct_synonym_claim_without_captured_capability(self) -> None:
+        batch = content_batch()
+        batch["claims"][1] = {
+            "section": "content-structure",
+            "statement": "视频由医生出镜讲解，评论称购买后有效",
+            "strength": "direct",
+            "evidenceIds": ["XHS-E0001"],
+            "rationale": "作者在视频中加微信承接",
+        }
+
+        with self.assertRaisesRegex(ValueError, "content_claim_requires_hypothesis"):
+            _validate_section_batch(batch, xhs_note_bundle(), _REQUEST_CONTEXTS["content"])
+
+    def test_content_rejects_text_only_hypothesis_recommendation_without_structured_fields(self) -> None:
+        batch = content_batch()
+        batch["topicDirections"][0]["angle"] = "待验证假设：视频由医生出镜，评论称购买有效，加微信咨询"
+        batch["topicDirections"][0].pop("strength")
+        batch["topicDirections"][0].pop("verificationPlan")
+
+        with self.assertRaisesRegex(ValueError, "missing_topic_direction_keys"):
+            _validate_section_batch(batch, xhs_note_bundle(), _REQUEST_CONTEXTS["content"])
+
+    def test_content_rejects_overlong_structured_verification_plan(self) -> None:
+        batch = content_batch()
+        batch["filmingTemplates"][0]["verificationPlan"] = "核验" * 501
+
+        with self.assertRaisesRegex(ValueError, "verification_plan_too_long"):
+            _validate_section_batch(batch, xhs_note_bundle(), _REQUEST_CONTEXTS["content"])
+
+    def test_content_contract_accepts_xhs_evidence_and_rejects_account_plan_fields(self) -> None:
+        self.assertEqual(
+            validate_section_batch(content_batch(), xhs_note_bundle())["batchId"],
+            "content",
+        )
+        invalid = content_batch()
+        invalid["executionDays"] = [
+            {"day": 1, "action": "不应出现", "evidenceIds": ["XHS-E0001"], "complianceNotes": ["不承诺疗效"]}
+        ]
+        with self.assertRaisesRegex(ValueError, "content_execution_days_must_be_empty"):
+            validate_section_batch(invalid, xhs_note_bundle())
     def test_rejects_unknown_evidence_id(self) -> None:
         batch = {
             "batchId": "strategy",
@@ -157,7 +289,7 @@ class SectionValidatorTests(unittest.TestCase):
             "executionDays": [],
         }
 
-        with self.assertRaisesRegex(ValueError, "unknown_evidence_id"):
+        with self.assertRaisesRegex(ValueError, "unknown.*evidence_id"):
             validate_section_batch(batch, evidence_bundle())
 
     def test_requires_explanation_and_verification_for_weak_or_hypothesis_claims(self) -> None:

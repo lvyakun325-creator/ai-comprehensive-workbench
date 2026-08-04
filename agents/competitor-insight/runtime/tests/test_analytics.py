@@ -81,6 +81,16 @@ class AnalyticsTests(unittest.TestCase):
             self.assertEqual(rankings[name]["status"], "unavailable")
             self.assertEqual(rankings[name]["rows"], [])
 
+    def test_content_sources_have_no_account_rankings(self) -> None:
+        """Would fail if a single content source accidentally receives account-wide rankings."""
+        rankings = rank_works(
+            self._works(1),
+            {"comments": True, "collects": True, "shares": True},
+            account=False,
+        )
+
+        self.assertEqual(rankings, {})
+
     def test_calculates_summary_metrics_and_returns_none_for_zero_denominator(self) -> None:
         works = self._works(3)
         rankings = rank_works(works, {"comments": True, "collects": True, "shares": True})
